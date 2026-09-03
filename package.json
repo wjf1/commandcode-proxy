@@ -1,0 +1,44 @@
+{
+  "name": "commandcode-proxy-v4",
+  "version": "4.0.0",
+  "description": "Fully-compatible OpenAI Chat Completions & Anthropic Messages proxy for Command Code AI — hardened translation, retries, idle timeouts, secure local dashboard",
+  "main": "dist/index.js",
+  "type": "module",
+  "engines": {
+    "node": ">=18.17"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "build:exe": "npm run build && esbuild dist/index.js --bundle --platform=node --format=cjs --outfile=dist/bundle.cjs --external:fsevents",
+    "build:win": "npm run build:exe && pkg dist/bundle.cjs --target node18-win-x64 --output dist/commandcode-proxy-v4.exe --compress GZip",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "pkg": {
+    "assets": [
+      "models.json"
+    ],
+    "outputPath": "dist"
+  },
+  "keywords": [
+    "commandcode",
+    "proxy",
+    "openai",
+    "anthropic",
+    "api-gateway"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "esbuild": "^0.21.0",
+    "pkg": "^5.8.1",
+    "tsx": "^4.11.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  },
+  "dependencies": {
+    "fastify": "^4.29.1"
+  }
+}

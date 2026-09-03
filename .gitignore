@@ -1,0 +1,16 @@
+node_modules/
+dist/
+build/
+.env
+config.json
+models.json
+auth.json
+*.log
+.qoder/
+
+pricing.json
+logs/
+*.bak
+*.py
+*.mjs
+*.png
