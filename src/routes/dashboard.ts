@@ -290,7 +290,7 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
 
 <section id="content-models" class="space-y-4 hidden">
   <div class="flex items-center justify-between">
-    <div><h2 class="text-lg font-bold text-white">上游实时模型</h2><p class="text-xs text-slate-400">官方定价目录 · 价格单位：美元 / 每 1M tokens</p></div>
+    <div><h2 class="text-lg font-bold text-white">上游实时模型</h2><p class="text-xs text-slate-400">官方定价目录 · 价格单位：人民币（元）/ 每 1M tokens</p></div>
     <button onclick="loadModels(true)" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs rounded-lg flex items-center gap-1.5"><i class="fa-solid fa-rotate"></i> 获取最新模型</button>
   </div>
   <div id="modelsList" class="grid grid-cols-1 md:grid-cols-3 gap-3"></div>
@@ -406,8 +406,8 @@ async function loadAccounts() {
           '</h4><p class="text-xs text-slate-400">' + esc(acc.userName ? '@'+acc.userName : (acc.email || 'API Key')) + '</p></div>' +
         '</div>' +
         '<div class="flex items-center space-x-2">' +
-          (!acc.isActive ? '<button onclick="setActiveAcc(\'' + esc(acc.id) + '\')" class="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-indigo-400 rounded-lg border border-slate-700">设为当前</button>' : '') +
-          '<button onclick="deleteAcc(\'' + esc(acc.id) + '\')" class="p-1.5 text-slate-500 hover:text-rose-400 rounded-lg hover:bg-rose-500/10 transition"><i class="fa-solid fa-trash-can text-xs"></i></button>' +
+          (!acc.isActive ? '<button onclick="setActiveAcc(\\'' + esc(acc.id) + '\\')" class="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-indigo-400 rounded-lg border border-slate-700">设为当前</button>' : '') +
+          '<button onclick="deleteAcc(\\'' + esc(acc.id) + '\\')" class="p-1.5 text-slate-500 hover:text-rose-400 rounded-lg hover:bg-rose-500/10 transition"><i class="fa-solid fa-trash-can text-xs"></i></button>' +
         '</div>' +
       '</div>' +
       '<div class="pt-2 border-t border-slate-800/80 flex items-center justify-between text-xs text-slate-400">' +
@@ -464,7 +464,7 @@ function renderUsageForAccount(accId) {
   }
 }
 
-function fmtPrice(v){ if(v===undefined||v===null) return '--'; if(v===0) return 'FREE'; return '$' + v; }
+function fmtPrice(v){ if(v===undefined||v===null) return '--'; if(v===0) return 'FREE'; var c=v*6.72; c=c>=100?Math.round(c):Math.round(c*100)/100; return '¥' + c; }
 function fmtCtx(v){ if(!v) return '--'; if(v>=1000000){ var x=(v/1000000); return (x%1===0?x:x.toFixed(1)) + 'M'; } if(v>=1000){ var k=v/1000; return (k%1===0?k:k.toFixed(1)) + 'K'; } return String(v); }
 async function loadModels(force) {
   if (force) { await fetch('/v1/models/refresh', { method:'POST' }).catch(()=>{}); }
