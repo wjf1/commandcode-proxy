@@ -1,3 +1,15 @@
+// =============================================================================
+// CommandCode Proxy v4 —— 服务入口（bootstrap）
+// -----------------------------------------------------------------------------
+// 启动流程：
+//   1. 注册全局未捕获异常/拒绝处理器（记录日志，不让进程崩溃）
+//   2. 加载配置（config.json / 环境变量）
+//   3. 注册管理员仪表盘、OpenAI、Anthropic、models 四条路由
+//   4. 可选地挂载 PROXY_API_KEY 共享密钥鉴权钩子
+//   5. 后台拉取模型目录（尽力而为，不阻塞启动）
+//   6. 若配置为 auto-quota 轮换模式，启动 30 分钟一次的额度轮换调度器
+//   7. 监听端口；默认自动打开浏览器显示仪表盘
+// =============================================================================
 import Fastify from 'fastify';
 import { loadConfig, openBrowser, checkAndRotateAccountsOnQuota, getActiveApiKey } from './utils/config.js';
 import { fetchUpstreamModels } from './utils/models.js';
@@ -22,11 +34,11 @@ const fastify = Fastify({
   trustProxy: true,
 });
 
-const QUOTA_CHECK_INTERVAL_MS = 30 * 60 * 1000; // every 30 minutes
+const QUOTA_CHECK_INTERVAL_MS = 30 * 60 * 1000; // 每 30 分钟检查一次额度
 
 const start = async () => {
   try {
-    // Optional shared-secret auth on /v1/* (PROXY_API_KEY env).
+    // 可选的共享密钥鉴权（PROXY_API_KEY 环境变量），作用于 /v1/*。
     verifyProxyAuth(fastify);
 
     await fastify.register(dashboardRoutes);
@@ -47,7 +59,7 @@ const start = async () => {
       });
     }
 
-    // v3 bug fix: auto-quota rotation was dead code — now actually scheduled.
+    // v3 bug 修复：auto-quota 轮换此前是死代码 —— 现在真正被调度执行。
     if (config.rotationMode === 'auto-quota' && config.accounts.length > 1) {
       setInterval(() => {
         checkAndRotateAccountsOnQuota().catch(err => {

@@ -1,4 +1,18 @@
-// ─── Gateway config ───────────────────────────────────────────────────────────
+// =============================================================================
+// 类型定义：三大协议的契约
+// -----------------------------------------------------------------------------
+// 本文件集中定义了三套互相转换的数据结构：
+//   1. Gateway 配置（GatewayConfig 及其文件形态 GatewayConfigFile）
+//   2. OpenAI Chat Completions API（OpenAIChatRequest / OpenAIMessage / ...）
+//   3. Anthropic Messages API（AnthropicRequest / AnthropicMessage / ...）
+//   4. CommandCode 私有 wire 协议（CCRequestBody / CCMessage / CCEvent / ...）
+//      —— 逆向自官方 CLI，是翻译引擎的"归一化中间语"。
+//   5. 模型元数据（ModelItem / ModelPricing / ModelCaps / ModelDeal）
+//   6. 日志条目（LogEntry）
+// 这些接口是翻译正确性的根基，改动需同步更新 adapter 与路由。
+// =============================================================================
+
+// ─── 网关配置 ───────────────────────────────────────────────────────────────
 
 export interface AccountInfo {
   id: string;

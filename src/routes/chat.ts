@@ -1,3 +1,15 @@
+// =============================================================================
+// POST /v1/chat/completions —— OpenAI 兼容路由
+// -----------------------------------------------------------------------------
+// 职责：
+//   - 校验网关状态、请求体、api key 是否就绪
+//   - 用 CommandCodeAdapter 把 OpenAI 请求翻译为 CC wire
+//   - 通过 sendToCC 发送上游，并把返回的错误/SSE 流按 OpenAI 规范透传
+//   - 流式：转成 OpenAI chunk（role 起始 delta、内容增量、工具调用增量、收尾）
+//   - 非流式：汇总全部事件为单个 chat.completion 响应
+//   - 长连接加固：socket 禁用超时 + keepalive；客户端断开则取消上游
+//   - 可选共享密钥鉴权（PROXY_API_KEY）
+// =============================================================================
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { createInterface } from 'readline';
 import { CommandCodeAdapter } from '../adapters/commandcode/adapter.js';
@@ -23,7 +35,7 @@ function logCompletion(inputTokens: number, outputTokens: number, startTime: num
   logger.info(`Input Tokens ${fmtNum(inputTokens)} | Output Tokens ${fmtNum(outputTokens)} | Timing ${timing}s | Model ${model} | Status COMPLETED`);
 }
 
-/** Parse one SSE line into a CCEvent, or null for blanks/[DONE]. */
+/** 解析一行 SSE 为一个 CCEvent；空行或 [DONE] 返回 null。 */
 function parseEventLine(line: string): CCEvent | null {
   const trimmed = line.trim();
   if (!trimmed) return null;
@@ -37,9 +49,9 @@ function parseEventLine(line: string): CCEvent | null {
 }
 
 /**
- * Optional shared-secret auth. Set PROXY_API_KEY env and every /v1/* call must
- * present it as `Authorization: Bearer <key>` or `x-api-key`. Unset = open
- * local access (the loopback bind keeps this safe by default).
+ * 可选的共享密钥鉴权。设置 PROXY_API_KEY 环境变量后，每个 /v1/* 调用都必须
+ * 以 `Authorization: Bearer <key>` 或 `x-api-key` 携带它。未设置 = 开放本机访问
+ * （默认回环绑定已保证安全）。
  */
 export function verifyProxyAuth(fastify: FastifyInstance): void {
   const requiredKey = process.env.PROXY_API_KEY?.trim();
@@ -82,7 +94,7 @@ export async function chatRoutes(fastify: FastifyInstance) {
       });
     }
 
-    // Long-haul socket hardening for multi-minute reasoning sessions.
+    // 面向长会话（多分钟推理）的 socket 加固。
     req.raw.setTimeout(0);
     if (req.raw.socket) {
       req.raw.socket.setTimeout(0);
@@ -93,7 +105,7 @@ export async function chatRoutes(fastify: FastifyInstance) {
     const startTime = Date.now();
     const abortController = new AbortController();
 
-    // Cancel upstream only if the client leaves before we finish writing.
+    // 仅当客户端在我们写完之前离开时才取消上游。
     const onClientClose = () => {
       if (!reply.raw.writableEnded) abortController.abort();
     };
@@ -111,7 +123,7 @@ export async function chatRoutes(fastify: FastifyInstance) {
           apiKey,
           abortSignal: abortController.signal,
           onRetry: async () => {
-            // A retry in auto-quota mode may land on a fresh account.
+            // auto-quota 模式下重试可能落到一个新账号上。
             if (await checkAndRotateAccountsOnQuota()) {
               apiKey = getActiveApiKey();
             }
@@ -141,7 +153,7 @@ export async function chatRoutes(fastify: FastifyInstance) {
         const state = adapter.createStreamEncoderState(modelName);
         for (const c of adapter.encodeOpenAIChunk({ type: 'start' }, state)) reply.raw.write(c);
 
-        // SSE keep-alive comment every 15s — prevents CDN/proxy idle drops.
+        // 每 15s 发一条 SSE 注释行 —— 防止 CDN/代理的空闲断开。
         const pingInterval = setInterval(() => {
           if (!reply.raw.writableEnded) reply.raw.write(':\n\n');
         }, 15000);
@@ -192,7 +204,7 @@ export async function chatRoutes(fastify: FastifyInstance) {
         return reply;
       }
 
-      // ── Non-streaming ──
+      // ── 非流式 ──
       let fullText = '';
       let reasoningContent = '';
       let outputTokens = 0;

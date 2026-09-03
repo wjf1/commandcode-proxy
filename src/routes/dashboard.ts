@@ -1,3 +1,14 @@
+// =============================================================================
+// 管理仪表盘（SPA + /api/* 后端接口）
+// -----------------------------------------------------------------------------
+// - 提供中文管理界面：概览、账号与鉴权、用量与额度、模型、实时日志五个标签页
+// - /api/* 为管理员接口：状态、网关开关、日志、账号增删改、OAuth/手动登录、
+//   用量聚合等
+// - 安全要点：
+//   * CORS 只对公共 API 表面（/v1/*、/health）开放；/api/* 不发 CORS 头，
+//     防止浏览器里的随机网页驱动管理操作
+//   * esc() 对所有动态渲染进 SPA 的 HTML 做转义，防止 XSS
+// =============================================================================
 import { FastifyInstance } from 'fastify';
 import { logger } from '../utils/logger.js';
 import {
@@ -16,7 +27,7 @@ import { getCachedModels } from '../utils/models.js';
 
 const startTimestamp = Date.now();
 
-/** Escape HTML — every dynamic value rendered into the SPA must pass through this. */
+/** HTML 转义 —— 所有动态渲染进 SPA 的值都必须经过它。 */
 function esc(s: unknown): string {
   return String(s ?? '')
     .replace(/&/g, '&amp;')
@@ -27,8 +38,8 @@ function esc(s: unknown): string {
 }
 
 export async function dashboardRoutes(fastify: FastifyInstance) {
-  // CORS ONLY for the public API surface (/v1/*). Admin /api/* routes get no
-  // CORS headers, so a random webpage in your browser cannot drive them.
+  // 仅对公共 API 表面（/v1/*）开放 CORS。管理 /api/* 路由不发 CORS 头，
+  // 这样浏览器里的随机网页就无法驱动它们。
   fastify.addHook('onRequest', async (req, reply) => {
     if (req.url.startsWith('/v1/') || req.url === '/health') {
       reply.header('Access-Control-Allow-Origin', '*');
@@ -176,7 +187,7 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
     return { accountsUsage: results };
   });
 
-  // ─── Dashboard SPA ──────────────────────────────────────────────────────────
+  // ─── 仪表盘 SPA ────────────────────────────────────────────────────────────
 
   fastify.get('/', async (_req, reply) => {
     reply.header('Content-Type', 'text/html');

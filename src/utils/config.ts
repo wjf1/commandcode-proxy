@@ -1,3 +1,11 @@
+// =============================================================================
+// 配置加载 / 账号管理 / 额度轮换 / 浏览器 OAuth 登录
+// -----------------------------------------------------------------------------
+// - 配置优先环境变量 > config.json > 默认值
+// - 安全默认：仅绑定 127.0.0.1，避免局域网暴露
+// - 多账号：支持手动切换、浏览器 OAuth 登录、按 5 小时额度自动轮换（≥90% 切换）
+// - openBrowser 针对 Windows cmd 的 "&" 分隔符问题做了特殊处理
+// =============================================================================
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -29,6 +37,7 @@ const DEFAULTS = {
   maxRetries: 2,
 };
 
+/** 从环境变量或用户级 auth.json 加载默认 API Key（作为无账号配置时的兜底）。 */
 export function loadDefaultApiKeyFromEnvOrSystem(): string {
   if (process.env.COMMANDCODE_API_KEY) {
     return process.env.COMMANDCODE_API_KEY.trim();
@@ -59,7 +68,7 @@ export function loadConfig(): GatewayConfig {
 
   const envPort = process.env.PORT ? parseInt(process.env.PORT, 10) : undefined;
   const port = envPort || fileConfig.port || DEFAULTS.port;
-  // Security default: bind loopback only. Opt in to LAN exposure explicitly.
+  // 安全默认：仅绑定回环地址。显式设置 HOST 才会暴露到局域网。
   const host = process.env.HOST || fileConfig.host || DEFAULTS.host;
 
   const ccApiBase = process.env.COMMANDCODE_API_BASE || fileConfig.upstream?.apiBase || DEFAULTS.apiBase;
@@ -103,7 +112,7 @@ export function loadConfig(): GatewayConfig {
   };
 }
 
-/** Write config atomically (temp file + rename) so a crash never truncates it. */
+/** 原子化写入 config.json（临时文件 + rename），避免崩溃时截断配置。 */
 export function saveConfigFile(updates: Partial<GatewayConfigFile>): void {
   try {
     let current: Partial<GatewayConfigFile> = {};
@@ -155,7 +164,7 @@ function syncEnvFile(accounts: AccountInfo[], activeApiKey: string): void {
   }
 }
 
-// ─── Gateway engine state ─────────────────────────────────────────────────────
+// ─── 网关引擎开关状态 ─────────────────────────────────────────────────────────
 
 export function getGatewayRunning(): boolean {
   return (globalThis as any).__GATEWAY_RUNNING__ !== false;
@@ -165,7 +174,7 @@ export function setGatewayRunning(running: boolean): void {
   (globalThis as any).__GATEWAY_RUNNING__ = running;
 }
 
-// ─── Account management ───────────────────────────────────────────────────────
+// ─── 账号管理 ────────────────────────────────────────────────────────────────
 
 export function getActiveAccount(): AccountInfo | undefined {
   const config = loadConfig();
@@ -243,10 +252,14 @@ export function logoutAccount(accountId: string): boolean {
   return true;
 }
 
-// ─── Quota rotation (actually scheduled from index.ts) ────────────────────────
+// ─── 额度轮换（在 index.ts 中实际被调度）───────────────────────────────────────
 
 const QUOTA_THRESHOLD = 0.9;
 
+/**
+ * 检查当前账号的 5 小时额度使用率，若 ≥90% 则自动切换到使用率较低的备选账号。
+ * 仅当 rotationMode === 'auto-quota' 且存在多个账号时生效。返回是否发生了切换。
+ */
 export async function checkAndRotateAccountsOnQuota(): Promise<boolean> {
   const config = loadConfig();
   if (config.rotationMode !== 'auto-quota' || config.accounts.length <= 1) {
@@ -289,7 +302,7 @@ export async function checkAndRotateAccountsOnQuota(): Promise<boolean> {
   return false;
 }
 
-// ─── Upstream usage stats ─────────────────────────────────────────────────────
+// ─── 上游用量统计（whoami / credits / subscriptions / usage summary）──────────
 
 async function fetchJson(url: string, headers: Record<string, string>): Promise<any | null> {
   try {
@@ -301,6 +314,10 @@ async function fetchJson(url: string, headers: Record<string, string>): Promise<
   return null;
 }
 
+/**
+ * 并行拉取账号的 whoami、额度（credits）、订阅（subscriptions）与用量汇总。
+ * 用于仪表盘展示与额度轮换判断。
+ */
 export async function fetchLiveUsageStats(apiKey: string, ccApiBase: string, ccVersion: string): Promise<any> {
   const headers = {
     Authorization: `Bearer ${apiKey}`,
@@ -322,12 +339,12 @@ export async function fetchLiveUsageStats(apiKey: string, ccApiBase: string, ccV
   return { whoami, credits, subscription, summary };
 }
 
-// ─── Browser opening (Windows-safe) ───────────────────────────────────────────
+// ─── 打开浏览器（Windows 安全）────────────────────────────────────────────────
 
 /**
- * Windows gotcha: `exec("start <url>")` breaks on URLs containing "&" because
- * cmd.exe treats it as a command separator. Quoting the URL and giving start an
- * empty title argument (`start "" "<url>"`) makes it safe on every platform.
+ * Windows 陷阱：`exec("start <url>")` 在 URL 含 "&" 时会失败，因为 cmd.exe
+ * 把 "&" 当作命令分隔符。给 URL 加引号、并为 start 提供空标题参数
+ * （`start "" "<url>"`），即可在任一平台安全执行。
  */
 export function openBrowser(url: string): void {
   const quoted = `"${url.replace(/"/g, '%22')}"`;
@@ -342,8 +359,13 @@ export function openBrowser(url: string): void {
   });
 }
 
-// ─── Browser OAuth login flow ─────────────────────────────────────────────────
+// ─── 浏览器 OAuth 登录流程 ────────────────────────────────────────────────────
 
+/**
+ * 启动本地 HTTP 回调服务（默认端口 5959），打开 commandcode.ai 的 OAuth 授权页，
+ * 等待用户完成授权后从回调参数中提取 token/apiKey，并注册为新账号。
+ * 若 3 分钟内未完成授权则超时拒绝。
+ */
 export function startBrowserLoginFlow(port = 5959): Promise<AccountInfo> {
   const stateToken = crypto.randomUUID();
   const callbackUrl = `http://localhost:${port}/callback`;

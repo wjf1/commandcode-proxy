@@ -1,3 +1,14 @@
+// =============================================================================
+// POST /v1/messages —— Anthropic Messages 兼容路由
+// -----------------------------------------------------------------------------
+// 职责：
+//   - 用 CommandCodeAdapter 把 Anthropic 请求（含 thinking/tool_use/tool_result、
+//     base64 图片、system 块数组）翻译为 CC wire
+//   - 流式：输出标准 Anthropic 事件序列 message_start → content_block_start/delta/
+//     stop → signature_delta → message_delta → message_stop
+//   - 非流式：汇聚事件为单个 message 响应
+//   - 与 chat.ts 相同的服务加固：socket keepalive、客户端断开取消上游
+// =============================================================================
 import { FastifyInstance } from 'fastify';
 import { createInterface } from 'readline';
 import crypto from 'node:crypto';
@@ -120,8 +131,8 @@ export async function messagesRoutes(fastify: FastifyInstance) {
         }, 15000);
         const cleanupPings = () => clearInterval(pingInterval);
 
-        // Block bookkeeping: index 0 reserved for text, 1 for thinking,
-        // 2+ for tool_use blocks — opened lazily as events arrive.
+        // 块索引簿记：索引 0 预留给文本、1 给 thinking，2+ 给 tool_use 块 ——
+        // 随事件到达而懒创建。
         let textBlockOpen = false;
         let thinkingBlockOpen = false;
         let toolBlockIndex = 2;
@@ -147,7 +158,7 @@ export async function messagesRoutes(fastify: FastifyInstance) {
         const closeThinkingBlock = () => {
           if (!thinkingBlockOpen) return;
           thinkingBlockOpen = false;
-          // Strict Anthropic clients validate a signature before block close.
+          // 严格的 Anthropic 客户端会在块关闭前校验 signature。
           reply.raw.write(
             sse('content_block_delta', {
               type: 'content_block_delta',
@@ -280,7 +291,7 @@ export async function messagesRoutes(fastify: FastifyInstance) {
         return reply;
       }
 
-      // ── Non-streaming ──
+      // ── 非流式 ──
       const events: CCEvent[] = [];
       const rl = createInterface({ input: upstreamStream, crlfDelay: Infinity });
       for await (const line of rl) {

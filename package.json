@@ -1,11 +1,23 @@
 {
   "name": "commandcode-proxy-v4",
   "version": "4.0.0",
-  "description": "Fully-compatible OpenAI Chat Completions & Anthropic Messages proxy for Command Code AI — hardened translation, retries, idle timeouts, secure local dashboard",
+  "description": "Local OpenAI Chat Completions & Anthropic Messages compatible proxy for Command Code AI. Chinese dashboard, hardened translation, retries, idle timeouts.",
   "main": "dist/index.js",
   "type": "module",
   "engines": {
     "node": ">=18.17"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wjf1/commandcode-proxy.git"
+  },
+  "homepage": "https://github.com/wjf1/commandcode-proxy",
+  "bugs": {
+    "url": "https://github.com/wjf1/commandcode-proxy/issues"
+  },
+  "author": {
+    "name": "wjf1",
+    "url": "https://github.com/wjf1"
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",

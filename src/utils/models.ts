@@ -1,3 +1,13 @@
+// =============================================================================
+// 模型目录：同步上游 / 官方定价富化 / 模糊模型名解析
+// -----------------------------------------------------------------------------
+// - getCachedModels()          读取内存中的模型列表（来自 models.json 缓存）
+// - fetchUpstreamModels()      从上游 /provider/v1/models 拉取实时模型，
+//                              并配以官方 commandcode.ai 定价页富化
+//                              （pricing/context/caps/deal/go-plan），落盘缓存
+// - resolveModelName()         把客户端请求的模型名模糊解析到已知模型
+// - fetchPricingCatalog()      抓取官方定价页（TTL 6h），从 Next.js RSC payload 提取
+// =============================================================================
 import fs from 'fs';
 import path from 'path';
 import { loadConfig } from './config.js';
@@ -15,9 +25,9 @@ function getProjectRootDir(): string {
 
 const MODELS_FILE_PATH = path.join(getProjectRootDir(), 'models.json');
 const PRICING_FILE_PATH = path.join(getProjectRootDir(), 'pricing.json');
-/** Official pricing page. Contains CONTEXT / INPUT / OUTPUT / CACHE READ / CACHE WRITE / Caps / Deals. */
+/** 官方定价页。包含 CONTEXT / INPUT / OUTPUT / CACHE READ / CACHE WRITE / Caps / Deals。 */
 const PRICING_PLAN_URL = 'https://commandcode.ai/docs/plans/go';
-/** How long a fetched pricing catalog is considered fresh (ms). */
+/** 一次抓取的定价目录视为"新鲜"的有效期（毫秒）：6 小时。 */
 const PRICING_TTL_MS = 6 * 60 * 60 * 1000;
 
 const DEFAULT_MODELS: ModelItem[] = [
@@ -63,7 +73,7 @@ export function getCachedModels(): ModelItem[] {
   return cachedModels;
 }
 
-// ── Official pricing catalog (commandcode.ai) ────────────────────────────────
+// ── 官方定价目录（commandcode.ai）────────────────────────────────────────────
 
 interface PricingCatalogEntry {
   id: string;
@@ -81,7 +91,7 @@ function normalizeId(s: string): string {
   return String(s || '').toLowerCase().trim();
 }
 
-/** Extract the model array from the Next.js RSC payload embedded in the pricing page HTML. */
+/** 从嵌在定价页 HTML 的 Next.js RSC payload 中提取模型数组。 */
 function parsePricingFromHtml(html: string): PricingCatalogEntry[] {
   const marker = '{\"rows\":[';
   const i = html.indexOf(marker);
@@ -173,9 +183,9 @@ function savePricingCache(fetchedAt: number, entries: PricingCatalogEntry[]): vo
 }
 
 /**
- * Fetch the official Command Code pricing catalog (context / input / output /
- * cache-read / cache-write / caps / deals). Cached to pricing.json with a TTL;
- * pass force=true to bypass the cache (used by the dashboard "Fetch Live Models").
+ * 抓取官方 Command Code 定价目录（context / input / output / cache-read /
+ * cache-write / caps / deals）。缓存到 pricing.json 并附带 TTL；
+ * 传 force=true 跳过缓存（供仪表盘"获取最新模型"按钮使用）。
  */
 export async function fetchPricingCatalog(force = false): Promise<Map<string, PricingCatalogEntry>> {
   const cache = loadCachedPricing();
@@ -208,7 +218,7 @@ export async function fetchPricingCatalog(force = false): Promise<Map<string, Pr
   }
 }
 
-/** Merge official catalog details (pricing/context/caps/deal/go-plan) into the model list. */
+/** 把官方目录细节（定价/上下文/caps/deal/go-plan）合并进模型列表。 */
 function mergePricingIntoModels(models: ModelItem[], pricingMap: Map<string, PricingCatalogEntry>): ModelItem[] {
   const byName = new Map<string, PricingCatalogEntry>();
   const byNorm = new Map<string, PricingCatalogEntry>();
@@ -287,13 +297,13 @@ export async function fetchUpstreamModels(apiKey: string, ccVersion: string, ref
     logger.warn(`[MODELS] Upstream model fetch failed: ${err.message}`);
   }
 
-  // ── Enrich with the official Command Code pricing catalog (best effort) ──
+  // ── 用官方定价目录对模型做富化（尽力而为）──────────────
   if (freshModels && freshModels.length > 0) {
     const pricingMap = await fetchPricingCatalog(refreshPricing);
     if (pricingMap.size > 0) {
       const merged = mergePricingIntoModels(freshModels, pricingMap);
-      // Append official Go-plan models that the provider API did not list, so the
-      // dashboard shows the full Go catalog with pricing/caps/deals.
+      // 追加 provider API 未列出的官方 Go 套餐模型，使仪表盘能展示完整
+      // Go 目录（含定价/caps/deals）。
       const known = new Set(merged.map(m => normalizeId(m.id)));
       const knownBare = new Set(merged.map(m => normalizeId(m.id).replace(/^[a-z0-9-]+\//, '')));
       for (const e of pricingMap.values()) {
@@ -322,7 +332,7 @@ export async function fetchUpstreamModels(apiKey: string, ccVersion: string, ref
   }
 
   if (freshModels && freshModels.length > 0) {
-    // Compare full content (not just ids) so pricing/caps/deal changes are persisted.
+    // 比较完整内容（而非仅 id），使 pricing/caps/deal 变化也能持久化。
     const nextJson = JSON.stringify(freshModels);
     const curJson = JSON.stringify(cachedModels);
     if (nextJson !== curJson) {
@@ -339,8 +349,8 @@ export async function fetchUpstreamModels(apiKey: string, ccVersion: string, ref
 }
 
 /**
- * Fuzzy-resolve a requested model id to a known upstream model.
- * Exact → prefix-strip → suffix → partial → family keyword → first model.
+ * 模糊解析请求的模型名到已知上游模型。
+ * 匹配顺序：精确 → 去掉厂商前缀 → 后缀 → 部分包含 → 家族关键字 → 第一个模型。
  */
 export function resolveModelName(requestedModel: string): string {
   if (!requestedModel || typeof requestedModel !== 'string') {
@@ -399,7 +409,7 @@ export function resolveModelName(requestedModel: string): string {
   return defaultModel;
 }
 
-/** Look up the reasoning-effort tiers the upstream model supports. */
+/** 查询上游模型支持的推理档位（reasoning effort tiers）。 */
 export function getReasoningEfforts(modelId: string): string[] | undefined {
   const m = cachedModels.find(m => m.id === modelId);
   return m?.reasoning_efforts;

@@ -1,3 +1,16 @@
+// =============================================================================
+// CommandCode 适配器（翻译引擎）
+// -----------------------------------------------------------------------------
+// 职责：把 OpenAI Chat Completions 与 Anthropic Messages 两种上游协议请求，
+//      "归一化"翻译成 CommandCode CLI 的私有 wire 协议（/alpha/generate）请求体，
+//      并把 CommandCode 返回的 SSE 事件流反向编码为两种协议的响应（流式/非流式）。
+// 核心能力：
+//   - translateOpenAIRequest()   OpenAI → CC wire
+//   - translateAnthropicRequest() Anthropic → OpenAI → CC wire（复用 OpenAI 通路）
+//   - encodeOpenAIChunk()        CC 事件 → OpenAI SSE chunk
+//   - buildAnthropicResponse()   CC 事件数组 → Anthropic 非流式消息
+// 参考依据：逆向自官方 CommandCode CLI 源码的 wire 契约（详见各处注释）。
+// =============================================================================
 import crypto from 'node:crypto';
 import {
   OpenAIChatRequest,
@@ -16,14 +29,20 @@ import {
 import { resolveModelName } from '../../utils/models.js';
 import { logger } from '../../utils/logger.js';
 
-// ─── Reasoning effort mapping (per CLI wire contract) ─────────────────────────
+// ─── 推理强度（reasoning effort）映射表（按 CLI wire 契约）───────────────────────
+// 不同模型支持不同的推理档位。请求方传入的 reasoning_effort 会被"向下就近对齐"
+// 到该模型实际支持的档位，避免上游 400。档位从弱到强：
+//   Qn = low < medium < high < xhigh < max          （五档 SOTA 系列）
+//   Xn = low < medium < high < xhigh                （四档）
+//   Zn = low < medium < high                        （三档）
+//   er = high < max                                 （两档，DeepSeek 等）
 
 const Qn = ['low', 'medium', 'high', 'xhigh', 'max'];
 const Xn = ['low', 'medium', 'high', 'xhigh'];
 const Zn = ['low', 'medium', 'high'];
 const er = ['high', 'max'];
 
-// Original CLI (fr map): GLM-5.3 supports low/high/max — not the er set.
+// 原版 CLI（fr map）：GLM-5.3 支持 low/high/max —— 而不是 er 集合。
 const OFFICIAL_REASONING_MAP: Record<string, string[]> = {
   'claude-sonnet-5': Qn,
   'claude-sonnet-4-6': Qn,
@@ -54,6 +73,8 @@ const OFFICIAL_REASONING_MAP: Record<string, string[]> = {
   'Qwen/Qwen3.8-Max': ['low', 'medium', 'xhigh'],
 };
 
+// 每个档位的数值权重，用于"向下就近对齐"：请求档位权重 > 模型支持档位权重时，
+// 挑选模型支持的、权重不超过请求档位中最接近的一个。
 const EFFORT_RANK: Record<string, number> = {
   none: 0,
   minimal: 0,
@@ -72,8 +93,8 @@ export class CommandCodeAdapter {
   }
 
   /**
-   * OpenAI/Anthropic tool defs → CC wire tools (name, description, input_schema).
-   * Matches original CLI toWireTools exactly — no `strict` field. Capped at 15.
+   * OpenAI/Anthropic 工具定义 → CC wire 工具定义（name/description/input_schema）。
+   * 与原版 CLI 的 toWireTools 完全一致 —— 不包含 strict 字段。最多截取 15 个。
    */
   private static convertTools(tools?: OpenAIChatRequest['tools']): CCTool[] | undefined {
     if (!tools || tools.length === 0) return undefined;
@@ -115,8 +136,19 @@ export class CommandCodeAdapter {
     return undefined;
   }
 
-  // ── Reasoning effort resolution ────────────────────────────────────────────
+  // ── 推理强度求解（resolveReasoningEffort）───────────────────────────────────
 
+  /**
+   * 求解最终发送到 CC 的 reasoning_effort 档位。
+   * 有三种输入来源，优先级从高到低：
+   *  1) Anthropic 的 thinking 配置（type=enabled 时按 budget_tokens 映射档位）
+   *  2) 请求方显式传入的 reasoning_effort（字符串或数字）
+   *  3) 未传入 → 不输出该字段（原版 CLI 行为：不会默认补 medium）
+   * 处理逻辑：
+   *  - 先查模型专属支持表；查不到再按模型名关键字推断默认支持档位；
+   *  - 对不在支持表内的档位，做"向下就近对齐"（snap down）到最近的可支持档位；
+   *  - 数字型档位按 OpenAI 式阈值映射。
+   */
   resolveReasoningEffort(model: string, requested?: any, thinkingConfig?: any): string | undefined {
     if (thinkingConfig && thinkingConfig.type === 'enabled') {
       const budget = thinkingConfig.budget_tokens ?? 2048;
@@ -178,11 +210,11 @@ export class CommandCodeAdapter {
     return supported[0] || 'medium';
   }
 
-  // ── Message pruning ────────────────────────────────────────────────────────
+  // ── 消息清理（pruneDanglingTools）──────────────────────────────────────────
 
   /**
-   * Drop tool-call/tool-result pairs whose call id never appeared as a call —
-   * upstream 400s on dangling tool results. Never drops plain text content.
+   * 移除"悬空的 tool-call/tool-result 对"——即某个 tool-result 的 call id 从未
+   * 出现过对应的 tool-call。上游对这种悬空的结果会直接 400。纯文本内容永不丢弃。
    */
   private pruneDanglingTools(messages: CCMessage[]): CCMessage[] {
     const validIds = new Set<string>();
@@ -214,8 +246,17 @@ export class CommandCodeAdapter {
     return pruned;
   }
 
-  // ── OpenAI → CC ────────────────────────────────────────────────────────────
+  // ── OpenAI → CC 翻译 ──────────────────────────────────────────────────────
 
+  /**
+   * 把 OpenAI Chat Completions 请求翻译成 CC wire 请求体。
+   * 关键映射：
+   *  - system/developer 角色 → 拼接为顶层 system 字段
+   *  - assistant.tool_calls → CC 的 tool-call 内容块
+   *  - role=tool/function → CC 的 tool-result 内容块（相邻 tool-result 合并）
+   *  - image_url（data URL）→ CC 的原始 base64 图片块（去掉 data: 前缀）
+   *  - reasoning_effort → 经 resolveReasoningEffort 映射
+   */
   translateOpenAIRequest(req: OpenAIChatRequest, opts?: { threadId?: string }): CCRequestBody {
     let system = '';
     const ccMessages: CCMessage[] = [];
@@ -328,15 +369,16 @@ export class CommandCodeAdapter {
     };
   }
 
-  // ── Anthropic → CC (full fidelity, fixes v3's dropped tool_results) ────────
+  // ── Anthropic → CC 翻译（全保真，修复 v3 丢失 tool_results 的问题）───────────
 
   /**
-   * Convert Anthropic Messages → CC wire. Key conversions v3 missed:
-   *  - user tool_result blocks → tool messages with matching toolCallId
-   *  - base64/url image blocks → CC image parts
-   *  - thinking/redacted_thinking history → reasoning parts
-   *  - system blocks array → joined text (not JSON.stringify)
-   *  - tool_result is_error → [ERROR] prefix so the model sees the failure
+   * 把 Anthropic Messages 请求 → CC wire。相比 v3 修复的关键点：
+   *  - user 的 tool_result 块 → tool 消息（带匹配的 toolCallId），不再被丢弃
+   *  - base64/url 图片块 → CC 图片块
+   *  - thinking/redacted_thinking 历史 → reasoning 块
+   *  - system 块数组 → 拼接文本（不是 JSON.stringify）
+   *  - tool_result 的 is_error → 加 "[ERROR] " 前缀，让模型看到失败
+   * 实现上先转为 OpenAI 中间形态，再走 translateOpenAIRequest。
    */
   translateAnthropicRequest(req: AnthropicRequest, opts?: { threadId?: string }): CCRequestBody {
     const openAIMessages: OpenAIMessage[] = [];
@@ -472,7 +514,7 @@ export class CommandCodeAdapter {
     return String(content ?? '');
   }
 
-  // ── Wire config (CLI fingerprint) ──────────────────────────────────────────
+  // ── wire config（CLI 指纹，伪装成本地 git 仓库以匹配 CLI 行为）────────────────
 
   private buildWireConfig() {
     return {
@@ -491,7 +533,7 @@ export class CommandCodeAdapter {
     };
   }
 
-  // ── Stream encoder state ───────────────────────────────────────────────────
+  // ── 流式编码器状态 ──────────────────────────────────────────────────────────
 
   createStreamEncoderState(model: string): StreamEncoderState {
     return {
@@ -510,8 +552,18 @@ export class CommandCodeAdapter {
     };
   }
 
-  // ── CC event → OpenAI SSE chunk ────────────────────────────────────────────
+  // ── CC 事件 → OpenAI SSE chunk ─────────────────────────────────────────────
 
+  /**
+   * 把单个 CC SSE 事件编码为 0..n 个 OpenAI SSE 数据块。
+   * 处理的事件类型：
+   *  - start      → 先发一个 role=assistant 的空 delta
+   *  - error      → 追加 [Upstream Error: ...] 文本块
+   *  - reasoning-delta → 输出为 delta.reasoning_content
+   *  - text-delta → 输出为 delta.content（并剥离内联 thinking 标签）
+   *  - tool-call / tool-call-delta → 输出为 delta.tool_calls 数组增量
+   *  - finish     → 输出带 finish_reason 的收尾块 + [DONE]
+   */
   encodeOpenAIChunk(event: CCEvent, state: StreamEncoderState): string[] {
     const chunks: string[] = [];
 
@@ -664,8 +716,14 @@ export class CommandCodeAdapter {
     })}\n\n`;
   }
 
-  // ── CC events → final Anthropic message (non-streaming) ────────────────────
+  // ── CC 事件 → 完整 Anthropic 消息（非流式）──────────────────────────────────
 
+  /**
+   * 把 CC 事件流汇聚成一个 Anthropic 非流式响应消息。
+   * - 文本/reasoning/tool-call 分别累积
+   * - 同一 tool-call 的多个 delta 片段会被拼接/合并成完整 input
+   * - 从 finish 事件读取 totalUsage（原版 CLI 放在顶层）
+   */
   buildAnthropicResponse(events: CCEvent[], msgId: string, modelName: string, inputTokens: number) {
     let fullText = '';
     let reasoningText = '';

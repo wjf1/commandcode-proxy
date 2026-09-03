@@ -1,3 +1,11 @@
+// =============================================================================
+// 简易环形缓冲 logger
+// -----------------------------------------------------------------------------
+// - 维护一个最多 MAX_LOGS 条的环形缓冲，供仪表盘 /api/logs 读取
+// - 同时输出到控制台（info→log、warn→warn、error→error）
+// - 对消息做清洗：剔除控制字符与 ANSI 转义序列，防止日志注入到 HTML 时
+//   携带终端序列或标记
+// =============================================================================
 import { LogEntry } from '../types/index.js';
 
 const MAX_LOGS = 500;
@@ -8,8 +16,7 @@ function timestamp(): string {
 }
 
 /**
- * Strip control characters and ANSI escapes so log lines rendered into the
- * dashboard can never inject markup or terminal sequences.
+ * 清洗控制字符与 ANSI 转义序列，使渲染到仪表盘的日志行永不注入标记或终端序列。
  */
 function sanitize(message: string): string {
   return String(message)
