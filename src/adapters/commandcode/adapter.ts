@@ -607,11 +607,14 @@ export class CommandCodeAdapter {
       // Some models emit  thinking tags inline — split into reasoning_content.
       if (rawText.includes(' thinking') || state.thinkingState === 'in_think') {
         if (rawText.includes(' thinking') && rawText.includes(' response')) {
-          const m = rawText.match(/ thinking([\s\S]*?)<\/think>/);
-          if (m) {
+          state.thinkingState = 'done';
+          const parts = rawText.split(' response');
+          const thinkPart = parts[0];
+          rawText = parts[1] || '';
+          const thinkContent = thinkPart.split(' thinking')[1] || '';
+          if (thinkContent) {
             state.hasEmittedText = true;
-            chunks.push(this.openAIDelta(state, { reasoning_content: m[1] } as any, null));
-            rawText = rawText.replace(/ thinking[\s\S]*?<\/think>/, '');
+            chunks.push(this.openAIDelta(state, { reasoning_content: thinkContent } as any, null));
           }
         } else if (rawText.includes(' thinking')) {
           state.thinkingState = 'in_think';

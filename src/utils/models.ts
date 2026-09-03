@@ -93,40 +93,58 @@ function normalizeId(s: string): string {
 
 /** 从嵌在定价页 HTML 的 Next.js RSC payload 中提取模型数组。 */
 function parsePricingFromHtml(html: string): PricingCatalogEntry[] {
-  const marker = '{\"rows\":[';
-  const i = html.indexOf(marker);
+  // App Router RSC 飞行数据通过 self.__next_f.push([1,"..."]) 分块注入，
+  // 各块内是转义的 JS 字符串字面量；先解转义并按序拼接成完整 flight 文本。
+  const chunks: string[] = [];
+  const re = /self\.__next_f\.push\(\[1,"/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html)) !== null) {
+    const start = m.index + m[0].length;
+    let i = start;
+    while (i < html.length) {
+      const ch = html[i];
+      if (ch === '\\') {
+        i += 2;
+        continue;
+      }
+      if (ch === '"' && (html.slice(i + 1, i + 3) === '])' || html.slice(i + 1, i + 4) === ']);')) break;
+      i += 1;
+    }
+    if (i >= html.length) continue;
+    try {
+      chunks.push(JSON.parse('"' + html.slice(start, i) + '"') as string);
+    } catch { /* 跳过无法解析的分块 */ }
+  }
+  if (chunks.length === 0) {
+    logger.warn('[MODELS] Pricing page structure changed: no RSC payload found.');
+    return [];
+  }
+  const flight = chunks.join('');
+
+  const marker = '{"rows":[';
+  const i = flight.indexOf(marker);
   if (i < 0) {
     logger.warn('[MODELS] Pricing page structure changed: "rows" marker not found.');
     return [];
   }
   let depth = 0;
   let j = i;
-  while (j < html.length) {
-    const ch = html[j];
+  while (j < flight.length) {
+    const ch = flight[j];
     if (ch === '{') depth += 1;
     else if (ch === '}') {
       depth -= 1;
       if (depth === 0) break;
-    } else if (ch === '\\') {
-      j += 1; // skip escaped char inside the JS string literal
     }
     j += 1;
   }
-  if (j >= html.length) {
+  if (j >= flight.length) {
     logger.warn('[MODELS] Pricing page structure changed: unbalanced object.');
-    return [];
-  }
-  const raw = html.slice(i, j + 1);
-  let decodedStr: string;
-  try {
-    decodedStr = JSON.parse('"' + raw + '"') as string;
-  } catch {
-    logger.warn('[MODELS] Pricing page unescape failed.');
     return [];
   }
   let obj: any;
   try {
-    obj = JSON.parse(decodedStr);
+    obj = JSON.parse(flight.slice(i, j + 1));
   } catch {
     logger.warn('[MODELS] Pricing page JSON parse failed.');
     return [];
@@ -192,30 +210,34 @@ export async function fetchPricingCatalog(force = false): Promise<Map<string, Pr
   if (!force && cache && Date.now() - cache.fetchedAt < PRICING_TTL_MS) {
     return new Map(cache.entries.map(e => [normalizeId(e.id), e]));
   }
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15000);
-    const res = await fetch(PRICING_PLAN_URL, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; commandcode-proxy/4)' },
-      signal: controller.signal,
-    });
-    clearTimeout(timer);
-    if (!res.ok) {
-      logger.warn(`[MODELS] Pricing page fetch failed: HTTP ${res.status}`);
-      return cache ? new Map(cache.entries.map(e => [normalizeId(e.id), e])) : new Map();
+  // 站点在部分地区较慢/不稳定：45s 超时 + 3 次重试。
+  const attempts = 3;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 45000);
+      const res = await fetch(PRICING_PLAN_URL, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; commandcode-proxy/4)' },
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      if (!res.ok) {
+        logger.warn(`[MODELS] Pricing page fetch failed: HTTP ${res.status} (attempt ${attempt}/${attempts})`);
+      } else {
+        const html = await res.text();
+        const entries = parsePricingFromHtml(html);
+        if (entries.length > 0) {
+          savePricingCache(Date.now(), entries);
+          logger.info(`[MODELS] Fetched official pricing catalog (${entries.length} models) from commandcode.ai`);
+          return new Map(entries.map(e => [normalizeId(e.id), e]));
+        }
+      }
+    } catch (err: any) {
+      logger.warn(`[MODELS] Pricing catalog fetch failed (attempt ${attempt}/${attempts}): ${err.message}`);
     }
-    const html = await res.text();
-    const entries = parsePricingFromHtml(html);
-    if (entries.length > 0) {
-      savePricingCache(Date.now(), entries);
-      logger.info(`[MODELS] Fetched official pricing catalog (${entries.length} models) from commandcode.ai`);
-      return new Map(entries.map(e => [normalizeId(e.id), e]));
-    }
-    return cache ? new Map(cache.entries.map(e => [normalizeId(e.id), e])) : new Map();
-  } catch (err: any) {
-    logger.warn(`[MODELS] Pricing catalog fetch failed: ${err.message}`);
-    return cache ? new Map(cache.entries.map(e => [normalizeId(e.id), e])) : new Map();
+    if (attempt < attempts) await new Promise(r => setTimeout(r, 2000));
   }
+  return cache ? new Map(cache.entries.map(e => [normalizeId(e.id), e])) : new Map();
 }
 
 /** 把官方目录细节（定价/上下文/caps/deal/go-plan）合并进模型列表。 */

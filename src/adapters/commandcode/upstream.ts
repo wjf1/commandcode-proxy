@@ -213,6 +213,10 @@ export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<
       if (opts.abortSignal?.aborted) {
         throw Object.assign(new Error('__ABORT__'), { isAbort: true });
       }
+      if (err instanceof UpstreamError && !err.retryable) {
+        // Terminal errors (e.g. MODEL_NOT_IN_PLAN / premium_credits_exhausted): fail fast, do not retry.
+        throw err;
+      }
       if (attempt < maxAttempts) {
         const backoffMs = Math.min(8000, 500 * Math.pow(2, attempt - 1));
         logger.warn(`[UPSTREAM] Network error (${err.message}), retry ${attempt}/${maxAttempts - 1} in ${backoffMs}ms`);
