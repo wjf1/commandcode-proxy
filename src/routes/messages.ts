@@ -17,6 +17,7 @@ import { sendToCC, isAbortError, estimateTokens, UpstreamError } from '../adapte
 import { AnthropicRequest, CCEvent } from '../types/index.js';
 import { getActiveApiKey, getGatewayRunning, checkAndRotateAccountsOnQuota } from '../utils/config.js';
 import { logger } from '../utils/logger.js';
+import { recordCompletion, estimateCostUsd } from '../utils/usage-store.js';
 
 function writeSSEHeaders(reply: any): void {
   reply.raw.setHeader('Content-Type', 'text/event-stream');
@@ -40,6 +41,23 @@ function parseEventLine(line: string): CCEvent | null {
 
 function sse(event: string, data: unknown): string {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+}
+
+/** 持久化一次会话记录到 usage-history.jsonl */
+function persistCompletion(inputTokens: number, outputTokens: number, startTime: number, model: string, status: 'COMPLETED' | 'FAILED', traceId?: string): void {
+  const { costUsd, hasPricing } = estimateCostUsd(model, inputTokens || 0, outputTokens || 0);
+  recordCompletion({
+    timestamp: new Date().toISOString(),
+    model,
+    inputTokens: inputTokens || 0,
+    outputTokens: outputTokens || 0,
+    timingMs: Date.now() - startTime,
+    costUsd,
+    hasPricing,
+    status,
+    traceId,
+    mode: 'messages',
+  });
 }
 
 export async function messagesRoutes(fastify: FastifyInstance) {
@@ -235,9 +253,10 @@ export async function messagesRoutes(fastify: FastifyInstance) {
               );
             }
           } else if (event.type === 'finish' || event.type === 'finish-step') {
-            if (event.data?.usage) {
-              if (event.data.usage.inputTokens) inputTokens = event.data.usage.inputTokens;
-              if (event.data.usage.outputTokens) outputTokens = event.data.usage.outputTokens;
+            const usage = event.totalUsage ?? event.data?.usage;
+            if (usage) {
+              if (usage.inputTokens) inputTokens = usage.inputTokens;
+              if (usage.outputTokens) outputTokens = usage.outputTokens;
             }
             const rawFR = event.finishReason || event.data?.finishReason;
             if (rawFR === 'tool-calls' || rawFR === 'tool_calls') stopReason = 'tool_use';
@@ -263,6 +282,7 @@ export async function messagesRoutes(fastify: FastifyInstance) {
           logger.info(
             `Input Tokens ${inputTokens.toLocaleString('en-US')} | Output Tokens ${outputTokens.toLocaleString('en-US')} | Timing ${timing}s | Model ${modelName} | Status COMPLETED`
           );
+          persistCompletion(inputTokens, outputTokens, startTime, modelName, 'COMPLETED', msgId);
           reply.raw.end();
         });
 
@@ -303,6 +323,7 @@ export async function messagesRoutes(fastify: FastifyInstance) {
       logger.info(
         `Input Tokens ${message.usage.input_tokens.toLocaleString('en-US')} | Output Tokens ${message.usage.output_tokens.toLocaleString('en-US')} | Timing ${((Date.now() - startTime) / 1000).toFixed(3)}s | Model ${modelName} | Status COMPLETED`
       );
+      persistCompletion(message.usage.input_tokens, message.usage.output_tokens, startTime, modelName, 'COMPLETED', msgId);
       return reply.send(message);
     } catch (err: any) {
       if (isAbortError(err) || err?.isAbort) return reply.raw.end();

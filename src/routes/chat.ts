@@ -17,6 +17,7 @@ import { sendToCC, isAbortError, estimateTokens, UpstreamError } from '../adapte
 import { OpenAIChatRequest, CCEvent } from '../types/index.js';
 import { getActiveApiKey, getGatewayRunning, checkAndRotateAccountsOnQuota } from '../utils/config.js';
 import { logger } from '../utils/logger.js';
+import { recordCompletion, estimateCostUsd } from '../utils/usage-store.js';
 
 function fmtNum(n: number): string {
   return n.toLocaleString('en-US');
@@ -33,6 +34,23 @@ function writeSSEHeaders(reply: any): void {
 function logCompletion(inputTokens: number, outputTokens: number, startTime: number, model: string): void {
   const timing = ((Date.now() - startTime) / 1000).toFixed(3);
   logger.info(`Input Tokens ${fmtNum(inputTokens)} | Output Tokens ${fmtNum(outputTokens)} | Timing ${timing}s | Model ${model} | Status COMPLETED`);
+}
+
+/** 持久化一次会话记录到 usage-history.jsonl */
+function persistCompletion(inputTokens: number, outputTokens: number, startTime: number, model: string, status: 'COMPLETED' | 'FAILED', traceId?: string, mode: 'chat' | 'messages' = 'chat'): void {
+  const { costUsd, hasPricing } = estimateCostUsd(model, inputTokens || 0, outputTokens || 0);
+  recordCompletion({
+    timestamp: new Date().toISOString(),
+    model,
+    inputTokens: inputTokens || 0,
+    outputTokens: outputTokens || 0,
+    timingMs: Date.now() - startTime,
+    costUsd,
+    hasPricing,
+    status,
+    traceId,
+    mode,
+  });
 }
 
 /** 解析一行 SSE 为一个 CCEvent；空行或 [DONE] 返回 null。 */
@@ -179,6 +197,7 @@ export async function chatRoutes(fastify: FastifyInstance) {
             }
           }
           logCompletion(inputTokens, state.outputTokens, startTime, modelName);
+          persistCompletion(inputTokens, state.outputTokens, startTime, modelName, 'COMPLETED', state.id, 'chat');
           reply.raw.end();
         });
 
@@ -250,9 +269,10 @@ export async function chatRoutes(fastify: FastifyInstance) {
                   ? 'length'
                   : 'stop';
           }
-          if (event.data?.usage) {
-            if (event.data.usage.inputTokens) inputTokens = event.data.usage.inputTokens;
-            if (event.data.usage.outputTokens) outputTokens = event.data.usage.outputTokens;
+          const usage = event.totalUsage ?? event.data?.usage;
+          if (usage) {
+            if (usage.inputTokens) inputTokens = usage.inputTokens;
+            if (usage.outputTokens) outputTokens = usage.outputTokens;
           }
         }
       }
@@ -265,6 +285,7 @@ export async function chatRoutes(fastify: FastifyInstance) {
       }
 
       logCompletion(inputTokens, outputTokens, startTime, modelName);
+      persistCompletion(inputTokens, outputTokens, startTime, modelName, 'COMPLETED', undefined, 'chat');
 
       return reply.send({
         id: `chatcmpl-${Math.random().toString(36).slice(2, 10)}`,

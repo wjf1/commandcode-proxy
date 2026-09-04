@@ -24,6 +24,7 @@ import {
   getActiveApiKey,
 } from '../utils/config.js';
 import { getCachedModels } from '../utils/models.js';
+import { getUsageHistory, getUsageStats, clearUsageHistory } from '../utils/usage-store.js';
 
 const startTimestamp = Date.now();
 
@@ -187,6 +188,28 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
     return { accountsUsage: results };
   });
 
+  // ─── 会话明细历史 ────────────────────────────────────────────────────────────
+
+  fastify.get('/api/usage/history', async () => {
+    const records = getUsageHistory();
+    const stats = getUsageStats();
+    const limit = 200;
+    return {
+      total: stats.total,
+      today: stats.today,
+      week: stats.week,
+      month: stats.month,
+      byDay: stats.byDay,
+      byModel: stats.byModel,
+      recent: records.slice(-limit).reverse(),
+    };
+  });
+
+  fastify.post('/api/usage/clear', async () => {
+    clearUsageHistory();
+    return { status: 'success' };
+  });
+
   // ─── 仪表盘 SPA ────────────────────────────────────────────────────────────
 
   fastify.get('/', async (_req, reply) => {
@@ -199,6 +222,7 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
 <title>CommandCode 代理控制器 v4</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>body{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}.tab-btn.active{border-bottom:2px solid #6366f1;color:#818cf8;font-weight:600}</style>
 </head>
 <body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col">
@@ -297,6 +321,59 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
       <p id="windowWeeklyReset" class="text-[11px] text-slate-400 text-right">重置时间：--</p>
     </div>
   </div>
+
+  <div class="bg-slate-900 border border-slate-800 rounded-xl p-6">
+    <div class="flex items-center justify-between">
+      <div>
+        <h2 class="text-md font-semibold text-white flex items-center gap-2"><i class="fa-solid fa-list-check text-indigo-400"></i> 会话明细</h2>
+        <p class="text-xs text-slate-400 mt-0.5">经过本网关的每次请求：token、耗时、成本、模型、状态（持久化到本地）</p>
+      </div>
+      <button onclick="clearUsageHistory()" class="px-3 py-1.5 bg-slate-800 hover:bg-rose-900/60 text-slate-300 hover:text-rose-200 text-xs rounded-lg flex items-center gap-1.5 border border-slate-700 transition"><i class="fa-solid fa-trash-can"></i> 清空历史</button>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mt-4">
+      <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg"><p class="text-[11px] text-slate-400 font-medium">今日 Token</p><h3 id="usageTodayToken" class="text-lg font-bold text-white mt-1">--</h3><p id="usageTodayRuns" class="text-[11px] text-slate-400 mt-1">-- 次请求</p></div>
+      <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg"><p class="text-[11px] text-slate-400 font-medium">本周成本</p><h3 id="usageWeekCost" class="text-lg font-bold text-emerald-400 mt-1">--</h3><p id="usageWeekToken" class="text-[11px] text-slate-400 mt-1">--</p></div>
+      <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg"><p class="text-[11px] text-slate-400 font-medium">本月成本</p><h3 id="usageMonthCost" class="text-lg font-bold text-emerald-400 mt-1">--</h3><p id="usageMonthToken" class="text-[11px] text-slate-400 mt-1">--</p></div>
+      <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg"><p class="text-[11px] text-slate-400 font-medium">累计</p><h3 id="usageTotalToken" class="text-lg font-bold text-white mt-1">--</h3><p id="usageTotalRuns" class="text-[11px] text-slate-400 mt-1">-- 次请求 · <span id="usagePricingNote" class="text-amber-400 hidden"><i class="fa-solid fa-triangle-exclamation"></i> 未同步定价</span></p></div>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
+      <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg">
+        <h3 class="font-bold text-xs text-white mb-3"><i class="fa-solid fa-chart-line text-indigo-400"></i> 每日 Token 趋势</h3>
+        <div class="h-56"><canvas id="usageTrendChart"></canvas></div>
+      </div>
+      <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg">
+        <h3 class="font-bold text-xs text-white mb-3"><i class="fa-solid fa-chart-pie text-violet-400"></i> 模型分布</h3>
+        <div class="h-56"><canvas id="usageModelChart"></canvas></div>
+      </div>
+    </div>
+
+    <div class="mt-4 bg-slate-950/40 border border-slate-800 rounded-lg overflow-hidden">
+      <div class="flex items-center justify-between px-4 py-2.5 border-b border-slate-800">
+        <h3 class="font-bold text-xs text-white"><i class="fa-solid fa-table-list text-emerald-400"></i> 请求明细</h3>
+        <span id="usageRecentCount" class="text-[11px] text-slate-400"></span>
+      </div>
+      <div class="overflow-x-auto max-h-[360px] overflow-y-auto">
+        <table class="w-full text-xs text-left">
+          <thead class="bg-slate-950/60 text-slate-400 sticky top-0 z-10">
+            <tr>
+              <th class="px-3 py-2 font-medium">时间</th>
+              <th class="px-3 py-2 font-medium">模型</th>
+              <th class="px-3 py-2 font-medium text-right">输入</th>
+              <th class="px-3 py-2 font-medium text-right">输出</th>
+              <th class="px-3 py-2 font-medium text-right">耗时</th>
+              <th class="px-3 py-2 font-medium text-right">成本</th>
+              <th class="px-3 py-2 font-medium">状态</th>
+              <th class="px-3 py-2 font-medium">模式</th>
+            </tr>
+          </thead>
+          <tbody id="usageTableBody" class="divide-y divide-slate-800/60"></tbody>
+        </table>
+        <p id="usageEmpty" class="text-center text-slate-500 text-xs py-8 hidden">暂无会话记录，触发一次对话后在这里查看。</p>
+      </div>
+    </div>
+  </div>
 </section>
 
 <section id="content-models" class="space-y-4 hidden">
@@ -348,7 +425,7 @@ function switchTab(tab) {
   document.getElementById('content-' + tab).classList.remove('hidden');
   currentTab = tab;
   if (tab === 'accounts') loadAccounts();
-  if (tab === 'usage') loadUsageInit();
+  if (tab === 'usage') { loadUsageInit(); loadUsageHistory(); }
   if (tab === 'models') loadModels(false);
   if (tab === 'logs') loadLogs();
 }
@@ -520,8 +597,112 @@ async function loadLogs() {
 
 async function clearLogs(){ await fetch('/api/logs/clear',{method:'POST'}); loadLogs(); }
 
+// ─── 会话明细 ────────────────────────────────────────────────────────────────
+let usageTrendChart = null;
+let usageModelChart = null;
+let usageHistoryCache = null;
+
+function fmtTokens(n){ if(!n) return '0'; if(n>=1000000){var x=n/1000000; return (x%1===0?x:x.toFixed(1))+'M';} if(n>=1000){var k=n/1000; return (k%1===0?k:k.toFixed(1))+'K';} return String(n); }
+function fmtUsd(v){ return '$' + (v||0).toFixed(4); }
+function fmtMs(ms){ if(!ms) return '--'; if(ms>=60000){var m=Math.floor(ms/60000),s=(ms%60000)/1000; return m+'m '+s.toFixed(1)+'s';} if(ms>=1000) return (ms/1000).toFixed(1)+'s'; return Math.round(ms)+'ms'; }
+function fmtTime(ts){ try { const d=new Date(ts); return d.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit'}); } catch { return ts; } }
+
+async function loadUsageHistory(){
+  usageHistoryCache = await (await fetch('/api/usage/history')).json();
+  const data = usageHistoryCache;
+  const s = data.total;
+
+  document.getElementById('usageTodayToken').innerText = fmtTokens(data.today.input + data.today.output) + ' token';
+  document.getElementById('usageTodayRuns').innerText = data.today.runs + ' 次请求';
+  document.getElementById('usageWeekCost').innerText = fmtUsd(data.week.cost);
+  document.getElementById('usageWeekToken').innerText = fmtTokens(data.week.input + data.week.output) + ' token · ' + data.week.runs + ' 次';
+  document.getElementById('usageMonthCost').innerText = fmtUsd(data.month.cost);
+  document.getElementById('usageMonthToken').innerText = fmtTokens(data.month.input + data.month.output) + ' token · ' + data.month.runs + ' 次';
+  document.getElementById('usageTotalToken').innerText = fmtTokens(s.inputTokens + s.outputTokens) + ' token';
+  document.getElementById('usageTotalRuns').innerText = s.runs + ' 次请求 · 失败 ' + s.failures;
+
+  const hasAnyPricing = (data.recent||[]).some(r => r.hasPricing);
+  document.getElementById('usagePricingNote').classList.toggle('hidden', hasAnyPricing);
+  document.getElementById('usageRecentCount').innerText = '最近 ' + (data.recent||[]).length + ' 条';
+
+  renderUsageTable(data.recent||[]);
+  renderUsageCharts(data);
+}
+
+function renderUsageTable(recent){
+  const body = document.getElementById('usageTableBody');
+  const empty = document.getElementById('usageEmpty');
+  if (!recent.length) { body.innerHTML = ''; empty.classList.remove('hidden'); return; }
+  empty.classList.add('hidden');
+  body.innerHTML = recent.map(r => {
+    const badge = r.status === 'FAILED'
+      ? '<span class="px-2 py-0.5 rounded-full bg-rose-500/10 text-rose-400 border border-rose-500/20">失败</span>'
+      : '<span class="px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">完成</span>';
+    const pc = r.hasPricing ? '' : '<span class="text-amber-400" title="未同步官方定价">*</span>';
+    const mode = r.mode === 'messages' ? 'Messages' : 'Chat';
+    return '<tr class="hover:bg-slate-800/40 transition">' +
+      '<td class="px-4 py-2.5 whitespace-nowrap text-slate-300">' + esc(fmtTime(r.timestamp)) + '</td>' +
+      '<td class="px-4 py-2.5 text-slate-200 font-mono">' + esc(r.model) + '</td>' +
+      '<td class="px-4 py-2.5 text-right text-slate-300">' + fmtTokens(r.inputTokens) + '</td>' +
+      '<td class="px-4 py-2.5 text-right text-slate-300">' + fmtTokens(r.outputTokens) + '</td>' +
+      '<td class="px-4 py-2.5 text-right text-slate-400">' + fmtMs(r.timingMs) + '</td>' +
+      '<td class="px-4 py-2.5 text-right text-emerald-400">' + fmtUsd(r.costUsd) + pc + '</td>' +
+      '<td class="px-4 py-2.5">' + badge + '</td>' +
+      '<td class="px-4 py-2.5 text-slate-400">' + mode + '</td>' +
+    '</tr>';
+  }).join('');
+}
+
+function renderUsageCharts(data){
+  // 每日趋势
+  const tctx = document.getElementById('usageTrendChart').getContext('2d');
+  if (usageTrendChart) usageTrendChart.destroy();
+  usageTrendChart = new Chart(tctx, {
+    type: 'line',
+    data: {
+      labels: data.byDay.map(d => d.date),
+      datasets: [
+        { label:'输入', data: data.byDay.map(d => d.inputTokens), borderColor:'#818cf8', backgroundColor:'rgba(129,140,248,.1)', fill:true, tension:.3, pointRadius:2 },
+        { label:'输出', data: data.byDay.map(d => d.outputTokens), borderColor:'#34d399', backgroundColor:'rgba(52,211,153,.1)', fill:true, tension:.3, pointRadius:2 }
+      ]
+    },
+    options: {
+      responsive:true, maintainAspectRatio:false, interaction:{mode:'index',intersect:false},
+      plugins:{ legend:{ labels:{ color:'#94a3b8', font:{size:11} } }, tooltip:{ backgroundColor:'#0f172a', borderColor:'#334155', borderWidth:1 } },
+      scales:{ x:{ ticks:{ color:'#64748b', font:{size:10} }, grid:{ color:'rgba(51,65,85,.3)' } }, y:{ ticks:{ color:'#64748b', font:{size:10} }, grid:{ color:'rgba(51,65,85,.3)' }, beginAtZero:true } }
+    }
+  });
+
+  // 模型分布
+  const mctx = document.getElementById('usageModelChart').getContext('2d');
+  if (usageModelChart) usageModelChart.destroy();
+  const palette = ['#818cf8','#34d399','#f59e0b','#f472b6','#38bdf8','#a78bfa','#fb923c'];
+  usageModelChart = new Chart(mctx, {
+    type: 'doughnut',
+    data: {
+      labels: data.byModel.map(m => m.model),
+      datasets: [{
+        data: data.byModel.map(m => m.runs),
+        backgroundColor: data.byModel.map((_,i) => palette[i % palette.length]),
+        borderColor:'#0f172a', borderWidth:2
+      }]
+    },
+    options: {
+      responsive:true, maintainAspectRatio:false, cutout:'55%',
+      plugins:{ legend:{ labels:{ color:'#94a3b8', font:{size:11} } }, tooltip:{ backgroundColor:'#0f172a', borderColor:'#334155', borderWidth:1, callbacks:{ label: c => ' ' + c.label + ' · ' + c.parsed + ' 次' } } }
+    }
+  });
+}
+
+async function clearUsageHistory(){
+  if(!confirm('确定清空全部会话历史？此操作不可撤销。')) return;
+  await fetch('/api/usage/clear',{method:'POST'});
+  loadUsageHistory();
+}
+
 fetchStatus();
 setInterval(fetchStatus, 5000);
+setInterval(() => { if(currentTab === 'usage') loadUsageHistory(); }, 30000);
 </script>
 </body>
 </html>`;
