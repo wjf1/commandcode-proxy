@@ -18,6 +18,7 @@
 - **安全默认** — 仅绑定 `127.0.0.1`（可用 `HOST` 显式开放局域网），可选 `PROXY_API_KEY` 共享密钥鉴权，XSS 加固仪表盘，CORS 仅对公共 API 表面开放
 - **打包** — TypeScript 构建、esbuild 打包、`pkg` 生成单文件 Windows exe
 - **中文仪表盘** — 内置界面为中文，含官方模型定价目录（上下文/输入/输出/缓存读/缓存写/能力/Deal），实时从 commandcode.ai 刷新
+- **会话明细用量** — 面板的"用量与额度"标签页内置**会话明细**：逐会话记录 input/output token、耗时、成本、模型、状态，并给出按天趋势折线、模型分布饼图、今日/本周/本月成本卡片；持久化到本地 `~/.commandcode/usage-history.jsonl`，重启不丢
 
 ## 🚀 快速开始
 
@@ -101,6 +102,7 @@ src/
 └── utils/
     ├── config.ts                 # 账号、OAuth 流程、额度轮换
     ├── models.ts                 # 目录同步 + 模糊模型名解析
+    ├── usage-store.ts            # 会话明细持久化 + 聚合统计
     └── logger.ts                 # 净化环形缓冲日志
 ```
 
@@ -128,6 +130,7 @@ A local, fully-compatible **OpenAI Chat Completions** and **Anthropic Messages**
 - **Secure defaults** — binds `127.0.0.1` only (opt-in LAN via `HOST`), optional `PROXY_API_KEY` shared-secret auth, XSS-hardened dashboard, CORS limited to the public API surface
 - **Packaging** — TypeScript build, esbuild bundle, single-file Windows exe via `pkg`
 - **Chinese dashboard** — built-in Chinese UI with official model pricing catalog (context/input/output/cache read/cache write/caps/deals) refreshed live from commandcode.ai
+- **Per-session usage history** — the dashboard's Usage tab includes a **session detail view**: records input/output tokens, latency, cost, model, and status per request, visualized with a daily trend line, model-distribution doughnut, and today/week/month cost cards; persisted to `~/.commandcode/usage-history.jsonl`, survives restarts
 
 ### Quick Start
 
