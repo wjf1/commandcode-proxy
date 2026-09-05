@@ -188,6 +188,66 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
     return { accountsUsage: results };
   });
 
+  // ─── 官方用量总览（对齐 commandcode.ai usage 页数据源）────────────────────────
+  //
+  // 页面的 Total Tokens / Total Runs / Usage Limits 分别来自
+  // /internal/usage/summary 与 /internal/billing/credits（仅认 Web Cookie），
+  // 这里改走字段一致的 CLI 通道 /alpha/usage/summary 与 /alpha/billing/credits。
+  fastify.get('/api/usage/overview', async () => {
+    const config = loadConfig();
+    const acc = config.accounts.find(a => a.id === config.activeAccountId) || config.accounts[0];
+    if (!acc || !acc.apiKey) {
+      return { error: 'No active Command Code account' };
+    }
+    const stats = await fetchLiveUsageStats(acc.apiKey, config.ccApiBase, config.ccVersion);
+    const s = stats.summary || {};
+    const credits = stats.credits?.credits || {};
+    const wl = stats.credits?.windowLimits || {};
+    const monthlyUsed = Number(s.totalMonthlyCredits) || 0;
+    const monthlyRemaining = Number(credits.monthlyCredits) || 0;
+    const pct = (used: unknown, cap: unknown) => {
+      const u = Number(used) || 0;
+      const c = Number(cap) || 0;
+      return c > 0 ? Math.min(100, Math.round((u / c) * 1000) / 10) : 0;
+    };
+    return {
+      account: {
+        id: acc.id,
+        name: acc.name || stats.whoami?.user?.name || 'Default System Account',
+        userName: acc.userName || stats.whoami?.user?.userName || '',
+      },
+      summary: {
+        totalTokens: Number(s.totalTokens) || 0,
+        totalTokensIn: Number(s.totalTokensIn) || 0,
+        totalTokensOut: Number(s.totalTokensOut) || 0,
+        totalRuns: Number(s.totalCount) || 0,
+        completedCount: Number(s.completedCount) || 0,
+        failedCount: Number(s.failedCount) || 0,
+        successRate: Number(s.successRate) || 0,
+        totalCost: Number(s.totalCost) || 0,
+        periodBasis: s.periodBasis || 'billing-period',
+      },
+      limits: {
+        fiveHour: wl.fiveHour
+          ? { used: wl.fiveHour.used, cap: wl.fiveHour.cap, pct: pct(wl.fiveHour.used, wl.fiveHour.cap), exceeded: !!wl.fiveHour.exceeded, resetAt: wl.fiveHour.resetAt || 0 }
+          : null,
+        weekly: wl.weekly
+          ? { used: wl.weekly.used, cap: wl.weekly.cap, pct: pct(wl.weekly.used, wl.weekly.cap), exceeded: !!wl.weekly.exceeded, resetAt: wl.weekly.resetAt || 0 }
+          : null,
+        monthly: {
+          used: monthlyUsed,
+          remaining: monthlyRemaining,
+          cap: Math.round((monthlyUsed + monthlyRemaining) * 100) / 100,
+          pct: pct(monthlyUsed, monthlyUsed + monthlyRemaining),
+        },
+      },
+      sources: {
+        tokensAndRuns: '/alpha/usage/summary',
+        limits: '/alpha/billing/credits',
+      },
+    };
+  });
+
   // ─── 会话明细历史 ────────────────────────────────────────────────────────────
 
   fastify.get('/api/usage/history', async () => {
@@ -308,6 +368,12 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
     <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl"><p class="text-xs text-slate-400 font-medium">已购买</p><h3 id="creditPurchased" class="text-2xl font-extrabold text-indigo-400 mt-1">$0.00</h3></div>
     <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl"><p class="text-xs text-slate-400 font-medium">免费额度</p><h3 id="creditFree" class="text-2xl font-extrabold text-cyan-400 mt-1">$0.00</h3></div>
     <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl"><p class="text-xs text-slate-400 font-medium">总消费</p><h3 id="creditTotalCost" class="text-2xl font-extrabold text-purple-400 mt-1">$0.00</h3></div>
+  </div>
+  <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+    <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl"><p class="text-xs text-slate-400 font-medium">Total Tokens</p><h3 id="ovTotalTokens" class="text-2xl font-extrabold text-purple-400 mt-1">--</h3><p id="ovTokensDetail" class="text-[11px] text-slate-400 mt-2">输入 -- · 输出 --</p></div>
+    <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl"><p class="text-xs text-slate-400 font-medium">Total Runs</p><h3 id="ovTotalRuns" class="text-2xl font-extrabold text-amber-400 mt-1">--</h3><p id="ovRunsDetail" class="text-[11px] text-slate-400 mt-2">成功 -- · 失败 --</p></div>
+    <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl"><p class="text-xs text-slate-400 font-medium">成功率</p><h3 id="ovSuccessRate" class="text-2xl font-extrabold text-cyan-400 mt-1">--</h3><p id="ovPeriod" class="text-[11px] text-slate-400 mt-2">统计口径：--</p></div>
+    <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl"><p class="text-xs text-slate-400 font-medium">月度限额</p><h3 id="ovMonthly" class="text-2xl font-extrabold text-emerald-400 mt-1">--</h3><div class="w-full bg-slate-950 rounded-full h-1.5 overflow-hidden border border-slate-800 mt-2"><div id="ovMonthlyBar" class="h-1.5 rounded-full bg-emerald-500 transition-all duration-500" style="width:0%"></div></div><p id="ovMonthlyDetail" class="text-[11px] text-slate-400 mt-1.5">--</p></div>
   </div>
   <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
     <div class="bg-slate-900 border border-slate-800 p-6 rounded-xl space-y-3">
@@ -511,6 +577,7 @@ async function deleteAcc(id){ if(!confirm('确定移除该账号？'))return; aw
 async function changeRotationMode(mode){ await fetch('/api/accounts/rotation',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rotationMode:mode})}); fetchStatus(); }
 
 async function loadUsageInit() {
+  loadUsageOverview();
   const data = await (await fetch('/api/usage/aggregate')).json();
   globalUsageCache = data.accountsUsage || [];
   const select = document.getElementById('usageAccountSelect');
@@ -518,6 +585,39 @@ async function loadUsageInit() {
   if (!selectedUsageAccountId && globalUsageCache.length > 0) selectedUsageAccountId = globalUsageCache[0].account.id;
   select.value = selectedUsageAccountId;
   renderUsageForAccount(selectedUsageAccountId);
+}
+
+// ─── 官方用量总览（Total Tokens / Total Runs / 成功率 / 月度限额）──────────────
+
+function ovFmtNum(n){ return Number(n || 0).toLocaleString('en-US'); }
+function ovFmtCost(v){ const c = Number(v || 0); return '$' + (c >= 1 ? c.toFixed(2) : c.toFixed(4).replace(/0+$/, '').replace(/\.$/, '')); }
+function ovFmtPct(p){ return (Math.round((Number(p) || 0) * 10) / 10) + '%'; }
+
+async function loadUsageOverview() {
+  const accEl = document.getElementById('ovPeriod');
+  try {
+    const d = await (await fetch('/api/usage/overview')).json();
+    if (d.error) { accEl.innerText = d.error; return; }
+    const s = d.summary || {};
+    document.getElementById('ovTotalTokens').innerText = ovFmtNum(s.totalTokens);
+    document.getElementById('ovTokensDetail').innerText = '输入 ' + ovFmtNum(s.totalTokensIn) + ' · 输出 ' + ovFmtNum(s.totalTokensOut);
+    document.getElementById('ovTotalRuns').innerText = ovFmtNum(s.totalRuns);
+    document.getElementById('ovRunsDetail').innerText = '成功 ' + ovFmtNum(s.completedCount) + ' · 失败 ' + ovFmtNum(s.failedCount);
+    document.getElementById('ovSuccessRate').innerText = s.successRate != null ? ovFmtPct(s.successRate) : '--';
+    accEl.innerText = s.periodBasis === 'last-30-days' ? '统计口径：近 30 天' : '统计口径：当前计费月';
+
+    const mo = (d.limits || {}).monthly;
+    if (mo && mo.cap > 0) {
+      document.getElementById('ovMonthly').innerText = ovFmtPct(mo.pct);
+      const bar = document.getElementById('ovMonthlyBar');
+      bar.style.width = Math.min(100, Math.max(0, mo.pct)) + '%';
+      bar.className = 'h-1.5 rounded-full transition-all duration-500 ' + (mo.pct >= 90 ? 'bg-rose-500' : mo.pct >= 70 ? 'bg-amber-500' : 'bg-emerald-500');
+      document.getElementById('ovMonthlyDetail').innerText = '已用 ' + ovFmtCost(mo.used) + ' / ' + ovFmtCost(mo.cap) + ' · 剩余 ' + ovFmtCost(mo.remaining);
+    } else {
+      document.getElementById('ovMonthly').innerText = '无限制';
+      document.getElementById('ovMonthlyDetail').innerText = '按量计费';
+    }
+  } catch (e) { accEl.innerText = '总览加载失败'; }
 }
 
 function renderUsageForAccount(accId) {

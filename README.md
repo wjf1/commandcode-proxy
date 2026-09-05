@@ -19,6 +19,7 @@
 - **打包** — TypeScript 构建、esbuild 打包、`pkg` 生成单文件 Windows exe
 - **中文仪表盘** — 内置界面为中文，含官方模型定价目录（上下文/输入/输出/缓存读/缓存写/能力/Deal），实时从 commandcode.ai 刷新
 - **会话明细用量** — 面板的"用量与额度"标签页内置**会话明细**：逐会话记录 input/output token、耗时、成本、模型、状态，并给出按天趋势折线、模型分布饼图、今日/本周/本月成本卡片；持久化到本地 `~/.commandcode/usage-history.jsonl`，重启不丢
+- **官方用量总览** — 对齐官方 usage 页面（commandcode.ai/:login/settings/usage）的数据源：**Total Tokens**（含输入/输出拆分）、**Total Runs**（成功/失败/成功率）、**月度限额**进度条来自上游 `/alpha/usage/summary` 与 `/alpha/billing/credits`（与页面 `/internal/*` 接口字段一致，但接受 CLI API Key）；仪表盘新增 `GET /api/usage/overview` 聚合接口
 
 ## 🚀 快速开始
 
@@ -131,6 +132,7 @@ A local, fully-compatible **OpenAI Chat Completions** and **Anthropic Messages**
 - **Packaging** — TypeScript build, esbuild bundle, single-file Windows exe via `pkg`
 - **Chinese dashboard** — built-in Chinese UI with official model pricing catalog (context/input/output/cache read/cache write/caps/deals) refreshed live from commandcode.ai
 - **Per-session usage history** — the dashboard's Usage tab includes a **session detail view**: records input/output tokens, latency, cost, model, and status per request, visualized with a daily trend line, model-distribution doughnut, and today/week/month cost cards; persisted to `~/.commandcode/usage-history.jsonl`, survives restarts
+- **Official usage overview** — mirrors the data sources of the official usage page (`commandcode.ai/:login/settings/usage`): **Total Tokens** (with input/output breakdown), **Total Runs** (completed/failed/success rate) and a **monthly limit** progress bar fetched from upstream `/alpha/usage/summary` and `/alpha/billing/credits` (same fields as the page's `/internal/*` endpoints, but accepting CLI API keys); exposed via the new `GET /api/usage/overview` dashboard endpoint
 
 ### Quick Start
 
