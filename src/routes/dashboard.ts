@@ -45,6 +45,10 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
     if (req.url.startsWith('/v1/') || req.url === '/health') {
       reply.header('Access-Control-Allow-Origin', '*');
     }
+    // 仪表盘 HTML 与管理 API 禁用缓存：升级后浏览器不会再用旧页面调新接口。
+    if (req.url === '/' || req.url.startsWith('/api/') || req.url.startsWith('/?')) {
+      reply.header('Cache-Control', 'no-cache');
+    }
   });
   fastify.options('/v1/*', async (_req, reply) => {
     reply
