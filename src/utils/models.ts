@@ -426,9 +426,11 @@ export function resolveModelName(requestedModel: string): string {
     }
   }
 
-  const defaultModel = available[0]?.id || 'claude-sonnet-5';
-  logger.warn(`[MODELS] Model '${requestedModel}' not found upstream. Falling back to '${defaultModel}'.`);
-  return defaultModel;
+  // 目录里完全找不到时原样透传给上游：上游会对未知模型返回准确的错误，
+  // 而不是像"静默替换成默认模型"那样让用户收到一个从未请求过的模型名
+  // （免费套餐下还会表现为 MODEL_NOT_IN_PLAN 指向错误模型的困惑报错）。
+  logger.warn(`[MODELS] Model '${requestedModel}' not in local catalog; passing through to upstream as-is.`);
+  return raw;
 }
 
 /** 查询上游模型支持的推理档位（reasoning effort tiers）。 */

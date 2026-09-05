@@ -45,16 +45,18 @@ npm run build:win    # dist/commandcode-proxy-v4.exe —— 零依赖运行
 ## 🧪 用法
 
 ```bash
-# OpenAI 风格
+# OpenAI 风格（示例用免费模型，任何套餐可直接跑通）
 curl http://127.0.0.1:9090/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"claude-sonnet-5","messages":[{"role":"user","content":"hi"}]}'
+  -d '{"model":"meituan/LongCat-2.0:free","messages":[{"role":"user","content":"hi"}]}'
 
 # Anthropic 风格
 curl http://127.0.0.1:9090/v1/messages \
   -H "Content-Type: application/json" \
-  -d '{"model":"claude-sonnet-5","max_tokens":1024,"messages":[{"role":"user","content":"hi"}]}'
+  -d '{"model":"meituan/LongCat-2.0:free","max_tokens":1024,"messages":[{"role":"user","content":"hi"}]}'
 ```
+
+> 模型名请以仪表盘"模型"页或 `GET /v1/models` 返回的实时目录为准；免费/折扣模型标有 FREE / DEAL 标签。
 
 客户端配置：OpenAI 风格设 base URL 为 `http://127.0.0.1:9090/v1`，Anthropic 风格设为 `http://127.0.0.1:9090`，密钥随意（若设置了 `PROXY_API_KEY` 则须一致）。
 

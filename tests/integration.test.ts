@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { spawn, ChildProcess } from 'child_process';
+import { randomUUID } from 'node:crypto';
 import http from 'node:http';
 import path from 'node:path';
 
@@ -66,6 +67,10 @@ beforeAll(async () => {
       PORT: String(PROXY_PORT),
       HOST: '127.0.0.1',
       COMMANDCODE_API_BASE: `http://127.0.0.1:${MOCK_PORT}`,
+      // 全新环境（无 config.json / auth.json）下必须有可用凭据，否则 /v1/*
+      // 一律 401，整个集成套件都会失败。mock 上游不校验其值，因此现场
+      // 生成一个随机占位符即可（不是任何真实凭据）。
+      COMMANDCODE_API_KEY: randomUUID(),
       NO_OPEN_BROWSER: '1',
     },
     stdio: 'ignore',
