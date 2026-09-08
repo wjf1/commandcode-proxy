@@ -287,7 +287,7 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
 <script src="https://cdn.tailwindcss.com"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-<style>body{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}.tab-btn.active{border-bottom:2px solid #6366f1;color:#818cf8;font-weight:600}</style>
+<style>body{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}.tab-btn.active{border-bottom:2px solid #6366f1;color:#818cf8;font-weight:600}.mfilter-chip{padding:5px 12px;border-radius:9999px;font-size:11px;font-weight:600;color:#94a3b8;background:#0f172a;border:1px solid #334155;cursor:pointer;transition:all .15s;white-space:nowrap}.mfilter-chip:hover{color:#e2e8f0;border-color:#475569}.mfilter-chip.on{color:#fff;background:linear-gradient(100deg,#6366f1,#8b5cf6);border-color:transparent;box-shadow:0 2px 10px rgba(99,102,241,.35)}mark{background:rgba(129,140,248,.35);color:#e0e7ff;border-radius:3px;padding:0 1px}</style>
 </head>
 <body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col">
 
@@ -405,7 +405,7 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
       <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg"><p class="text-[11px] text-slate-400 font-medium">今日 Token</p><h3 id="usageTodayToken" class="text-lg font-bold text-white mt-1">--</h3><p id="usageTodayRuns" class="text-[11px] text-slate-400 mt-1">-- 次请求</p></div>
       <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg"><p class="text-[11px] text-slate-400 font-medium">本周成本</p><h3 id="usageWeekCost" class="text-lg font-bold text-emerald-400 mt-1">--</h3><p id="usageWeekToken" class="text-[11px] text-slate-400 mt-1">--</p></div>
       <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg"><p class="text-[11px] text-slate-400 font-medium">本月成本</p><h3 id="usageMonthCost" class="text-lg font-bold text-emerald-400 mt-1">--</h3><p id="usageMonthToken" class="text-[11px] text-slate-400 mt-1">--</p></div>
-      <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg"><p class="text-[11px] text-slate-400 font-medium">累计</p><h3 id="usageTotalToken" class="text-lg font-bold text-white mt-1">--</h3><p id="usageTotalRuns" class="text-[11px] text-slate-400 mt-1">-- 次请求</p><span id="usagePricingNote" class="text-[11px] text-amber-400 hidden"><i class="fa-solid fa-triangle-exclamation"></i> 未同步定价</span></div>
+      <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg"><p class="text-[11px] text-slate-400 font-medium">累计</p><h3 id="usageTotalToken" class="text-lg font-bold text-white mt-1">--</h3><p id="usageTotalRuns" class="text-[11px] text-slate-400 mt-1">-- 次请求</p><p id="usagePricingNote" class="text-[11px] text-amber-400 mt-1 hidden"><i class="fa-solid fa-triangle-exclamation"></i> 未同步定价</p></div>
     </div>
 
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
@@ -447,9 +447,38 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
 </section>
 
 <section id="content-models" class="space-y-4 hidden">
-  <div class="flex items-center justify-between">
+  <div class="flex items-center justify-between gap-3 flex-wrap">
     <div><h2 class="text-lg font-bold text-white">上游实时模型</h2><p class="text-xs text-slate-400">官方定价目录 · 价格单位：人民币（元）/ 每 1M tokens</p></div>
-    <button onclick="loadModels(true)" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs rounded-lg flex items-center gap-1.5"><i class="fa-solid fa-rotate"></i> 获取最新模型</button>
+    <button onclick="loadModels(true)" id="modelsRefreshBtn" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs rounded-lg flex items-center gap-1.5 shrink-0"><i class="fa-solid fa-rotate"></i> 获取最新模型</button>
+  </div>
+  <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-3 space-y-2.5">
+    <div class="flex items-center gap-2 flex-wrap justify-end">
+      <div class="relative flex-1 min-w-[220px] max-w-[340px] ml-auto">
+        <i class="fa-solid fa-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-xs pointer-events-none"></i>
+        <input id="modelSearch" type="search" placeholder="搜索模型名称 / ID / 提供商…" autocomplete="off"
+          class="w-full bg-slate-950 border border-slate-700 text-slate-200 text-xs rounded-lg pl-8 pr-8 py-2 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/40 placeholder:text-slate-600">
+        <button id="modelSearchClear" title="清空" class="hidden absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-200 text-xs px-1"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <select id="modelSort" title="排序" class="bg-slate-950 border border-slate-700 text-slate-300 text-xs rounded-lg px-2.5 py-2 outline-none font-medium cursor-pointer">
+        <option value="default">默认顺序</option>
+        <option value="inAsc">输入价 ↑</option>
+        <option value="inDesc">输入价 ↓</option>
+        <option value="outAsc">输出价 ↑</option>
+        <option value="outDesc">输出价 ↓</option>
+        <option value="cacheReadAsc">缓存读 ↑</option>
+        <option value="cacheReadDesc">缓存读 ↓</option>
+        <option value="ctxDesc">上下文 ↓</option>
+      </select>
+    </div>
+    <div class="flex items-center gap-1.5 flex-wrap" id="modelTagRow">
+      <button class="mfilter-chip on" data-tag="all">全部</button>
+      <button class="mfilter-chip" data-tag="go">GO</button>
+      <button class="mfilter-chip" data-tag="free">FREE</button>
+      <button class="mfilter-chip" data-tag="deal">DEAL</button>
+      <button class="mfilter-chip" data-tag="vision">视觉</button>
+      <button class="mfilter-chip" data-tag="reason">推理</button>
+    </div>
+    <p id="modelsCount" class="text-[11px] text-slate-500 text-right"></p>
   </div>
   <div id="modelsList" class="grid grid-cols-1 md:grid-cols-3 gap-3"></div>
 </section>
@@ -658,24 +687,74 @@ function renderUsageForAccount(accId) {
 
 function fmtPrice(v){ if(v===undefined||v===null) return '--'; if(v===0) return 'FREE'; var c=v*6.72; c=c>=100?Math.round(c):Math.round(c*100)/100; return '¥' + c; }
 function fmtCtx(v){ if(!v) return '--'; if(v>=1000000){ var x=(v/1000000); return (x%1===0?x:x.toFixed(1)) + 'M'; } if(v>=1000){ var k=v/1000; return (k%1===0?k:k.toFixed(1)) + 'K'; } return String(v); }
-async function loadModels(force) {
-  if (force) { await fetch('/v1/models/refresh', { method:'POST' }).catch(()=>{}); }
-  const data = await (await fetch('/v1/models')).json();
+// ─── 模型查询：搜索 + 标签 + 排序（纯前端过滤，不新增 API）────────────────────
+let allModelsCache = [];
+let modelTagFilter = 'all';
+let modelSortMode = 'default';
+let modelQueryTimer = null;
+function modelMatchesTag(m, tag) {
+  const caps = m.caps || {};
+  if (tag === 'go') return !!m.onGoPlan;
+  if (tag === 'free') return !!(m.deal && m.deal.free);
+  if (tag === 'deal') return !!(m.deal && m.deal.discountPercent);
+  if (tag === 'vision') return !!(caps.vision || m.supports_vision);
+  if (tag === 'reason') return !!caps.reasoning;
+  return true;
+}
+function modelMatchesQuery(m, q) {
+  if (!q) return true;
+  const hay = ((m.id || '') + ' ' + (m.name || '') + ' ' + (m.owned_by || '')).toLowerCase();
+  return q.split(/\s+/).filter(Boolean).every(kw => hay.includes(kw));
+}
+function sortModels(list) {
+  const price = (m, k) => { const v = m.pricing && m.pricing[k]; return (v === undefined || v === null) ? Infinity : v; };
+  const ctx = (m) => (m.context_window || m.context_length || 0);
+  const arr = list.slice();
+  if (modelSortMode === 'inAsc') arr.sort((a, b) => price(a, 'input') - price(b, 'input'));
+  else if (modelSortMode === 'inDesc') arr.sort((a, b) => { const pa = price(a, 'input'), pb = price(b, 'input'); return (pb === Infinity ? -1 : pb) - (pa === Infinity ? -1 : pa); });
+  else if (modelSortMode === 'outAsc') arr.sort((a, b) => price(a, 'output') - price(b, 'output'));
+  else if (modelSortMode === 'outDesc') arr.sort((a, b) => { const pa = price(a, 'output'), pb = price(b, 'output'); return (pb === Infinity ? -1 : pb) - (pa === Infinity ? -1 : pa); });
+  else if (modelSortMode === 'cacheReadAsc') arr.sort((a, b) => price(a, 'cacheRead') - price(b, 'cacheRead'));
+  else if (modelSortMode === 'cacheReadDesc') arr.sort((a, b) => { const pa = price(a, 'cacheRead'), pb = price(b, 'cacheRead'); return (pb === Infinity ? -1 : pb) - (pa === Infinity ? -1 : pa); });
+  else if (modelSortMode === 'ctxDesc') arr.sort((a, b) => ctx(b) - ctx(a));
+  return arr;
+}
+function highlightHit(text, q) {
+  const safe = esc(text);
+  const kw = (q || '').trim();
+  if (!kw) return safe;
+  const words = kw.split(/\s+/).filter(Boolean).map(w => w.replace(/[.*+?^\${}()|[\]\\]/g, '\\$&'));
+  if (!words.length) return safe;
+  try { return safe.replace(new RegExp('(' + words.join('|') + ')', 'gi'), '<mark>$1</mark>'); }
+  catch { return safe; }
+}
+function applyModelFilter() {
+  const input = document.getElementById('modelSearch');
+  const q = ((input && input.value) || '').trim().toLowerCase();
+  const clearBtn = document.getElementById('modelSearchClear');
+  if (clearBtn) clearBtn.classList.toggle('hidden', !q);
+  const filtered = sortModels(allModelsCache.filter(m => modelMatchesTag(m, modelTagFilter) && modelMatchesQuery(m, q)));
+  const meta = document.getElementById('modelsCount');
+  if (meta) meta.innerText = '共 ' + allModelsCache.length + ' 个 · 命中 ' + filtered.length + ' 个';
   const c = document.getElementById('modelsList');
-  c.innerHTML = (data.data||[]).map(m => {
-    const p = m.pricing||{};
-    const caps = m.caps||{};
+  if (!filtered.length) {
+    c.innerHTML = '<div class="col-span-full text-center py-12 text-slate-500 text-xs"><i class="fa-solid fa-magnifying-glass text-2xl mb-3 block text-slate-600"></i>没有匹配的模型，换个关键词或标签试试</div>';
+    return;
+  }
+  c.innerHTML = filtered.map(m => {
+    const p = m.pricing || {};
+    const caps = m.caps || {};
     let tags = '';
     if (m.onGoPlan) tags += '<span class="text-[10px] px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30 font-semibold">GO</span>';
     if (m.deal && m.deal.free) tags += '<span class="text-[10px] px-2 py-0.5 rounded bg-rose-500/15 text-rose-300 border border-rose-500/30 font-semibold">FREE</span>';
     else if (m.deal && m.deal.discountPercent) tags += '<span class="text-[10px] px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 font-semibold">DEAL ' + m.deal.discountPercent + '%</span>';
     if (!tags) tags = '<span class="text-[10px] px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-semibold">可用</span>';
-    const capsStr = '文字' + (caps.text?'✓':'✗') + ' · 视觉' + (caps.vision?'✓':'✗') + ' · 推理' + (caps.reasoning?'✓':'✗');
-    return '<div class="p-3 bg-slate-900 border border-slate-800 rounded-lg">' +
+    const capsStr = '文字' + (caps.text ? '✓' : '✗') + ' · 视觉' + ((caps.vision || m.supports_vision) ? '✓' : '✗') + ' · 推理' + (caps.reasoning ? '✓' : '✗');
+    return '<div class="p-3 bg-slate-900 border border-slate-800 rounded-lg hover:border-indigo-500/40 transition">' +
       '<div class="flex items-start justify-between gap-2">' +
-        '<div class="min-w-0"><p class="font-bold text-xs text-white break-all">' + esc(m.id) + '</p>' +
-        '<p class="text-[11px] text-slate-400 mt-0.5">提供商：' + esc(m.owned_by) + '</p></div>' +
-        '<div class="flex gap-1 flex-wrap justify-end">' + tags + '</div>' +
+        '<div class="min-w-0"><p class="font-bold text-xs text-white break-all">' + highlightHit(m.id, q) + '</p>' +
+        '<p class="text-[11px] text-slate-400 mt-0.5">提供商：' + highlightHit(m.owned_by, q) + (m.name && m.name !== m.id ? ' · ' + highlightHit(m.name, q) : '') + '</p></div>' +
+        '<div class="flex gap-1 flex-wrap justify-end shrink-0">' + tags + '</div>' +
       '</div>' +
       '<div class="mt-2 grid grid-cols-2 gap-x-2 gap-y-1 text-[11px] text-slate-400">' +
         '<span>上下文：<span class="text-slate-200">' + fmtCtx(m.context_window || m.context_length) + '</span></span>' +
@@ -687,6 +766,35 @@ async function loadModels(force) {
       '</div>' +
     '</div>';
   }).join('');
+}
+function bindModelQueryOnce() {
+  const input = document.getElementById('modelSearch');
+  if (!input || input.dataset.bound) return;
+  input.dataset.bound = '1';
+  input.addEventListener('input', () => { clearTimeout(modelQueryTimer); modelQueryTimer = setTimeout(applyModelFilter, 150); });
+  input.addEventListener('keydown', (e) => { if (e.key === 'Escape') { input.value = ''; applyModelFilter(); } });
+  document.getElementById('modelSearchClear').onclick = () => { input.value = ''; input.focus(); applyModelFilter(); };
+  document.getElementById('modelSort').onchange = (e) => { modelSortMode = e.target.value; applyModelFilter(); };
+  document.querySelectorAll('#modelTagRow .mfilter-chip').forEach(btn => {
+    btn.onclick = () => {
+      modelTagFilter = btn.dataset.tag;
+      document.querySelectorAll('#modelTagRow .mfilter-chip').forEach(b => b.classList.toggle('on', b === btn));
+      applyModelFilter();
+    };
+  });
+}
+async function loadModels(force) {
+  const btn = document.getElementById('modelsRefreshBtn');
+  if (force) { await fetch('/v1/models/refresh', { method: 'POST' }).catch(() => {}); }
+  if (btn) { btn.disabled = true; btn.classList.add('opacity-60'); }
+  try {
+    const data = await (await fetch('/v1/models')).json();
+    allModelsCache = data.data || [];
+    bindModelQueryOnce();
+    applyModelFilter();
+  } finally {
+    if (btn) { btn.disabled = false; btn.classList.remove('opacity-60'); }
+  }
 }
 
 async function loadLogs() {
@@ -707,6 +815,7 @@ let usageModelChart = null;
 let usageHistoryCache = null;
 
 function fmtTokens(n){ if(!n) return '0'; if(n>=1000000){var x=n/1000000; return (x%1===0?x:x.toFixed(1))+'M';} if(n>=1000){var k=n/1000; return (k%1===0?k:k.toFixed(1))+'K';} return String(n); }
+function fmtTokensM(n){ if(!n) return '0'; var x=n/1000000; return (x>=100?Math.round(x):x>=10?x.toFixed(1):x.toFixed(2))+'M'; }
 function fmtUsd(v){ return '$' + (v||0).toFixed(4); }
 function fmtMs(ms){ if(!ms) return '--'; if(ms>=60000){var m=Math.floor(ms/60000),s=(ms%60000)/1000; return m+'m '+s.toFixed(1)+'s';} if(ms>=1000) return (ms/1000).toFixed(1)+'s'; return Math.round(ms)+'ms'; }
 function fmtTime(ts){ try { const d=new Date(ts); return d.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit'}); } catch { return ts; } }
@@ -716,13 +825,13 @@ async function loadUsageHistory(){
   const data = usageHistoryCache;
   const s = data.total;
 
-  document.getElementById('usageTodayToken').innerText = fmtTokens(data.today.input + data.today.output) + ' token';
+  document.getElementById('usageTodayToken').innerText = fmtTokensM(data.today.input + data.today.output) + ' token';
   document.getElementById('usageTodayRuns').innerText = data.today.runs + ' 次请求';
   document.getElementById('usageWeekCost').innerText = fmtUsd(data.week.cost);
-  document.getElementById('usageWeekToken').innerText = fmtTokens(data.week.input + data.week.output) + ' token · ' + data.week.runs + ' 次';
+  document.getElementById('usageWeekToken').innerText = fmtTokensM(data.week.input + data.week.output) + ' token · ' + data.week.runs + ' 次';
   document.getElementById('usageMonthCost').innerText = fmtUsd(data.month.cost);
-  document.getElementById('usageMonthToken').innerText = fmtTokens(data.month.input + data.month.output) + ' token · ' + data.month.runs + ' 次';
-  document.getElementById('usageTotalToken').innerText = fmtTokens(s.inputTokens + s.outputTokens) + ' token';
+  document.getElementById('usageMonthToken').innerText = fmtTokensM(data.month.input + data.month.output) + ' token · ' + data.month.runs + ' 次';
+  document.getElementById('usageTotalToken').innerText = fmtTokensM(s.inputTokens + s.outputTokens) + ' token';
   document.getElementById('usageTotalRuns').innerText = s.runs + ' 次请求 · 失败 ' + s.failures;
 
   const hasAnyPricing = (data.recent||[]).some(r => r.hasPricing);

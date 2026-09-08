@@ -7,6 +7,7 @@ models.json
 auth.json
 *.log
 .qoder/
+.mimosa/
 
 pricing.json
 logs/

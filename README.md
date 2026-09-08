@@ -1,4 +1,4 @@
-# CommandCode Proxy v4 <img src="https://img.shields.io/badge/version-4.0.0-6366f1" alt="v4">
+# CommandCode Proxy v4 <img src="https://img.shields.io/badge/version-4.1.0-6366f1" alt="v4">
 
 > 中文 | [English](#english-anchor)
 
@@ -17,7 +17,7 @@
 - **多账号** — 仪表盘 OAuth 浏览器登录 + 手动输入 Key，5 小时额度轮换调度器（≥90% 自动切换）
 - **安全默认** — 仅绑定 `127.0.0.1`（可用 `HOST` 显式开放局域网），可选 `PROXY_API_KEY` 共享密钥鉴权，XSS 加固仪表盘，CORS 仅对公共 API 表面开放
 - **打包** — TypeScript 构建、esbuild 打包、`pkg` 生成单文件 Windows exe
-- **中文仪表盘** — 内置界面为中文，含官方模型定价目录（上下文/输入/输出/缓存读/缓存写/能力/Deal），实时从 commandcode.ai 刷新
+- **中文仪表盘** — 内置界面为中文，含官方模型定价目录（上下文/输入/输出/缓存读/缓存写/能力/Deal），实时从 commandcode.ai 刷新；模型目录支持**搜索、GO/FREE/DEAL/视觉/推理标签筛选与排序**，令牌数大数（K/M）友好显示
 - **会话明细用量** — 面板的"用量与额度"标签页内置**会话明细**：逐会话记录 input/output token、耗时、成本、模型、状态，并给出按天趋势折线、模型分布饼图、今日/本周/本月成本卡片；持久化到本地 `~/.commandcode/usage-history.jsonl`，重启不丢
 - **官方用量总览** — 对齐官方 usage 页面（commandcode.ai/:login/settings/usage）的数据源：**Total Tokens**（含输入/输出拆分）、**Total Runs**（成功/失败/成功率）、**月度限额**进度条来自上游 `/alpha/usage/summary` 与 `/alpha/billing/credits`（与页面 `/internal/*` 接口字段一致，但接受 CLI API Key）；仪表盘新增 `GET /api/usage/overview` 聚合接口
 
