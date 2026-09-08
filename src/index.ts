@@ -11,7 +11,7 @@
 //   7. 监听端口；默认自动打开浏览器显示仪表盘
 // =============================================================================
 import Fastify from 'fastify';
-import { loadConfig, openBrowser, checkAndRotateAccountsOnQuota, getActiveApiKey, resolveBodyLimit } from './utils/config.js';
+import { loadConfig, openBrowser, checkAndRotateAccountsOnQuota, getActiveApiKey, resolveBodyLimit, enrichDefaultAccountName } from './utils/config.js';
 import { fetchUpstreamModels } from './utils/models.js';
 import { logger } from './utils/logger.js';
 import { chatRoutes, verifyProxyAuth } from './routes/chat.js';
@@ -59,6 +59,10 @@ const start = async () => {
     if (activeApiKey) {
       fetchUpstreamModels(activeApiKey, config.ccVersion).catch(err => {
         logger.warn(`[BOOT] Model fetch background warning: ${err.message}`);
+      });
+      // 后台补全兜底账号的真实用户名（whoami），不阻塞启动；失败静默。
+      enrichDefaultAccountName().catch(err => {
+        logger.warn(`[BOOT] Account name enrichment warning: ${err?.message || err}`);
       });
     }
 

@@ -22,6 +22,7 @@ import {
   setRotationMode,
   fetchLiveUsageStats,
   getActiveApiKey,
+  defaultAccountName,
 } from '../utils/config.js';
 import { getCachedModels } from '../utils/models.js';
 import { getUsageHistory, getUsageStats, clearUsageHistory } from '../utils/usage-store.js';
@@ -170,7 +171,7 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
     const targetAccounts =
       config.accounts.length > 0
         ? config.accounts
-        : [{ id: 'acc_default', name: 'Default System Account', apiKey: getActiveApiKey() }];
+        : [{ id: 'acc_default', name: defaultAccountName(getActiveApiKey(), ''), apiKey: getActiveApiKey() }];
 
     const results = await Promise.all(
       targetAccounts.map(async (acc: any) => {
@@ -179,7 +180,7 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
         return {
           account: {
             id: acc.id,
-            name: acc.name || (who ? who.name || who.userName : 'Default System Account'),
+            name: acc.name || (who ? who.name || who.userName : defaultAccountName(acc.apiKey, '')),
             userName: acc.userName || who?.userName || 'system_user',
             email: acc.email || who?.email || 'System Auth Key',
             isActive: acc.id === config.activeAccountId || targetAccounts.length === 1,
@@ -217,7 +218,7 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
     return {
       account: {
         id: acc.id,
-        name: acc.name || stats.whoami?.user?.name || 'Default System Account',
+        name: acc.name || stats.whoami?.user?.name || defaultAccountName(acc.apiKey, ''),
         userName: acc.userName || stats.whoami?.user?.userName || '',
       },
       summary: {

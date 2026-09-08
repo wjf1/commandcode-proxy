@@ -1,4 +1,4 @@
-# CommandCode Proxy v4 <img src="https://img.shields.io/badge/version-4.2.3-6366f1" alt="v4">
+# CommandCode Proxy v4 <img src="https://img.shields.io/badge/version-4.2.4-6366f1" alt="v4">
 
 > 中文 | [English](#english-anchor)
 
@@ -93,7 +93,7 @@ curl http://127.0.0.1:9090/v1/messages \
 | `PORT` | `9090` | 监听端口 |
 | `HOST` | `127.0.0.1` | 绑定地址（`0.0.0.0` 暴露到局域网） |
 | `PROXY_API_KEY` | 未设置 | 要求 `/v1/*` 携带该密钥（Bearer 或 `x-api-key`） |
-| `COMMANDCODE_API_KEY` | 取自 auth.json | 上游密钥兜底 |
+| `COMMANDCODE_API_KEY` | 取自 auth.json | 上游密钥兜底；无命名账号时账号名显示为 `CLI Key (尾4位 xxxx)` / `Env Key (尾4位 xxxx)`，启动后由 whoami 异步补全真实用户名 |
 | `COMMANDCODE_API_BASE` | `https://api.commandcode.ai` | 上游服务地址 |
 | `COMMANDCODE_UPSTREAM_ALLOWED_HOSTS` | 未设置 | 追加允许的上游 host（逗号分隔，供自建网关/镜像）；环回/私有/保留地址默认拒绝，仅在此显式加入才放行 |
 | `COMMANDCODE_VERSION` | `1.27.1` | CLI 版本标识头 |
@@ -204,7 +204,7 @@ On first launch the dashboard opens automatically. Log in via **Browser (OAuth)*
 | `PORT` | `9090` | Listen port |
 | `HOST` | `127.0.0.1` | Bind address (`0.0.0.0` exposes to LAN) |
 | `PROXY_API_KEY` | unset | Require this key on `/v1/*` (Bearer or `x-api-key`) |
-| `COMMANDCODE_API_KEY` | from auth.json | Upstream key fallback |
+| `COMMANDCODE_API_KEY` | from auth.json | Upstream key fallback; with no named account the name shows as `CLI Key (last4 xxxx)` / `Env Key (last4 xxxx)`, enriched from whoami after boot |
 | `COMMANDCODE_API_BASE` | `https://api.commandcode.ai` | Upstream base |
 | `COMMANDCODE_UPSTREAM_ALLOWED_HOSTS` | unset | Extra allowed upstream hosts (comma-separated, for self-hosted gateways/mirrors); loopback/private/reserved are rejected by default unless added here |
 | `COMMANDCODE_VERSION` | `1.27.1` | CLI version header |

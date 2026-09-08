@@ -168,22 +168,33 @@ export function assertSafeUpstreamUrl(rawUrl: string): URL {
 }
 
 /** 从环境变量或用户级 auth.json 加载默认 API Key（作为无账号配置时的兜底）。 */
-export function loadDefaultApiKeyFromEnvOrSystem(): string {
+export function loadDefaultApiKeyFromEnvOrSystem(): { apiKey: string; source: 'env' | 'auth.json' | '' } {
   if (process.env.COMMANDCODE_API_KEY) {
-    return process.env.COMMANDCODE_API_KEY.trim();
+    return { apiKey: process.env.COMMANDCODE_API_KEY.trim(), source: 'env' };
   }
   try {
     const authFile = path.join(os.homedir(), '.commandcode', 'auth.json');
     if (fs.existsSync(authFile)) {
       const content = JSON.parse(fs.readFileSync(authFile, 'utf-8'));
       if (content.apiKey || content.token) {
-        return String(content.apiKey || content.token).trim();
+        return { apiKey: String(content.apiKey || content.token).trim(), source: 'auth.json' };
       }
     }
   } catch (err: any) {
     logger.warn(`[CONFIG] Could not read ~/.commandcode/auth.json: ${err.message}`);
   }
-  return '';
+  return { apiKey: '', source: '' };
+}
+
+/**
+ * 为兜底账号生成显示名（不写死占位名）。
+ * 例：`CLI Key (尾4位 xxxx)` / `Env Key (尾4位 xxxx)`。仅用 Key 尾 4 位做区分，
+ * 不暴露完整密钥；真实用户名待启动时异步补全（见后台账号名补全）。
+ */
+export function defaultAccountName(apiKey: string, source: 'env' | 'auth.json' | ''): string {
+  const tail = String(apiKey || '').slice(-4) || '????';
+  const label = source === 'auth.json' ? 'CLI Key' : source === 'env' ? 'Env Key' : 'API Key';
+  return `${label} (尾4位 ${tail})`;
 }
 
 export function loadConfig(): GatewayConfig {
@@ -211,11 +222,11 @@ export function loadConfig(): GatewayConfig {
 
   let accounts: AccountInfo[] = Array.isArray(fileConfig.accounts) ? fileConfig.accounts : [];
   if (accounts.length === 0) {
-    const sysKey = loadDefaultApiKeyFromEnvOrSystem();
+    const { apiKey: sysKey, source } = loadDefaultApiKeyFromEnvOrSystem();
     if (sysKey) {
       accounts.push({
         id: 'acc_default',
-        name: 'Default System Account',
+        name: defaultAccountName(sysKey, source),
         apiKey: sysKey,
         addedAt: new Date().toISOString(),
       });
@@ -313,7 +324,7 @@ export function getActiveAccount(): AccountInfo | undefined {
 
 export function getActiveApiKey(): string {
   const acc = getActiveAccount();
-  return acc?.apiKey || loadDefaultApiKeyFromEnvOrSystem();
+  return acc?.apiKey || loadDefaultApiKeyFromEnvOrSystem().apiKey;
 }
 
 export function setActiveAccount(accountId: string): void {
@@ -366,6 +377,36 @@ export async function loginNewAccount(apiKey: string, name?: string): Promise<Ac
 
   logger.info(`[AUTH] Registered new account: ${accName} (${id})`);
   return newAcc;
+}
+
+/**
+ * 启动后异步补全兜底账号的真实用户名（不阻塞启动）。
+ * 对 `config.json` 里没有命名账号、仅靠环境变量/auth.json 兜底 Key 的场景：
+ * 用 `/alpha/whoami` 拿到 `user.name || user.userName`，将账号名补为
+ * `Command Code (xxx)`，并回填 userName/email/userId。失败或拿不到时
+ * 静默保留来源+尾4位显示名。
+ */
+export async function enrichDefaultAccountName(): Promise<void> {
+  try {
+    const config = loadConfig();
+    const acc = config.accounts.find(a => a.id === config.activeAccountId) || config.accounts[0];
+    if (!acc?.apiKey) return;
+    // 已有真实命名（含手动/OAuth 登录的账号）则不覆盖。
+    if (acc.userName || (acc.name && !/尾4位|Default System Account|API Key$/i.test(acc.name))) return;
+    const stats = await fetchLiveUsageStats(acc.apiKey, config.ccApiBase, config.ccVersion);
+    const who = stats.whoami?.user;
+    const realName = who && (who.name || who.userName);
+    if (!realName) return;
+    const updated = config.accounts.map(a =>
+      a.id === acc.id
+        ? { ...a, name: `Command Code (${realName})`, userName: who.userName, email: who.email, userId: who.id }
+        : a,
+    );
+    saveConfigFile({ accounts: updated });
+    logger.info(`[AUTH] Enriched account name: ${acc.name} -> Command Code (${realName})`);
+  } catch (err: any) {
+    logger.warn(`[AUTH] Account name enrichment skipped: ${err?.message || err}`);
+  }
 }
 
 export function logoutAccount(accountId: string): boolean {
