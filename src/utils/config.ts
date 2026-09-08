@@ -37,6 +37,23 @@ const DEFAULTS = {
   maxRetries: 2,
 };
 
+const DEFAULT_BODY_LIMIT_MB = 64;
+
+/**
+ * 入站请求体上限（fastify bodyLimit，单位字节）。
+ * 视觉/多图请求的 base64 负载常超过 Fastify 默认 1MB，会触发 413
+ * (FST_ERR_CTP_BODY_TOO_LARGE)。默认 64MB，可用环境变量 MAX_BODY_MB 调整
+ * （1..1024 的正整数）；非法值或未设置回退默认。
+ */
+export function resolveBodyLimit(): number {
+  const raw = (process.env.MAX_BODY_MB || '').trim();
+  if (/^\d+$/.test(raw)) {
+    const mb = parseInt(raw, 10);
+    if (mb >= 1 && mb <= 1024) return mb * 1024 * 1024;
+  }
+  return DEFAULT_BODY_LIMIT_MB * 1024 * 1024;
+}
+
 // ─── 上游 URL 安全校验（SSRF 加固）─────────────────────────────────────────────
 //
 // 所有服务端发起的上游请求（fetch / 用量统计 / 模型同步 / pricing 页）都必须

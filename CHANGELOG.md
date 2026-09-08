@@ -2,6 +2,15 @@
 
 所有主要版本更新都记录在此文件。
 
+## [4.2.3] - 2026-09-08
+
+### 修复
+- **视觉请求 413（`FST_ERR_CTP_BODY_TOO_LARGE`）** — Fastify 默认入站请求体上限为 1MB，视觉/多图请求的 base64 负载经常超限被拒（status=413、retryable=false）。将 `bodyLimit` 调整为可配置：
+  - 默认 **64MB**（`src/utils/config.ts#resolveBodyLimit`）。
+  - 新增环境变量 **`MAX_BODY_MB`**（1..1024 的正整数，按 MB 计），非法值/未设置回退默认，便于按需调整。
+  - 新增 `tests/config-body.test.ts` 覆盖默认值、读取与非法回退。
+- 版本号 `4.2.2` → `4.2.3`。
+
 ## [4.2.2] - 2026-09-08
 
 ### 文档

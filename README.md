@@ -1,4 +1,4 @@
-# CommandCode Proxy v4 <img src="https://img.shields.io/badge/version-4.2.2-6366f1" alt="v4">
+# CommandCode Proxy v4 <img src="https://img.shields.io/badge/version-4.2.3-6366f1" alt="v4">
 
 > 中文 | [English](#english-anchor)
 
@@ -99,6 +99,7 @@ curl http://127.0.0.1:9090/v1/messages \
 | `COMMANDCODE_VERSION` | `1.27.1` | CLI 版本标识头 |
 | `ROTATION_MODE` | `manual` | `auto-quota` 启用 30 分钟额度检查 |
 | `NO_OPEN_BROWSER` | 未设置 | 设为 `1` 跳过仪表盘自动打开 |
+| `MAX_BODY_MB` | `64` | 入站 JSON 请求体上限（MB）；视觉/多图 base64 负载超默认 1MB 会触发 413（`FST_ERR_CTP_BODY_TOO_LARGE`），范围 1..1024 |
 
 持久化配置存于可执行文件旁的 `config.json`。
 
@@ -209,6 +210,7 @@ On first launch the dashboard opens automatically. Log in via **Browser (OAuth)*
 | `COMMANDCODE_VERSION` | `1.27.1` | CLI version header |
 | `ROTATION_MODE` | `manual` | `auto-quota` enables 30-min quota checks |
 | `NO_OPEN_BROWSER` | unset | Set `1` to skip dashboard auto-open |
+| `MAX_BODY_MB` | `64` | Max inbound JSON body size (MB); vision/multi-image base64 payloads exceed the 1MB default (413, `FST_ERR_CTP_BODY_TOO_LARGE`). Range 1..1024 |
 
 Persistent config lives in `config.json` next to the executable.
 

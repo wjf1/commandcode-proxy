@@ -245,6 +245,17 @@ describe('OpenAI /v1/chat/completions — real-client feel', () => {
       function: { name: 'get_weather', arguments: '{"city":"Chennai","unit":"celsius"}' },
     });
   });
+
+  it('accepts request bodies larger than the 1MB Fastify default (no 413)', async () => {
+    const big = 'x'.repeat(2 * 1024 * 1024); // ~2MB payload
+    const res = await fetch(`${PROXY_BASE}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-sonnet-5', messages: [{ role: 'user', content: big }], max_tokens: 16 }),
+    });
+    // bodyLimit is raised to 64MB by default, so a >1MB body must NOT be rejected with 413.
+    expect(res.status).toBe(200);
+  });
 });
 
 // ─── Reasoning effort mapping ────────────────────────────────────────────────

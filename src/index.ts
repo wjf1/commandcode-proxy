@@ -11,7 +11,7 @@
 //   7. 监听端口；默认自动打开浏览器显示仪表盘
 // =============================================================================
 import Fastify from 'fastify';
-import { loadConfig, openBrowser, checkAndRotateAccountsOnQuota, getActiveApiKey } from './utils/config.js';
+import { loadConfig, openBrowser, checkAndRotateAccountsOnQuota, getActiveApiKey, resolveBodyLimit } from './utils/config.js';
 import { fetchUpstreamModels } from './utils/models.js';
 import { logger } from './utils/logger.js';
 import { chatRoutes, verifyProxyAuth } from './routes/chat.js';
@@ -32,6 +32,9 @@ const config = loadConfig();
 const fastify = Fastify({
   logger: false,
   trustProxy: true,
+  // 视觉/多图请求的 base64 负载可能超过 Fastify 默认 1MB，触发 413
+  // (FST_ERR_CTP_BODY_TOO_LARGE)。默认 64MB，可用环境变量 MAX_BODY_MB 调整。
+  bodyLimit: resolveBodyLimit(),
 });
 
 const QUOTA_CHECK_INTERVAL_MS = 30 * 60 * 1000; // 每 30 分钟检查一次额度
