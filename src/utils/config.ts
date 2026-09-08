@@ -57,6 +57,39 @@ function isLoopback(host: string): boolean {
   return LOOPBACK_HOSTS.has(host);
 }
 
+/**
+ * 判断 host 是否是环回、私有或保留地址（IP 字面量）。这些内网/特殊地址默认一律
+ * 拒绝，避免 SSRF 把请求导向本机、云元数据或内网；除非运维显式加入允许清单。
+ * 非 IP 字面量（如域名）由 allowlist 判定，不在此处拦截。
+ */
+function isPrivateOrReserved(host: string): boolean {
+  if (isLoopback(host)) return true;
+  // IPv6：ULA fc00::/7、链路本地 fe80::/10 视为私有/保留
+  if (host.includes(':')) {
+    const h = host.toLowerCase();
+    const fb = h.slice(0, 2);
+    if (fb === 'fc' || fb === 'fd') return true;
+    if (fb === 'fe') {
+      const third = h.slice(2, 3);
+      return third >= '8' && third <= 'b'; // fe80::/10 - febf::/10
+    }
+    return false;
+  }
+  // IPv4
+  const parts = host.split('.').map(Number);
+  if (parts.length === 4 && parts.every(n => Number.isInteger(n) && n >= 0 && n <= 255)) {
+    const [a, b] = parts;
+    if (a === 10) return true;                        // 10.0.0.0/8
+    if (a === 127) return true;                       // 127.0.0.0/8 回环
+    if (a === 169 && b === 254) return true;          // 169.254.0.0/16 链路本地（含云元数据 169.254.169.254）
+    if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
+    if (a === 192 && b === 168) return true;          // 192.168.0.0/16
+    if (a === 0 || a >= 224) return true;             // 0.0.0.0/8、224/4(组播)、240/4(保留) 等
+    return false;
+  }
+  return false;
+}
+
 function hostInExtraAllowlist(host: string): boolean {
   const extra = (process.env.COMMANDCODE_UPSTREAM_ALLOWED_HOSTS || '')
     .split(',')
@@ -65,13 +98,18 @@ function hostInExtraAllowlist(host: string): boolean {
   return extra.some(e => host === e || host.endsWith('.' + e));
 }
 
+function isDefaultAllowedHost(host: string): boolean {
+  // commandcode.ai 及其子域
+  const sub = host.split('.').slice(-2).join('.');
+  return host === 'commandcode.ai' || sub === 'commandcode.ai';
+}
+
 export function isAllowedUpstreamHost(hostname: string): boolean {
   const host = normalizeHost(hostname);
   if (!host) return false;
-  if (isLoopback(host)) return true;
-  // commandcode.ai 及其子域（含命令显式二级及以下）
-  const sub = host.split('.').slice(-2).join('.');
-  if (host === 'commandcode.ai' || sub === 'commandcode.ai') return true;
+  // 环回/私有/保留地址默认拒绝，仅当运维显式加入允许清单时放行（自建网关/镜像/本地 mock）。
+  if (isPrivateOrReserved(host)) return hostInExtraAllowlist(host);
+  if (isDefaultAllowedHost(host)) return true;
   return hostInExtraAllowlist(host);
 }
 
@@ -95,10 +133,18 @@ export function assertSafeUpstreamUrl(rawUrl: string): URL {
   const host = normalizeHost(url.hostname);
   if (!host) throw new Error('[NET] Upstream URL has no host');
   const loopback = isLoopback(host);
+  const privateOrReserved = isPrivateOrReserved(host);
+  const explicitlyAllowed = hostInExtraAllowlist(host);
+  // 环回/私有/保留地址（含 localhost、127.x、10.x、169.254.x、192.168.x、172.16-31.x、
+  // IPv6 ULA/链路本地）默认拒绝，除非运维显式加入允许清单。
+  if (privateOrReserved && !explicitlyAllowed) {
+    throw new Error(`[NET] Upstream host is private/loopback and not allowlisted: ${host}`);
+  }
+  // 非环回强制 https（避免降级到明文）；环回且显式放行时才允许 http（用于本地 mock/自建网关）。
   if (url.protocol === 'http:' && !loopback) {
     throw new Error('[NET] Non-loopback upstream must use https (got http)');
   }
-  if (!loopback && !isAllowedUpstreamHost(host)) {
+  if (!isAllowedUpstreamHost(host)) {
     throw new Error(`[NET] Upstream host is not allowed: ${host}`);
   }
   return url;

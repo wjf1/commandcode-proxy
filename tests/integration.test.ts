@@ -67,6 +67,8 @@ beforeAll(async () => {
       PORT: String(PROXY_PORT),
       HOST: '127.0.0.1',
       COMMANDCODE_API_BASE: `http://127.0.0.1:${MOCK_PORT}`,
+      // 回环/私有地址默认被拒绝；此处显式允许本机 mock 上游（本地自建网关/sandbox 场景）。
+      COMMANDCODE_UPSTREAM_ALLOWED_HOSTS: '127.0.0.1',
       // 全新环境（无 config.json / auth.json）下必须有可用凭据，否则 /v1/*
       // 一律 401，整个集成套件都会失败。mock 上游不校验其值，因此现场
       // 生成一个随机占位符即可（不是任何真实凭据）。

@@ -1,4 +1,4 @@
-# CommandCode Proxy v4 <img src="https://img.shields.io/badge/version-4.2.0-6366f1" alt="v4">
+# CommandCode Proxy v4 <img src="https://img.shields.io/badge/version-4.2.1-6366f1" alt="v4">
 
 > 中文 | [English](#english-anchor)
 
@@ -8,6 +8,55 @@
 
 ---
 
+## 📊 可视化总览 · Visual Overview
+
+以下三张图快速说明代理的定位、一次调用的翻译流程，以及上游 URL 的安全校验，对中英文读者通用。
+*The three diagrams below give a quick overview of the proxy's role, the per-request translation flow, and how upstream URLs are validated.*
+
+### 架构总览 · Architecture
+
+```mermaid
+flowchart LR
+    subgraph CLIENTS[客户端 Clients]
+        A[OpenAI 风格<br/>Cursor · Continue · Aider<br/>OpenWebUI · Hermes]
+        B[Anthropic 风格<br/>Claude Code · 自定义程序]
+    end
+    subgraph PROXY[CommandCode Proxy · 本机 127.0.0.1:9090]
+        C[网关 Gateway]
+        D[翻译引擎<br/>OpenAI / Anthropic 协议 → CC wire]
+        E[上游客户端 Upstream<br/>重试 · 空闲看门狗 · 断连中止]
+    end
+    subgraph CC[CommandCode AI · commandcode.ai]
+        F[/alpha/generate]
+        G[用量 · 定价<br/>/alpha/usage · /alpha/billing]
+    end
+    A --> C
+    B --> C
+    C --> D
+    D --> E
+    E -->|https| F
+    F --> E
+    C -->|https| G
+    G --> C
+```
+
+### 一次调用的翻译流程 · Per-request translation flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Cli as OpenAI / Anthropic 客户端
+    participant P as Proxy（本机）
+    participant U as 上游 commandcode.ai
+    Cli->>P: POST /v1/chat/completions 或 /v1/messages
+    P->>P: assertSafeUpstreamUrl 校验上游地址
+    P->>P: 协议翻译为 CC wire（工具 / 视觉 / 推理档位映射）
+    P->>U: POST /alpha/generate（SSE 流）
+    U-->>P: start → text-delta → tool-call → finish
+    P-->>Cli: 映射回 OpenAI / Anthropic 流式块（SSE）或 JSON
+    Note over P,U: 透传上游 totalUsage / usage
+```
+
 ## ✨ 功能特性
 
 - **OpenAI `/v1/chat/completions`** — 流式 SSE + 非流式，工具调用（并行工具、流式 `tool_calls` 增量），视觉（`image_url` base64/data-URL），`reasoning_effort` 映射，`max_completion_tokens`，透传上游 `totalUsage` 用量
@@ -15,7 +64,7 @@
 - **忠实还原 wire 翻译** — 经官方 CLI 源码逐行核对：原始 base64 图片块带 `mediaType`、`tool_search→search_tools` 别名、按模型细分推理档位 snap、终止性错误不重试列表（`model_not_in_plan`、`premium_credits_exhausted`、`insufficient credits`）
 - **可靠性** — 429/5xx/网络错误指数退避重试，空闲流看门狗（不会无限挂起），客户端断开即取消，保证流干净收尾
 - **多账号** — 仪表盘 OAuth 浏览器登录 + 手动输入 Key，5 小时额度轮换调度器（≥90% 自动切换）
-- **安全默认** — 仅绑定 `127.0.0.1`（可用 `HOST` 显式开放局域网），可选 `PROXY_API_KEY` 共享密钥鉴权，XSS 加固仪表盘，CORS 仅对公共 API 表面开放；所有服务端上游请求经 `assertSafeUpstreamUrl` 校验（拒绝非 http(s) 协议、内嵌凭据、非 `commandcode.ai`/回环的任意 host，非回环强制 https），打开浏览器改为无 shell 的 `spawn` 参数调用（杜绝命令注入）
+- **安全默认** — 仅绑定 `127.0.0.1`（可用 `HOST` 显式开放局域网），可选 `PROXY_API_KEY` 共享密钥鉴权，XSS 加固仪表盘，CORS 仅对公共 API 表面开放；所有服务端上游请求经 `assertSafeUpstreamUrl` 校验（拒绝非 http(s) 协议、内嵌凭据、非 `commandcode.ai` 的任意 host，且默认拒绝环回/私有/保留地址——除非显式加入允许清单；非回环强制 https），打开浏览器改为无 shell 的 `spawn` 参数调用（杜绝命令注入）
 - **打包** — TypeScript 构建、esbuild 打包、`pkg` 生成单文件 Windows exe
 - **中文仪表盘** — 内置界面为中文，含官方模型定价目录（上下文/输入/输出/缓存读/缓存写/能力/Deal），实时从 commandcode.ai 刷新；模型目录支持**搜索、GO/FREE/DEAL/视觉/推理标签筛选与排序**，令牌数大数（K/M）友好显示
 - **会话明细用量** — 面板的"用量与额度"标签页内置**会话明细**：逐会话记录 input/output token、耗时、成本、模型、状态，并给出按天趋势折线、模型分布饼图、今日/本周/本月成本卡片；持久化到本地 `~/.commandcode/usage-history.jsonl`，重启不丢
@@ -69,7 +118,7 @@ curl http://127.0.0.1:9090/v1/messages \
 | `PROXY_API_KEY` | 未设置 | 要求 `/v1/*` 携带该密钥（Bearer 或 `x-api-key`） |
 | `COMMANDCODE_API_KEY` | 取自 auth.json | 上游密钥兜底 |
 | `COMMANDCODE_API_BASE` | `https://api.commandcode.ai` | 上游服务地址 |
-| `COMMANDCODE_UPSTREAM_ALLOWED_HOSTS` | 未设置 | 追加允许的上游 host（逗号分隔，供自建网关/镜像；默认仅 `commandcode.ai` 及子域 + 回环） |
+| `COMMANDCODE_UPSTREAM_ALLOWED_HOSTS` | 未设置 | 追加允许的上游 host（逗号分隔，供自建网关/镜像）；环回/私有/保留地址默认拒绝，仅在此显式加入才放行 |
 | `COMMANDCODE_VERSION` | `1.27.1` | CLI 版本标识头 |
 | `ROTATION_MODE` | `manual` | `auto-quota` 启用 30 分钟额度检查 |
 | `NO_OPEN_BROWSER` | 未设置 | 设为 `1` 跳过仪表盘自动打开 |
@@ -110,6 +159,29 @@ src/
     └── logger.ts                 # 净化环形缓冲日志
 ```
 
+## 🔒 安全校验 · Upstream URL safety
+
+代理对**所有**服务端上游请求做白名单校验，采用 fail-closed（不满足即拒绝），而非降级放行：
+
+```mermaid
+flowchart TD
+    S[收到上游 URL] --> P{协议 http(s)?}
+    P -- 否 --> R[拒绝 fail-closed]
+    P -- 是 --> C{URL 内嵌凭据?}
+    C -- 是 --> R
+    C -- 否 --> V{环回/私有/保留 且未显式允许?}
+    V -- 是 --> R
+    V -- 否 --> H{host 属允许清单?<br/>commandcode.ai 及子域<br/>+ 显式允许主机}
+    H -- 否 --> R
+    H -- 是 --> T{非环回且非 https?}
+    T -- 是 --> R
+    T -- 否 --> OK[放行 fetch]
+```
+
+- **默认只允许** `commandcode.ai` 及其子域；环回（localhost、127.x、::1）、私有（10.x、172.16-31.x、192.168.x）、保留/链路本地（169.254.x、IPv6 ULA/链路本地）及任意公网地址默认一律拒绝，除非运维显式加入允许清单。
+- **环回/私有受控例外**：本地 mock 上游、自建网关/镜像与开发测试需通过 `COMMANDCODE_UPSTREAM_ALLOWED_HOSTS` **显式**加入允许清单才放行。这是**运维显式配置**的受控例外，而非默认放行或客户端可控路径——上游地址只由 `COMMANDCODE_API_BASE` 等**运维环境变量**决定，不随客户端请求参数变化，因此不存在把客户端输入导向内网的 SSRF 路径。
+- 配套校验：拒绝非 `http(s)` 协议（防 `file:`、`gopher:` 协议混淆）、拒绝内嵌凭据（`user:pass@host`）、非回环 host 强制 `https`（防降级明文；回环且显式放行时允许 http，供本地 mock）。
+
 ## 📄 免责声明与许可证
 
 本项目通过观察官方 CLI 的网络行为来与私有 API 互通。上游协议变动时可能失效，使用可能受 CommandCode 服务条款约束。请用自己的账号与凭据使用。
@@ -124,6 +196,8 @@ A local, fully-compatible **OpenAI Chat Completions** and **Anthropic Messages**
 
 > Unofficial, community tool. Reverse-engineered from the official CommandCode CLI wire protocol (`/alpha/generate`). Not affiliated with CommandCode.
 
+> The bilingual **Visual Overview** (architecture, per-request translation flow, and upstream URL validation) is shown above.
+
 ### Features
 
 - **OpenAI `/v1/chat/completions`** — streaming SSE + non-streaming, tool calling (parallel tools, streamed `tool_calls` deltas), vision (`image_url` base64/data-URL), `reasoning_effort` mapping, `max_completion_tokens`, usage passthrough from upstream `totalUsage`
@@ -131,7 +205,7 @@ A local, fully-compatible **OpenAI Chat Completions** and **Anthropic Messages**
 - **Faithful wire translation** verified against the original CLI source: raw-base64 image parts with `mediaType`, `tool_search→search_tools` aliasing, per-model effort tier snapping, terminal-error no-retry list (`model_not_in_plan`, `premium_credits_exhausted`, `insufficient credits`)
 - **Reliability** — exponential-backoff retries on 429/5xx/network errors, idle-stream watchdog (no infinite hangs), client-disconnect cancellation, clean stream termination guaranteed
 - **Multi-account** — dashboard OAuth browser login + manual key entry, 5-hour quota rotation scheduler (auto-switch ≥90%)
-- **Secure defaults** — binds `127.0.0.1` only (opt-in LAN via `HOST`), optional `PROXY_API_KEY` shared-secret auth, XSS-hardened dashboard, CORS limited to the public API surface
+- **Secure defaults** — binds `127.0.0.1` only (opt-in LAN via `HOST`), optional `PROXY_API_KEY` shared-secret auth, XSS-hardened dashboard, CORS limited to the public API surface; all server-side upstream requests are validated by `assertSafeUpstreamUrl` (rejects non-`http(s)` schemes, embedded credentials, and any host that is neither `commandcode.ai` nor explicitly allowlisted, and rejects loopback/private/reserved addresses by default; enforces `https` for non-loopback), and browser opening uses argument-array `spawn` (no shell injection)
 - **Packaging** — TypeScript build, esbuild bundle, single-file Windows exe via `pkg`
 - **Chinese dashboard** — built-in Chinese UI with official model pricing catalog (context/input/output/cache read/cache write/caps/deals) refreshed live from commandcode.ai
 - **Per-session usage history** — the dashboard's Usage tab includes a **session detail view**: records input/output tokens, latency, cost, model, and status per request, visualized with a daily trend line, model-distribution doughnut, and today/week/month cost cards; persisted to `~/.commandcode/usage-history.jsonl`, survives restarts
@@ -167,6 +241,7 @@ On first launch the dashboard opens automatically. Log in via **Browser (OAuth)*
 | `PROXY_API_KEY` | unset | Require this key on `/v1/*` (Bearer or `x-api-key`) |
 | `COMMANDCODE_API_KEY` | from auth.json | Upstream key fallback |
 | `COMMANDCODE_API_BASE` | `https://api.commandcode.ai` | Upstream base |
+| `COMMANDCODE_UPSTREAM_ALLOWED_HOSTS` | unset | Extra allowed upstream hosts (comma-separated, for self-hosted gateways/mirrors); loopback/private/reserved are rejected by default unless added here |
 | `COMMANDCODE_VERSION` | `1.27.1` | CLI version header |
 | `ROTATION_MODE` | `manual` | `auto-quota` enables 30-min quota checks |
 | `NO_OPEN_BROWSER` | unset | Set `1` to skip dashboard auto-open |
@@ -181,6 +256,16 @@ npm test             # vitest — unit + integration (mock upstream)
 npm run build:exe    # esbuild bundle
 npm run build:win    # Windows exe
 ```
+
+### Security
+
+> Visualized in the Chinese/mixed **Upstream URL safety** section above.
+
+All server-side upstream requests pass an allowlist check and **fail closed** (reject, never degrade):
+
+- By default only `commandcode.ai` and its subdomains are allowed; loopback (`localhost`, `127.x`, `::1`), private (`10.x`, `172.16-31.x`, `192.168.x`), reserved/link-local (`169.254.x`, IPv6 ULA/link-local), and arbitrary public hosts are rejected unless an operator adds them to the allowlist.
+- **Controlled loopback/private exception**: a local mock upstream, self-hosted gateway/mirror, and dev/testing must be **explicitly** added to `COMMANDCODE_UPSTREAM_ALLOWED_HOSTS` to be reachable. This is an operator-configured exception, not a default-allowed or client-controlled path — the upstream URL is determined only by operator env vars such as `COMMANDCODE_API_BASE`, never by client request parameters, so there is no SSRF vector that steers client input to an internal network.
+- Additional checks: reject non-`http(s)` schemes (protocol smuggling like `file:`, `gopher:`), reject embedded credentials (`user:pass@host`), and enforce `https` for non-loopback hosts (no plaintext downgrade; loopback with explicit allowlist may use `http` for a local mock).
 
 ### Disclaimer
 

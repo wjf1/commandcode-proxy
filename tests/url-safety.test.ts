@@ -18,9 +18,19 @@ describe('assertSafeUpstreamUrl', () => {
     expect(assertSafeUpstreamUrl('https://foo.bar.commandcode.ai/v1').hostname).toBe('foo.bar.commandcode.ai');
   });
 
-  it('accepts loopback http (local mock / dev upstream)', () => {
+  it('rejects loopback/private/reserved hosts by default (SSRF)', () => {
+    expect(() => assertSafeUpstreamUrl('http://127.0.0.1:9911/alpha/generate')).toThrow(/not allowlisted/);
+    expect(() => assertSafeUpstreamUrl('http://localhost:9090/')).toThrow(/not allowlisted/);
+    expect(() => assertSafeUpstreamUrl('http://10.0.0.5/alpha/generate')).toThrow(/not allowlisted/);
+    expect(() => assertSafeUpstreamUrl('http://169.254.169.254/latest/meta-data')).toThrow(/not allowlisted/);
+    expect(() => assertSafeUpstreamUrl('https://192.168.1.10/v1')).toThrow(/not allowlisted/);
+    expect(() => assertSafeUpstreamUrl('https://172.16.3.4/v1')).toThrow(/not allowlisted/);
+  });
+
+  it('allows loopback/private hosts only when explicitly allowlisted', () => {
+    process.env.COMMANDCODE_UPSTREAM_ALLOWED_HOSTS = '127.0.0.1,10.0.0.5';
     expect(assertSafeUpstreamUrl('http://127.0.0.1:9911/alpha/generate').hostname).toBe('127.0.0.1');
-    expect(assertSafeUpstreamUrl('http://localhost:9090/').hostname).toBe('localhost');
+    expect(assertSafeUpstreamUrl('https://10.0.0.5/v1').hostname).toBe('10.0.0.5');
   });
 
   it('rejects non-loopback http (downgrade)', () => {
@@ -28,8 +38,8 @@ describe('assertSafeUpstreamUrl', () => {
   });
 
   it('rejects arbitrary hosts not in the allowlist', () => {
-    expect(() => assertSafeUpstreamUrl('https://evil.example.com/path')).toThrow(/not allowed/);
-    expect(() => assertSafeUpstreamUrl('https://169.254.169.254/latest/meta-data')).toThrow(/not allowed/);
+    expect(() => assertSafeUpstreamUrl('https://evil.example.com/path')).toThrow(/not allow/);
+    expect(() => assertSafeUpstreamUrl('https://169.254.169.254/latest/meta-data')).toThrow(/not allow/);
   });
 
   it('rejects non-http(s) schemes (protocol smuggling)', () => {
@@ -55,12 +65,12 @@ describe('assertSafeUpstreamUrl', () => {
 });
 
 describe('isAllowedUpstreamHost', () => {
-  it('allows commandcode.ai, subdomains and loopback', () => {
+  it('allows commandcode.ai and subdomains; rejects loopback/private by default', () => {
     expect(isAllowedUpstreamHost('commandcode.ai')).toBe(true);
     expect(isAllowedUpstreamHost('api.commandcode.ai')).toBe(true);
     expect(isAllowedUpstreamHost('a.b.commandcode.ai')).toBe(true);
-    expect(isAllowedUpstreamHost('127.0.0.1')).toBe(true);
-    expect(isAllowedUpstreamHost('localhost')).toBe(true);
+    expect(isAllowedUpstreamHost('127.0.0.1')).toBe(false);
+    expect(isAllowedUpstreamHost('localhost')).toBe(false);
   });
 
   it('denies unrelated hosts by default', () => {
