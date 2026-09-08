@@ -1,4 +1,4 @@
-# CommandCode Proxy v4 <img src="https://img.shields.io/badge/version-4.2.1-6366f1" alt="v4">
+# CommandCode Proxy v4 <img src="https://img.shields.io/badge/version-4.2.2-6366f1" alt="v4">
 
 > 中文 | [English](#english-anchor)
 
@@ -8,54 +8,31 @@
 
 ---
 
-## 📊 可视化总览 · Visual Overview
+## 🖼 界面截图 · Screenshots
 
-以下三张图快速说明代理的定位、一次调用的翻译流程，以及上游 URL 的安全校验，对中英文读者通用。
-*The three diagrams below give a quick overview of the proxy's role, the per-request translation flow, and how upstream URLs are validated.*
+除命令行外，代理自带一个**中文 Web 仪表盘**（默认 `http://127.0.0.1:9090`），用于查看状态、管理账号与查看用量。以下为实际界面截图（均已脱敏）。
+*Beyond the CLI, the proxy ships a built-in **Chinese web dashboard** (default `http://127.0.0.1:9090`) for status, accounts and usage. Real screenshots below, all scrubbed.*
 
-### 架构总览 · Architecture
+### 控制台总览 · Console Overview
 
-```mermaid
-flowchart LR
-    subgraph CLIENTS[客户端 Clients]
-        A[OpenAI 风格<br/>Cursor · Continue · Aider<br/>OpenWebUI · Hermes]
-        B[Anthropic 风格<br/>Claude Code · 自定义程序]
-    end
-    subgraph PROXY[CommandCode Proxy · 本机 127.0.0.1:9090]
-        C[网关 Gateway]
-        D[翻译引擎<br/>OpenAI / Anthropic 协议 → CC wire]
-        E[上游客户端 Upstream<br/>重试 · 空闲看门狗 · 断连中止]
-    end
-    subgraph CC[CommandCode AI · commandcode.ai]
-        F[/alpha/generate]
-        G[用量 · 定价<br/>/alpha/usage · /alpha/billing]
-    end
-    A --> C
-    B --> C
-    C --> D
-    D --> E
-    E -->|https| F
-    F --> E
-    C -->|https| G
-    G --> C
-```
+![控制台总览](./docs/screenshots/dashboard-overview.png)
 
-### 一次调用的翻译流程 · Per-request translation flow
+- 一屏掌握运行状态：引擎运行/停止、监听端口、运行时长、当前账号、绑定地址、API 鉴权开关、已注册账号数与可用模型数。
+- 顶部可一键切换引擎、切换当前账号、调整额度轮换模式。
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Cli as OpenAI / Anthropic 客户端
-    participant P as Proxy（本机）
-    participant U as 上游 commandcode.ai
-    Cli->>P: POST /v1/chat/completions 或 /v1/messages
-    P->>P: assertSafeUpstreamUrl 校验上游地址
-    P->>P: 协议翻译为 CC wire（工具 / 视觉 / 推理档位映射）
-    P->>U: POST /alpha/generate（SSE 流）
-    U-->>P: start → text-delta → tool-call → finish
-    P-->>Cli: 映射回 OpenAI / Anthropic 流式块（SSE）或 JSON
-    Note over P,U: 透传上游 totalUsage / usage
-```
+### 模型目录 · Model Catalog
+
+![模型目录](./docs/screenshots/dashboard-models.png)
+
+- 官方模型定价目录（上下文 / 输入 / 输出 / 缓存读 / 缓存写 / 能力 / Deal），实时从 commandcode.ai 刷新，也可手动“获取最新模型”。
+- 支持**关键词搜索**、**标签筛选**（GO / FREE / DEAL / 视觉 / 推理）与**排序**（输入价、输出价、缓存读、上下文等），令牌数以 K/M 友好显示。
+
+### 账号与鉴权 · Accounts & Auth
+
+![账号与鉴权](./docs/screenshots/dashboard-accounts.png)
+
+- 支持浏览器登录（OAuth）或粘贴 Key 登录；多账号管理，5 小时额度轮换调度（≥90% 自动切换）。
+- 密钥在界面上一律**脱敏显示**（如 `sk-demo-...cccc`），可设为当前账号或移除——保证敏感信息不落屏。
 
 ## ✨ 功能特性
 
@@ -163,20 +140,7 @@ src/
 
 代理对**所有**服务端上游请求做白名单校验，采用 fail-closed（不满足即拒绝），而非降级放行：
 
-```mermaid
-flowchart TD
-    S[收到上游 URL] --> P{协议 http(s)?}
-    P -- 否 --> R[拒绝 fail-closed]
-    P -- 是 --> C{URL 内嵌凭据?}
-    C -- 是 --> R
-    C -- 否 --> V{环回/私有/保留 且未显式允许?}
-    V -- 是 --> R
-    V -- 否 --> H{host 属允许清单?<br/>commandcode.ai 及子域<br/>+ 显式允许主机}
-    H -- 否 --> R
-    H -- 是 --> T{非环回且非 https?}
-    T -- 是 --> R
-    T -- 否 --> OK[放行 fetch]
-```
+校验顺序为：仅允许 `http(s)` → 拒绝内嵌凭据 → 拒绝环回/私有/保留地址（除非显式允许）→ host 属于 `commandcode.ai` 及子域或显式允许清单 → 非回环强制 `https`，全满足才放行。
 
 - **默认只允许** `commandcode.ai` 及其子域；环回（localhost、127.x、::1）、私有（10.x、172.16-31.x、192.168.x）、保留/链路本地（169.254.x、IPv6 ULA/链路本地）及任意公网地址默认一律拒绝，除非运维显式加入允许清单。
 - **环回/私有受控例外**：本地 mock 上游、自建网关/镜像与开发测试需通过 `COMMANDCODE_UPSTREAM_ALLOWED_HOSTS` **显式**加入允许清单才放行。这是**运维显式配置**的受控例外，而非默认放行或客户端可控路径——上游地址只由 `COMMANDCODE_API_BASE` 等**运维环境变量**决定，不随客户端请求参数变化，因此不存在把客户端输入导向内网的 SSRF 路径。
@@ -196,7 +160,7 @@ A local, fully-compatible **OpenAI Chat Completions** and **Anthropic Messages**
 
 > Unofficial, community tool. Reverse-engineered from the official CommandCode CLI wire protocol (`/alpha/generate`). Not affiliated with CommandCode.
 
-> The bilingual **Visual Overview** (architecture, per-request translation flow, and upstream URL validation) is shown above.
+> The bilingual **Screenshots** section above shows the real dashboard UI (console overview, model catalog, accounts), all scrubbed.
 
 ### Features
 
@@ -259,7 +223,7 @@ npm run build:win    # Windows exe
 
 ### Security
 
-> Visualized in the Chinese/mixed **Upstream URL safety** section above.
+> Described in the bilingual **Upstream URL safety** section above.
 
 All server-side upstream requests pass an allowlist check and **fail closed** (reject, never degrade):
 

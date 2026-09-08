@@ -15,3 +15,5 @@ logs/
 *.py
 *.mjs
 *.png
+!docs/screenshots/
+!docs/screenshots/*.png
