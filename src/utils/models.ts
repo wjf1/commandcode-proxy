@@ -10,7 +10,7 @@
 // =============================================================================
 import fs from 'fs';
 import path from 'path';
-import { loadConfig } from './config.js';
+import { loadConfig, assertSafeUpstreamUrl } from './config.js';
 import { logger } from './logger.js';
 import { ModelItem, ModelPricing, ModelCaps, ModelDeal } from '../types/index.js';
 
@@ -212,11 +212,18 @@ export async function fetchPricingCatalog(force = false): Promise<Map<string, Pr
   }
   // 站点在部分地区较慢/不稳定：45s 超时 + 3 次重试。
   const attempts = 3;
+  let safePricingUrl: string;
+  try {
+    safePricingUrl = assertSafeUpstreamUrl(PRICING_PLAN_URL).toString();
+  } catch (err: any) {
+    logger.warn(`[MODELS] Blocked unsafe pricing URL: ${err.message}`);
+    return cache ? new Map(cache.entries.map(e => [normalizeId(e.id), e])) : new Map();
+  }
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 45000);
-      const res = await fetch(PRICING_PLAN_URL, {
+      const res = await fetch(safePricingUrl, {
         headers: { 'User-Agent': 'Mozilla/5.0 (compatible; commandcode-proxy/4)' },
         signal: controller.signal,
       });
@@ -284,8 +291,15 @@ export async function fetchUpstreamModels(apiKey: string, ccVersion: string, ref
   let freshModels: ModelItem[] | null = null;
 
   try {
-    const res = await fetch(`${config.ccApiBase}/provider/v1/models`, { method: 'GET', headers });
-    if (res.ok) {
+    let safeModelsUrl: string;
+    try {
+      safeModelsUrl = assertSafeUpstreamUrl(`${config.ccApiBase}/provider/v1/models`).toString();
+    } catch (err: any) {
+      logger.warn(`[MODELS] Blocked unsafe upstream URL: ${err.message}`);
+      safeModelsUrl = '';
+    }
+    const res = safeModelsUrl ? await fetch(safeModelsUrl, { method: 'GET', headers }) : null;
+    if (res && res.ok) {
       const data: any = await res.json();
       let rawList: any[] = [];
       if (Array.isArray(data)) rawList = data;

@@ -1,4 +1,4 @@
-# CommandCode Proxy v4 <img src="https://img.shields.io/badge/version-4.1.0-6366f1" alt="v4">
+# CommandCode Proxy v4 <img src="https://img.shields.io/badge/version-4.2.0-6366f1" alt="v4">
 
 > 中文 | [English](#english-anchor)
 
@@ -15,7 +15,7 @@
 - **忠实还原 wire 翻译** — 经官方 CLI 源码逐行核对：原始 base64 图片块带 `mediaType`、`tool_search→search_tools` 别名、按模型细分推理档位 snap、终止性错误不重试列表（`model_not_in_plan`、`premium_credits_exhausted`、`insufficient credits`）
 - **可靠性** — 429/5xx/网络错误指数退避重试，空闲流看门狗（不会无限挂起），客户端断开即取消，保证流干净收尾
 - **多账号** — 仪表盘 OAuth 浏览器登录 + 手动输入 Key，5 小时额度轮换调度器（≥90% 自动切换）
-- **安全默认** — 仅绑定 `127.0.0.1`（可用 `HOST` 显式开放局域网），可选 `PROXY_API_KEY` 共享密钥鉴权，XSS 加固仪表盘，CORS 仅对公共 API 表面开放
+- **安全默认** — 仅绑定 `127.0.0.1`（可用 `HOST` 显式开放局域网），可选 `PROXY_API_KEY` 共享密钥鉴权，XSS 加固仪表盘，CORS 仅对公共 API 表面开放；所有服务端上游请求经 `assertSafeUpstreamUrl` 校验（拒绝非 http(s) 协议、内嵌凭据、非 `commandcode.ai`/回环的任意 host，非回环强制 https），打开浏览器改为无 shell 的 `spawn` 参数调用（杜绝命令注入）
 - **打包** — TypeScript 构建、esbuild 打包、`pkg` 生成单文件 Windows exe
 - **中文仪表盘** — 内置界面为中文，含官方模型定价目录（上下文/输入/输出/缓存读/缓存写/能力/Deal），实时从 commandcode.ai 刷新；模型目录支持**搜索、GO/FREE/DEAL/视觉/推理标签筛选与排序**，令牌数大数（K/M）友好显示
 - **会话明细用量** — 面板的"用量与额度"标签页内置**会话明细**：逐会话记录 input/output token、耗时、成本、模型、状态，并给出按天趋势折线、模型分布饼图、今日/本周/本月成本卡片；持久化到本地 `~/.commandcode/usage-history.jsonl`，重启不丢
@@ -69,6 +69,7 @@ curl http://127.0.0.1:9090/v1/messages \
 | `PROXY_API_KEY` | 未设置 | 要求 `/v1/*` 携带该密钥（Bearer 或 `x-api-key`） |
 | `COMMANDCODE_API_KEY` | 取自 auth.json | 上游密钥兜底 |
 | `COMMANDCODE_API_BASE` | `https://api.commandcode.ai` | 上游服务地址 |
+| `COMMANDCODE_UPSTREAM_ALLOWED_HOSTS` | 未设置 | 追加允许的上游 host（逗号分隔，供自建网关/镜像；默认仅 `commandcode.ai` 及子域 + 回环） |
 | `COMMANDCODE_VERSION` | `1.27.1` | CLI 版本标识头 |
 | `ROTATION_MODE` | `manual` | `auto-quota` 启用 30 分钟额度检查 |
 | `NO_OPEN_BROWSER` | 未设置 | 设为 `1` 跳过仪表盘自动打开 |

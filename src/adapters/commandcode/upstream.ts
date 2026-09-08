@@ -11,7 +11,7 @@
 // =============================================================================
 import { Readable } from 'node:stream';
 import { CCRequestBody } from '../../types/index.js';
-import { loadConfig } from '../../utils/config.js';
+import { loadConfig, assertSafeUpstreamUrl } from '../../utils/config.js';
 import { logger } from '../../utils/logger.js';
 
 /** 去除 token 前的 Bearer 前缀（大小写不敏感）。 */
@@ -110,7 +110,13 @@ export interface SendOptions {
  */
 export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<Readable> {
   const config = loadConfig();
-  const url = `${config.ccApiBase}/alpha/generate`;
+  let url: string;
+  try {
+    url = assertSafeUpstreamUrl(`${config.ccApiBase}/alpha/generate`).toString();
+  } catch (err: any) {
+    logger.error(`[UPSTREAM] Blocked unsafe upstream URL: ${err.message}`);
+    throw new UpstreamError(`Unsafe upstream URL: ${err.message}`);
+  }
 
   // 强制 auto-accept + 流式 —— CLI wire 契约要求两者。
   body.permissionMode = 'auto-accept';

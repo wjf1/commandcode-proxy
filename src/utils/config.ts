@@ -11,7 +11,7 @@ import path from 'path';
 import os from 'os';
 import http from 'http';
 import crypto from 'crypto';
-import { exec } from 'child_process';
+import { spawn } from 'child_process';
 import { GatewayConfig, GatewayConfigFile, AccountInfo } from '../types/index.js';
 import { logger } from './logger.js';
 
@@ -36,6 +36,73 @@ const DEFAULTS = {
   idleTimeoutMs: 120_000,
   maxRetries: 2,
 };
+
+// ─── 上游 URL 安全校验（SSRF 加固）─────────────────────────────────────────────
+//
+// 所有服务端发起的上游请求（fetch / 用量统计 / 模型同步 / pricing 页）都必须
+// 先经过 assertSafeUpstreamUrl 校验，防止：
+//   - 注入非 http(s) 协议（file:、gopher: 等协议混淆）
+//   - 在 URL 内嵌凭据（user:pass@host）
+//   - 访问任意非授权主机（SSRF）
+// 默认只允许 commandcode.ai 及其子域 + 回环地址；若用户配置了自建网关/镜像，
+// 可通过环境变量 COMMANDCODE_UPSTREAM_ALLOWED_HOSTS 追加允许的 host（逗号分隔）。
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '0:0:0:0:0:0:0:1']);
+
+function normalizeHost(hostname: string): string {
+  // 去掉首尾空白、IPv6 方括号、前导/尾随点，统一小写。
+  return String(hostname || '').trim().toLowerCase().replace(/^\[|\]$/g, '').replace(/^\.+/, '').replace(/\.+$/, '');
+}
+
+function isLoopback(host: string): boolean {
+  return LOOPBACK_HOSTS.has(host);
+}
+
+function hostInExtraAllowlist(host: string): boolean {
+  const extra = (process.env.COMMANDCODE_UPSTREAM_ALLOWED_HOSTS || '')
+    .split(',')
+    .map(s => normalizeHost(s))
+    .filter(Boolean);
+  return extra.some(e => host === e || host.endsWith('.' + e));
+}
+
+export function isAllowedUpstreamHost(hostname: string): boolean {
+  const host = normalizeHost(hostname);
+  if (!host) return false;
+  if (isLoopback(host)) return true;
+  // commandcode.ai 及其子域（含命令显式二级及以下）
+  const sub = host.split('.').slice(-2).join('.');
+  if (host === 'commandcode.ai' || sub === 'commandcode.ai') return true;
+  return hostInExtraAllowlist(host);
+}
+
+/**
+ * 校验并返回一个可安全用于服务端 fetch 的 URL。
+ * 不满足条件时抛错（fail-closed），调用方应据此拒绝请求而不是降级执行。
+ */
+export function assertSafeUpstreamUrl(rawUrl: string): URL {
+  let url: URL;
+  try {
+    url = new URL(String(rawUrl));
+  } catch (e: any) {
+    throw new Error(`[NET] Invalid upstream URL: ${e?.message || 'parse error'}`);
+  }
+  if (url.username || url.password) {
+    throw new Error('[NET] Upstream URL must not embed credentials');
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+    throw new Error(`[NET] Upstream URL must be http(s), got '${url.protocol}'`);
+  }
+  const host = normalizeHost(url.hostname);
+  if (!host) throw new Error('[NET] Upstream URL has no host');
+  const loopback = isLoopback(host);
+  if (url.protocol === 'http:' && !loopback) {
+    throw new Error('[NET] Non-loopback upstream must use https (got http)');
+  }
+  if (!loopback && !isAllowedUpstreamHost(host)) {
+    throw new Error(`[NET] Upstream host is not allowed: ${host}`);
+  }
+  return url;
+}
 
 /** 从环境变量或用户级 auth.json 加载默认 API Key（作为无账号配置时的兜底）。 */
 export function loadDefaultApiKeyFromEnvOrSystem(): string {
@@ -305,11 +372,18 @@ export async function checkAndRotateAccountsOnQuota(): Promise<boolean> {
 // ─── 上游用量统计（whoami / credits / subscriptions / usage summary）──────────
 
 async function fetchJson(url: string, headers: Record<string, string>): Promise<any | null> {
+  let safeUrl: string;
   try {
-    const res = await fetch(url, { headers });
+    safeUrl = assertSafeUpstreamUrl(url).toString();
+  } catch (err: any) {
+    logger.warn(`[USAGE] Blocked unsafe upstream URL: ${err.message}`);
+    return null;
+  }
+  try {
+    const res = await fetch(safeUrl, { headers });
     if (res.ok) return await res.json();
   } catch (err: any) {
-    logger.warn(`[USAGE] ${url} fetch error: ${err.message}`);
+    logger.warn(`[USAGE] ${safeUrl} fetch error: ${err.message}`);
   }
   return null;
 }
@@ -339,24 +413,40 @@ export async function fetchLiveUsageStats(apiKey: string, ccApiBase: string, ccV
   return { whoami, credits, subscription, summary };
 }
 
-// ─── 打开浏览器（Windows 安全）────────────────────────────────────────────────
+// ─── 打开浏览器（跨平台、无 shell）────────────────────────────────────────────
 
 /**
- * Windows 陷阱：`exec("start <url>")` 在 URL 含 "&" 时会失败，因为 cmd.exe
- * 把 "&" 当作命令分隔符。给 URL 加引号、并为 start 提供空标题参数
- * （`start "" "<url>"`），即可在任一平台安全执行。
+ * 用默认浏览器打开 URL。全程不通过 shell —— 以参数数组 spawn 各平台的系统
+ * 浏览器命令：
+ *   - Windows: rundll32 url.dll,FileProtocolHandler <url>（不再走 cmd `start`，
+ *     避免 cmd 把 URL 里的 `&`/`|` 当命令分隔符，从而杜绝命令注入）
+ *   - macOS:   open <url>
+ *   - Linux:   xdg-open <url>
+ * process.platform 与要打开的 URL 均来自服务端自身（固定 dashboard/OAuth 地址），
+ * 此处再额外校验必须为合法绝对 URL，避免任何不可控字符串进入进程。
  */
 export function openBrowser(url: string): void {
-  const quoted = `"${url.replace(/"/g, '%22')}"`;
-  const cmd =
-    process.platform === 'win32'
-      ? `start "" ${quoted}`
-      : process.platform === 'darwin'
-        ? `open ${quoted}`
-        : `xdg-open ${quoted}`;
-  exec(cmd, { shell: process.platform === 'win32' ? undefined : '/bin/sh' }, err => {
-    if (err) logger.warn(`[BROWSER] Could not auto-open browser URL: ${err.message}`);
-  });
+  let target: string;
+  try {
+    target = new URL(url).toString();
+  } catch {
+    logger.warn(`[BROWSER] Ignoring invalid URL: ${url}`);
+    return;
+  }
+
+  try {
+    let child: ReturnType<typeof spawn>;
+    if (process.platform === 'win32') {
+      child = spawn('rundll32.exe', ['url.dll,FileProtocolHandler', target], { shell: false, stdio: 'ignore' });
+    } else if (process.platform === 'darwin') {
+      child = spawn('open', [target], { shell: false, stdio: 'ignore' });
+    } else {
+      child = spawn('xdg-open', [target], { shell: false, stdio: 'ignore' });
+    }
+    child.on('error', err => logger.warn(`[BROWSER] Could not open browser URL: ${err.message}`));
+  } catch (err: any) {
+    logger.warn(`[BROWSER] Could not open browser URL: ${err.message}`);
+  }
 }
 
 // ─── 浏览器 OAuth 登录流程 ────────────────────────────────────────────────────
@@ -386,6 +476,14 @@ export function startBrowserLoginFlow(port = 5959): Promise<AccountInfo> {
       try {
         const reqUrl = new URL(req.url || '/', `http://localhost:${port}`);
         if (reqUrl.pathname === '/callback') {
+          // CSRF 防护：若回调携带 state，必须与本流程随机生成的 stateToken 一致。
+          // 不携带 state 时视为兼容旧版 CLI 流程（其可能不回显 state），不阻断。
+          const cbState = reqUrl.searchParams.get('state');
+          if (cbState && cbState !== stateToken) {
+            res.writeHead(400, { 'Content-Type': 'text/plain' });
+            res.end('Auth failed: invalid state');
+            return;
+          }
           let apiKey =
             reqUrl.searchParams.get('token') ||
             reqUrl.searchParams.get('apiKey') ||

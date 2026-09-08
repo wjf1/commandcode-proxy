@@ -2,6 +2,22 @@
 
 所有主要版本更新都记录在此文件。
 
+## [4.2.0] - 2026-09-08
+
+### 安全加固
+- **上游 URL 校验（SSRF 加固）** — 新增 `assertSafeUpstreamUrl` / `isAllowedUpstreamHost`，所有服务端上游请求（用量统计 `/alpha/*`、模型同步 `/provider/v1/models`、官方定价页 `/docs/plans/go`、`/alpha/generate`）统一校验：
+  - 拒绝非 `http(s)` 协议（`file:`、`gopher:` 等协议混淆）
+  - 拒绝 URL 内嵌凭据（`user:pass@host`）
+  - 默认只允许 `commandcode.ai` 及其子域 + 回环地址，其余 host 拒绝（块级 SSRF）
+  - 非回环 host 强制 `https`（阻止降级到明文 http）
+  - 自定义网关/镜像通过环境变量 `COMMANDCODE_UPSTREAM_ALLOWED_HOSTS` 追加（逗号分隔）
+- **打开浏览器改为无 shell 的 `spawn`** — 用 `rundll32`（Win）/`open`（Mac）/`xdg-open`（Linux）以参数数组调用，彻底移除 `exec` + cmd `start` 的 shell 拼接，杜绝命令注入，并保留对 URL 的绝对地址校验。
+- **OAuth 回调 state 校验** — 回调若携带 `state` 必须与本流程随机生成的 `stateToken` 一致，不携带则兼容旧流程，防 CSRF。
+- 新增 `tests/url-safety.test.ts`（12 个用例覆盖上述边界）。
+
+### 变更
+- 版本号 `4.1.0` → `4.2.0`。
+
 ## [4.1.0] - 2026-09-08
 
 ### 新增
