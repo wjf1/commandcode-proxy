@@ -92,6 +92,21 @@ describe('OpenAI → CC translation', () => {
     const wire = adapter.translateOpenAIRequest(req);
     expect(wire.params.reasoning_effort).toBe('max');
   });
+
+  it('passes through all tools without truncating to 15 (DSH Desktop multi-tool hosts)', () => {
+    const req: OpenAIChatRequest = {
+      model: 'claude-sonnet-5',
+      messages: [{ role: 'user', content: 'hi' }],
+      tools: Array.from({ length: 20 }, (_, i) => ({
+        type: 'function',
+        function: { name: `tool_${i + 1}`, description: `tool ${i + 1}`, parameters: { type: 'object', properties: {} } },
+      })) as OpenAIChatRequest['tools'],
+    };
+    const wire = adapter.translateOpenAIRequest(req);
+    expect(wire.params.tools).toHaveLength(20);
+    expect(wire.params.tools![0].name).toBe('tool_1');
+    expect(wire.params.tools![19].name).toBe('tool_20');
+  });
 });
 
 describe('Anthropic → CC translation (v3 bug fixes)', () => {

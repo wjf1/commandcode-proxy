@@ -94,11 +94,12 @@ export class CommandCodeAdapter {
 
   /**
    * OpenAI/Anthropic 工具定义 → CC wire 工具定义（name/description/input_schema）。
-   * 与原版 CLI 的 toWireTools 完全一致 —— 不包含 strict 字段。最多截取 15 个。
+   * 与原版 CLI 的 toWireTools 完全一致 —— 不包含 strict 字段。
+   * 不再截断：DSH Desktop 等 Agent 宿主会下发 30+ 个工具（read/write/pwsh/web_search 等排在列表后段），截断会让模型调用到被丢弃的工具而被上游拒绝。上游按收到的清单校验，全部透传即可。
    */
   private static convertTools(tools?: OpenAIChatRequest['tools']): CCTool[] | undefined {
     if (!tools || tools.length === 0) return undefined;
-    return tools.slice(0, 15).map(t => {
+    return tools.map(t => {
       if (t.type === 'custom' && t.custom) {
         return {
           name: CommandCodeAdapter.toWireToolName(t.custom.name),

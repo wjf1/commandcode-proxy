@@ -2,6 +2,15 @@
 
 所有主要版本更新都记录在此文件。
 
+## [4.3.0] - 2026-09-10
+
+### 新增
+- **工具定义全量透传（不再截断 15 个）** — `convertTools` 不再 `slice(0, 15)`，对 OpenAI/Anthropic 下发的工具定义全部透传给上游（`tools.map`）：
+  - 适配 DSH Desktop 等多工具 Agent 宿主：此类宿主会下发 30+ 个工具（read/write/pwsh/web_search 等排在列表后段），截断会让模型调用到被丢弃的工具而被上游拒绝。
+  - 上游按收到的清单校验，全部透传即可；`tool_search→search_tools` 别名与 `name/description/input_schema` 映射逻辑保持不变。
+  - 新增 `tests/adapter.test.ts` 用例：20 个工具全部保留、首尾顺序不变。
+- 版本号 `4.2.4` → `4.3.0`。
+
 ## [4.2.4] - 2026-09-08
 
 ### 修复
