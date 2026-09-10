@@ -13,10 +13,11 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { createInterface } from 'readline';
 import { CommandCodeAdapter } from '../adapters/commandcode/adapter.js';
-import { sendToCC, isAbortError, estimateTokens, UpstreamError } from '../adapters/commandcode/upstream.js';
+import { sendToCC, isAbortError, estimateTokens } from '../adapters/commandcode/upstream.js';
 import { OpenAIChatRequest, CCEvent } from '../types/index.js';
 import { getActiveApiKey, getGatewayRunning, checkAndRotateAccountsOnQuota } from '../utils/config.js';
 import { logger } from '../utils/logger.js';
+import { ErrorCode, ProxyError, toProxyError } from '../utils/errors.js';
 import { recordCompletion, estimateCostUsd } from '../utils/usage-store.js';
 
 function fmtNum(n: number): string {
@@ -81,9 +82,11 @@ export function verifyProxyAuth(fastify: FastifyInstance): void {
     const bearer = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
     const xKey = String(req.headers['x-api-key'] || '').trim();
     if (bearer !== requiredKey && xKey !== requiredKey) {
-      return reply.status(401).send({
-        error: { message: 'Invalid or missing PROXY_API_KEY', type: 'authentication_error', code: 401 },
-      });
+      const err = new ProxyError(ErrorCode.PROXY_AUTH_REQUIRED, 'Invalid or missing PROXY_API_KEY');
+      // /v1/messages 的调用方按 Anthropic 错误信封解析，其余按 OpenAI 形态。
+      return req.url.startsWith('/v1/messages')
+        ? reply.status(err.status).send(err.anthropicPayload())
+        : reply.status(err.status).send({ error: err.openAIPayload() });
     }
   });
 }
@@ -93,23 +96,20 @@ export async function chatRoutes(fastify: FastifyInstance) {
 
   fastify.post('/v1/chat/completions', async (req, reply) => {
     if (!getGatewayRunning()) {
-      return reply.status(503).send({
-        error: { message: 'CommandCode Gateway Engine is currently PAUSED.', type: 'service_unavailable', code: 503 },
-      });
+      const err = new ProxyError(ErrorCode.GATEWAY_PAUSED, 'CommandCode Gateway Engine is currently PAUSED.');
+      return reply.status(err.status).send({ error: err.openAIPayload() });
     }
 
     const body = req.body as OpenAIChatRequest;
     if (!body || !Array.isArray(body.messages)) {
-      return reply.status(400).send({
-        error: { message: 'Invalid request: messages field is required', type: 'invalid_request_error', code: 400 },
-      });
+      const err = new ProxyError(ErrorCode.UNSUPPORTED_OPTION, 'Invalid request: messages field is required');
+      return reply.status(err.status).send({ error: err.openAIPayload() });
     }
 
     let apiKey = getActiveApiKey();
     if (!apiKey) {
-      return reply.status(401).send({
-        error: { message: 'No active Command Code API Key. Add one in the dashboard.', type: 'invalid_request_error', code: 401 },
-      });
+      const err = new ProxyError(ErrorCode.MISSING_CREDENTIAL, 'No active Command Code API Key. Add one in the dashboard.');
+      return reply.status(err.status).send({ error: err.openAIPayload() });
     }
 
     // 面向长会话（多分钟推理）的 socket 加固。
@@ -149,10 +149,12 @@ export async function chatRoutes(fastify: FastifyInstance) {
         });
       } catch (err: any) {
         if (isAbortError(err) || err?.isAbort) return reply.raw.end();
+        const proxyErr = toProxyError(err, ErrorCode.PROVIDER_PROTOCOL_ERROR);
         if (body.stream) {
           writeSSEHeaders(reply);
           const state = adapter.createStreamEncoderState(modelName);
-          for (const c of adapter.encodeOpenAIChunk({ type: 'error', error: { message: err.message || 'Upstream service error' } }, state)) {
+          // 流已经开始后无法再改 HTTP 状态码，把稳定错误码并入内容，便于调用方自愈。
+          for (const c of adapter.encodeOpenAIChunk({ type: 'error', error: { message: `${proxyErr.code}: ${proxyErr.message}` } }, state)) {
             reply.raw.write(c);
           }
           for (const c of adapter.encodeOpenAIChunk({ type: 'finish', finishReason: 'stop' }, state)) {
@@ -160,10 +162,7 @@ export async function chatRoutes(fastify: FastifyInstance) {
           }
           return reply.raw.end();
         }
-        const status = err instanceof UpstreamError && err.status ? err.status : 502;
-        return reply.status(status >= 400 && status < 600 ? status : 502).send({
-          error: { message: err.message, type: 'upstream_error', code: status },
-        });
+        return reply.status(proxyErr.status).send({ error: proxyErr.openAIPayload() });
       }
 
       if (body.stream) {
@@ -302,9 +301,8 @@ export async function chatRoutes(fastify: FastifyInstance) {
     } catch (err: any) {
       if (isAbortError(err) || err?.isAbort) return reply.raw.end();
       logger.error(`[CHAT] Fatal request error: ${err.message}`);
-      return reply.status(502).send({
-        error: { message: `Internal proxy error: ${err.message}`, type: 'internal_error', code: 502 },
-      });
+      const proxyErr = toProxyError(err, ErrorCode.INTERNAL_ERROR);
+      return reply.status(proxyErr.status).send({ error: proxyErr.openAIPayload() });
     }
   });
 }

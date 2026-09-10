@@ -1,4 +1,4 @@
-# CommandCode Proxy v4 <img src="https://img.shields.io/badge/version-4.2.4-6366f1" alt="v4">
+# CommandCode Proxy v4 <img src="https://img.shields.io/badge/version-4.4.0-6366f1" alt="v4">
 
 > 中文 | [English](#english-anchor)
 
@@ -47,6 +47,7 @@
 - **中文仪表盘** — 内置界面为中文，含官方模型定价目录（上下文/输入/输出/缓存读/缓存写/能力/Deal），实时从 commandcode.ai 刷新；模型目录支持**搜索、GO/FREE/DEAL/视觉/推理标签筛选与排序**，令牌数大数（K/M）友好显示
 - **会话明细用量** — 面板的"用量与额度"标签页内置**会话明细**：逐会话记录 input/output token、耗时、成本、模型、状态，并给出按天趋势折线、模型分布饼图、今日/本周/本月成本卡片；持久化到本地 `~/.commandcode/usage-history.jsonl`，重启不丢
 - **官方用量总览** — 对齐官方 usage 页面（commandcode.ai/:login/settings/usage）的数据源：**Total Tokens**（含输入/输出拆分）、**Total Runs**（成功/失败/成功率）、**月度限额**进度条来自上游 `/alpha/usage/summary` 与 `/alpha/billing/credits`（与页面 `/internal/*` 接口字段一致，但接受 CLI API Key）；仪表盘新增 `GET /api/usage/overview` 聚合接口
+- **结构化错误码** — 任何失败都返回**稳定错误码 + 可执行提示**（`RATE_LIMIT` / `MODEL_NOT_IN_PLAN` / `STREAM_IDLE_TIMEOUT` 等 17 个码），并按出口分别给出 OpenAI 的 `error.type/error.code` 与 Anthropic 的 `error.type`；调用方可据此判断该等额度、换模型还是改配置，详见下节错误码表
 
 ## 🚀 快速开始
 
@@ -86,6 +87,46 @@ curl http://127.0.0.1:9090/v1/messages \
 > 模型名请以仪表盘"模型"页或 `GET /v1/models` 返回的实时目录为准；免费/折扣模型标有 FREE / DEAL 标签。
 
 客户端配置：OpenAI 风格设 base URL 为 `http://127.0.0.1:9090/v1`，Anthropic 风格设为 `http://127.0.0.1:9090`，密钥随意（若设置了 `PROXY_API_KEY` 则须一致）。
+
+## 🚨 错误码与重试语义
+
+任何失败都返回**稳定错误码 + 可执行提示**，调用方可据此判断该等待额度、换模型还是改配置。
+
+OpenAI 出口（`/v1/chat/completions`）：
+
+```json
+{ "error": { "message": "Upstream error 429: insufficient credits", "type": "rate_limit_error",
+             "code": "RATE_LIMIT", "param": null, "hint": "The plan usage window (5-hour or weekly) is exhausted..." } }
+```
+
+Anthropic 出口（`/v1/messages`）：
+
+```json
+{ "type": "error", "error": { "type": "rate_limit_error", "message": "...",
+                              "code": "RATE_LIMIT", "hint": "..." } }
+```
+
+| `code` | HTTP | 含义 |
+|---|---|---|
+| `MISSING_CREDENTIAL` | 401 | 没有任何可用 Key（环境变量/auth.json/账号池皆空） |
+| `INVALID_CREDENTIAL` | 401 | Key 失效或被吊销 |
+| `PROXY_AUTH_REQUIRED` | 401 | 未携带匹配的 `PROXY_API_KEY` |
+| `RATE_LIMIT` | 429 | 5 小时/周额度耗尽，或余额不足 |
+| `MODEL_NOT_IN_PLAN` | 403 | 模型超出当前套餐档位 |
+| `MODEL_NOT_FOUND` | 404 | 模型 id 不存在（刷新目录后重试） |
+| `UNSUPPORTED_OPTION` / `UNSUPPORTED_CONTENT` | 400 | 请求形态或内容无法翻译到上游 wire |
+| `REQUEST_TIMEOUT` / `STREAM_IDLE_TIMEOUT` | 504 | 请求超时 / 流中途静默被看门狗中止 |
+| `NETWORK_ERROR` | 502 | 连不上上游 API |
+| `SERVER_ERROR` | 5xx | 上游 5xx（**保留上游真实状态码**） |
+| `PROVIDER_PROTOCOL_ERROR` | 502 | 上游返回体异常（缺 body 等） |
+| `CATALOG_UNAVAILABLE` | 503 | 模型目录不可用 |
+| `GATEWAY_PAUSED` | 503 | 引擎已在面板暂停 |
+| `BLOCKED_HOST` | 500 | 上游地址被 SSRF 防护拒绝 |
+| `INTERNAL_ERROR` | 500 | 网关内部异常 |
+
+**重试语义**：`408/409/425/429/500/502/503/504` 按指数退避重试（上限 `upstream.maxRetries`）；一旦命中终止性计费/套餐标记（`model_not_in_plan`、`premium_credits_exhausted`、`insufficient credits`）**立即失败、绝不重试**——重试只会白耗额度。重试耗尽后仍保留上游真实状态码与错误码，不会包装成"网络故障"。
+
+> 流式请求在 HTTP 200 已发出后无法再改状态码，此时错误码会并入内容文本，形如 `[Upstream Error: RATE_LIMIT: ...]`，便于客户端自愈。
 
 ## ⚙️ 配置
 
@@ -177,6 +218,7 @@ A local, fully-compatible **OpenAI Chat Completions** and **Anthropic Messages**
 - **Chinese dashboard** — built-in Chinese UI with official model pricing catalog (context/input/output/cache read/cache write/caps/deals) refreshed live from commandcode.ai
 - **Per-session usage history** — the dashboard's Usage tab includes a **session detail view**: records input/output tokens, latency, cost, model, and status per request, visualized with a daily trend line, model-distribution doughnut, and today/week/month cost cards; persisted to `~/.commandcode/usage-history.jsonl`, survives restarts
 - **Official usage overview** — mirrors the data sources of the official usage page (`commandcode.ai/:login/settings/usage`): **Total Tokens** (with input/output breakdown), **Total Runs** (completed/failed/success rate) and a **monthly limit** progress bar fetched from upstream `/alpha/usage/summary` and `/alpha/billing/credits` (same fields as the page's `/internal/*` endpoints, but accepting CLI API keys); exposed via the new `GET /api/usage/overview` dashboard endpoint
+- **Structured error codes** — every failure returns a **stable code plus an actionable hint** (17 codes such as `RATE_LIMIT`, `MODEL_NOT_IN_PLAN`, `STREAM_IDLE_TIMEOUT`), surfaced as OpenAI `error.type`/`error.code` on one route and Anthropic `error.type` on the other, so callers can tell whether to wait for quota, switch models, or fix configuration — see the error table below
 
 ### Quick Start
 
@@ -198,6 +240,46 @@ npm run build:win    # dist/commandcode-proxy-v4.exe — runs with zero dependen
 ```
 
 On first launch the dashboard opens automatically. Log in via **Browser (OAuth)** or paste an API key. Keys are also auto-loaded from `~/.commandcode/auth.json` or `COMMANDCODE_API_KEY`.
+
+### Error contract
+
+Every failure returns a **stable code plus an actionable hint**, so callers can tell whether to wait for quota, switch models, or fix configuration.
+
+OpenAI route (`/v1/chat/completions`):
+
+```json
+{ "error": { "message": "Upstream error 429: insufficient credits", "type": "rate_limit_error",
+             "code": "RATE_LIMIT", "param": null, "hint": "The plan usage window (5-hour or weekly) is exhausted..." } }
+```
+
+Anthropic route (`/v1/messages`):
+
+```json
+{ "type": "error", "error": { "type": "rate_limit_error", "message": "...",
+                              "code": "RATE_LIMIT", "hint": "..." } }
+```
+
+| `code` | HTTP | Meaning |
+|---|---|---|
+| `MISSING_CREDENTIAL` | 401 | No usable key (env / auth.json / account pool all empty) |
+| `INVALID_CREDENTIAL` | 401 | Key expired or revoked |
+| `PROXY_AUTH_REQUIRED` | 401 | Missing or wrong `PROXY_API_KEY` |
+| `RATE_LIMIT` | 429 | 5-hour/weekly window exhausted, or out of credits |
+| `MODEL_NOT_IN_PLAN` | 403 | Model is above the current subscription tier |
+| `MODEL_NOT_FOUND` | 404 | Unknown model id (refresh the catalog and retry) |
+| `UNSUPPORTED_OPTION` / `UNSUPPORTED_CONTENT` | 400 | Request shape or content cannot be translated to the upstream wire |
+| `REQUEST_TIMEOUT` / `STREAM_IDLE_TIMEOUT` | 504 | Request timed out / stream went silent and was aborted |
+| `NETWORK_ERROR` | 502 | Cannot reach the upstream API |
+| `SERVER_ERROR` | 5xx | Upstream 5xx (**the real upstream status is preserved**) |
+| `PROVIDER_PROTOCOL_ERROR` | 502 | Malformed upstream response (e.g. missing body) |
+| `CATALOG_UNAVAILABLE` | 503 | Model catalog unavailable |
+| `GATEWAY_PAUSED` | 503 | Engine paused from the dashboard |
+| `BLOCKED_HOST` | 500 | Upstream URL rejected by the SSRF guard |
+| `INTERNAL_ERROR` | 500 | Unexpected proxy-side failure |
+
+**Retry semantics**: `408/409/425/429/500/502/503/504` are retried with exponential backoff (capped by `upstream.maxRetries`); the terminal billing/plan markers (`model_not_in_plan`, `premium_credits_exhausted`, `insufficient credits`) **fail fast and are never retried**, because retrying only burns credits. Once retries are exhausted the real upstream status and code are preserved instead of being reported as a network failure.
+
+> For streaming requests, the HTTP status is already 200 by the time the failure happens, so the code is folded into the content text as `[Upstream Error: RATE_LIMIT: ...]`.
 
 ### Configuration
 

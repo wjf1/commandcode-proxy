@@ -27,6 +27,17 @@ beforeAll(async () => {
       capturedBodies.push(parsed);
       const userText = JSON.stringify(parsed.params?.messages?.map((m: any) => m.content)) || '';
 
+      // ── Error scenarios, driven by a sentinel in the user text ──
+      const fail = (status: number, message: string) => {
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ message }));
+        return true;
+      };
+      if (userText.includes('__TERMINAL_QUOTA__')) return fail(429, 'insufficient credits');
+      if (userText.includes('__NOT_IN_PLAN__')) return fail(403, 'model_not_in_plan');
+      if (userText.includes('__PLAIN_429__')) return fail(429, 'too many requests');
+      if (userText.includes('__SERVER_ERROR__')) return fail(500, 'upstream exploded');
+
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
 
       if (userText.includes('__TOOLSTREAM__')) {
@@ -424,5 +435,121 @@ describe('Anthropic /v1/messages — real-client feel', () => {
     expect(data.usage).toEqual({ input_tokens: 10, output_tokens: 25 });
     expect(data.content[0]).toEqual({ type: 'thinking', thinking: 'Analyzing the problem step by step...', signature: '' });
     expect(data.content[1]).toEqual({ type: 'text', text: 'The answer is 4.' });
+  });
+});
+
+// ─── Structured error contract ────────────────────────────────────────────────
+// 每个失败都必须带稳定错误码 + 可执行提示，且终止性计费/套餐错误绝不重试。
+
+describe('structured error contract', () => {
+  const ask = (text: string) => ({
+    model: 'claude-sonnet-5',
+    messages: [{ role: 'user', content: text }],
+    max_tokens: 32,
+  });
+
+  const postChat = (body: any) =>
+    fetch(`${PROXY_BASE}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+  const postMessages = (body: any) =>
+    fetch(`${PROXY_BASE}/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+  it('OpenAI route: quota exhaustion → 429 RATE_LIMIT with an actionable hint', async () => {
+    const res = await postChat(ask('__TERMINAL_QUOTA__'));
+    expect(res.status).toBe(429);
+    const data = await res.json();
+    expect(data.error.code).toBe('RATE_LIMIT');
+    expect(data.error.type).toBe('rate_limit_error');
+    expect(data.error.hint).toContain('usage window');
+  });
+
+  it('OpenAI route: model outside plan → 403 MODEL_NOT_IN_PLAN', async () => {
+    const res = await postChat(ask('__NOT_IN_PLAN__'));
+    expect(res.status).toBe(403);
+    const data = await res.json();
+    expect(data.error.code).toBe('MODEL_NOT_IN_PLAN');
+    expect(data.error.type).toBe('permission_error');
+    expect(data.error.hint).toContain('subscription tier');
+  });
+
+  it('OpenAI route: 5xx → SERVER_ERROR (retries exhausted, upstream status preserved)', async () => {
+    const res = await postChat(ask('__SERVER_ERROR__'));
+    expect(res.status).toBe(500);
+    const data = await res.json();
+    expect(data.error.code).toBe('SERVER_ERROR');
+  });
+
+  it('terminal billing errors are never retried (exactly one upstream attempt)', async () => {
+    const before = capturedBodies.length;
+    await postChat(ask('__TERMINAL_QUOTA__'));
+    expect(capturedBodies.length - before).toBe(1);
+  });
+
+  it('a plain 429 still retries with backoff (contrast with the terminal case)', async () => {
+    const before = capturedBodies.length;
+    const res = await postChat(ask('__PLAIN_429__'));
+    expect(capturedBodies.length - before).toBeGreaterThan(1);
+    // 重试耗尽后仍保留上游真实状态与错误码，不伪装成网络故障。
+    expect(res.status).toBe(429);
+    expect((await res.json()).error.code).toBe('RATE_LIMIT');
+  }, 20000);
+
+  it('Anthropic route: uses the Anthropic error envelope with a canonical error type', async () => {
+    const res = await postMessages(ask('__TERMINAL_QUOTA__'));
+    expect(res.status).toBe(429);
+    const data = await res.json();
+    expect(data.type).toBe('error');
+    expect(data.error.type).toBe('rate_limit_error');
+    expect(data.error.code).toBe('RATE_LIMIT');
+    expect(data.error.hint).toBeTruthy();
+  });
+
+  it('invalid OpenAI request → 400 UNSUPPORTED_OPTION', async () => {
+    const res = await postChat({ model: 'claude-sonnet-5' });
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    expect(data.error.code).toBe('UNSUPPORTED_OPTION');
+    expect(data.error.type).toBe('invalid_request_error');
+  });
+
+  it('invalid Anthropic request → 400 invalid_request_error', async () => {
+    const res = await postMessages({ model: 'claude-sonnet-5' });
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    expect(data.type).toBe('error');
+    expect(data.error.code).toBe('UNSUPPORTED_OPTION');
+    expect(data.error.type).toBe('invalid_request_error');
+  });
+
+  it('paused gateway → 503 GATEWAY_PAUSED (and resumes cleanly)', async () => {
+    const toggle = (running: boolean) =>
+      fetch(`${PROXY_BASE}/api/gateway/toggle`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ running }),
+      });
+
+    await toggle(false);
+    try {
+      const res = await postChat(ask('Hi'));
+      expect(res.status).toBe(503);
+      const data = await res.json();
+      expect(data.error.code).toBe('GATEWAY_PAUSED');
+      expect(data.error.hint).toContain('paused');
+    } finally {
+      await toggle(true);
+    }
+
+    // Engine is back up: the same request now succeeds.
+    const ok = await postChat(ask('Hi'));
+    expect(ok.status).toBe(200);
   });
 });

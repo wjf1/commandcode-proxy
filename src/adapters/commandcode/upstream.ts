@@ -13,6 +13,7 @@ import { Readable } from 'node:stream';
 import { CCRequestBody } from '../../types/index.js';
 import { loadConfig, assertSafeUpstreamUrl } from '../../utils/config.js';
 import { logger } from '../../utils/logger.js';
+import { ErrorCode, ProxyError, codeForStatus, terminalCodeFor, type ErrorCodeName } from '../../utils/errors.js';
 
 /** 去除 token 前的 Bearer 前缀（大小写不敏感）。 */
 export function stripBearerPrefix(token: string): string {
@@ -40,14 +41,14 @@ export function isAbortError(err: any): boolean {
   return false;
 }
 
-export class UpstreamError extends Error {
-  status?: number;
-  retryable: boolean;
-  constructor(message: string, status?: number, retryable = false) {
-    super(message);
+/**
+ * 上游失败。继承 ProxyError，因此在原有的 status / retryable 之上，
+ * 还带一个稳定错误码与可执行提示（OpenAI / Anthropic 出口共用）。
+ */
+export class UpstreamError extends ProxyError {
+  constructor(message: string, status?: number, retryable = false, code?: ErrorCodeName) {
+    super(code ?? codeForStatus(status), message, { status, retryable });
     this.name = 'UpstreamError';
-    this.status = status;
-    this.retryable = retryable;
   }
 }
 
@@ -78,14 +79,13 @@ export function buildHeaders(apiKey: string, ccVersion: string, body: CCRequestB
 const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
 
 /**
- * 原版 CLI 的 hv 列表：终止性的计费/套餐错误。对这些错误重试毫无意义，
- * 只会白白消耗额度 —— 应当快速失败。
+ * 是否允许重试：状态码可重试，且错误文本未命中终止性（计费/套餐）标记
+ * —— premium_credits_exhausted / model_not_in_plan / insufficient credits
+ * 重试只会白耗额度，应当快速失败（原版 CLI 行为）。
+ * 判定集中在此处，便于单测锁定该契约。
  */
-const TERMINAL_ERROR_MARKERS = ['premium_credits_exhausted', 'model_not_in_plan', 'insufficient credits'];
-
-function hasTerminalMarker(message: string): boolean {
-  const lower = message.toLowerCase();
-  return TERMINAL_ERROR_MARKERS.some(m => lower.includes(m));
+export function isRetryableFailure(status: number, message: string): boolean {
+  return terminalCodeFor(message) === undefined && RETRYABLE_STATUS.has(status);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -115,7 +115,7 @@ export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<
     url = assertSafeUpstreamUrl(`${config.ccApiBase}/alpha/generate`).toString();
   } catch (err: any) {
     logger.error(`[UPSTREAM] Blocked unsafe upstream URL: ${err.message}`);
-    throw new UpstreamError(`Unsafe upstream URL: ${err.message}`);
+    throw new UpstreamError(`Unsafe upstream URL: ${err.message}`, undefined, false, ErrorCode.BLOCKED_HOST);
   }
 
   // 强制 auto-accept + 流式 —— CLI wire 契约要求两者。
@@ -173,9 +173,13 @@ export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<
         logger.error(`[UPSTREAM] Model: ${body.params.model} | Error ${response.status}: ${displayMsg}`);
 
         // 终止性计费/套餐错误：永不重试（原版 CLI 行为）。
-        const terminal = hasTerminalMarker(displayMsg);
-        const retryable = !terminal && RETRYABLE_STATUS.has(response.status);
-        const err = new UpstreamError(`Upstream error ${response.status}: ${displayMsg}`, response.status, retryable);
+        const retryable = isRetryableFailure(response.status, displayMsg);
+        const err = new UpstreamError(
+          `Upstream error ${response.status}: ${displayMsg}`,
+          response.status,
+          retryable,
+          terminalCodeFor(displayMsg) ?? codeForStatus(response.status),
+        );
         if (retryable && attempt < maxAttempts) {
           lastError = err;
           // 指数退避：500ms * 2^(attempt-1)，封顶 8s。
@@ -188,7 +192,7 @@ export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<
       }
 
       if (!response.body) {
-        throw new UpstreamError('Upstream response body is null');
+        throw new UpstreamError('Upstream response body is null', undefined, false, ErrorCode.PROVIDER_PROTOCOL_ERROR);
       }
 
       // 把 web stream 包装成 Node 流：每收到一个 chunk 都重置空闲看门狗。
@@ -208,7 +212,7 @@ export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<
 
       if (isAbortError(err)) {
         if (idleFired) {
-          throw new UpstreamError(`Upstream stalled: no data for ${config.idleTimeoutMs / 1000}s`, undefined, true);
+          throw new UpstreamError(`Upstream stalled: no data for ${config.idleTimeoutMs / 1000}s`, undefined, true, ErrorCode.STREAM_IDLE_TIMEOUT);
         }
         throw Object.assign(new Error('__ABORT__'), { isAbort: true });
       }
@@ -230,10 +234,23 @@ export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<
         continue;
       }
 
+      if (err instanceof UpstreamError) {
+        // 重试次数用尽：保留上游真实状态码与错误码。若一律包装成
+        // "connection failed"，客户端会把 3 次 503 误判成网络故障。
+        throw new UpstreamError(err.message, err.status, false, err.code);
+      }
       const detailedMsg = err?.cause?.message ? `${err.message} (${err.cause.message})` : err.message;
-      throw new UpstreamError(`Upstream connection failed: ${detailedMsg}`);
+      throw new UpstreamError(`Upstream connection failed: ${detailedMsg}`, undefined, false, ErrorCode.NETWORK_ERROR);
     }
   }
 
-  throw lastError ? new UpstreamError(`Upstream failed after ${maxAttempts} attempts: ${lastError.message}`) : new UpstreamError('Upstream failed');
+  if (lastError instanceof UpstreamError) {
+    throw new UpstreamError(
+      `Upstream failed after ${maxAttempts} attempts: ${lastError.message}`,
+      lastError.status,
+      false,
+      lastError.code,
+    );
+  }
+  throw new UpstreamError('Upstream failed', undefined, false, ErrorCode.NETWORK_ERROR);
 }

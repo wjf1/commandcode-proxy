@@ -13,10 +13,11 @@ import { FastifyInstance } from 'fastify';
 import { createInterface } from 'readline';
 import crypto from 'node:crypto';
 import { CommandCodeAdapter } from '../adapters/commandcode/adapter.js';
-import { sendToCC, isAbortError, estimateTokens, UpstreamError } from '../adapters/commandcode/upstream.js';
+import { sendToCC, isAbortError, estimateTokens } from '../adapters/commandcode/upstream.js';
 import { AnthropicRequest, CCEvent } from '../types/index.js';
 import { getActiveApiKey, getGatewayRunning, checkAndRotateAccountsOnQuota } from '../utils/config.js';
 import { logger } from '../utils/logger.js';
+import { ErrorCode, ProxyError, toProxyError } from '../utils/errors.js';
 import { recordCompletion, estimateCostUsd } from '../utils/usage-store.js';
 
 function writeSSEHeaders(reply: any): void {
@@ -65,23 +66,20 @@ export async function messagesRoutes(fastify: FastifyInstance) {
 
   fastify.post('/v1/messages', async (req, reply) => {
     if (!getGatewayRunning()) {
-      return reply.status(503).send({
-        error: { message: 'Gateway PAUSED', type: 'service_unavailable' },
-      });
+      const err = new ProxyError(ErrorCode.GATEWAY_PAUSED, 'CommandCode Gateway Engine is currently PAUSED.');
+      return reply.status(err.status).send(err.anthropicPayload());
     }
 
     const body = req.body as AnthropicRequest;
     if (!body || !Array.isArray(body.messages)) {
-      return reply.status(400).send({
-        error: { type: 'invalid_request_error', message: 'messages field is required' },
-      });
+      const err = new ProxyError(ErrorCode.UNSUPPORTED_OPTION, 'Invalid request: messages field is required');
+      return reply.status(err.status).send(err.anthropicPayload());
     }
 
     let apiKey = getActiveApiKey();
     if (!apiKey) {
-      return reply.status(401).send({
-        error: { type: 'authentication_error', message: 'No API Key' },
-      });
+      const err = new ProxyError(ErrorCode.MISSING_CREDENTIAL, 'No active Command Code API Key. Add one in the dashboard.');
+      return reply.status(err.status).send(err.anthropicPayload());
     }
 
     req.raw.setTimeout(0);
@@ -118,10 +116,8 @@ export async function messagesRoutes(fastify: FastifyInstance) {
         });
       } catch (err: any) {
         if (isAbortError(err) || err?.isAbort) return reply.raw.end();
-        const status = err instanceof UpstreamError && err.status ? err.status : 502;
-        return reply.status(status >= 400 && status < 600 ? status : 502).send({
-          error: { type: 'upstream_error', message: err.message },
-        });
+        const proxyErr = toProxyError(err, ErrorCode.PROVIDER_PROTOCOL_ERROR);
+        return reply.status(proxyErr.status).send(proxyErr.anthropicPayload());
       }
 
       if (body.stream) {
@@ -296,7 +292,9 @@ export async function messagesRoutes(fastify: FastifyInstance) {
           logger.error(`[MESSAGES] Upstream stream error: ${err.message}`);
           closeThinkingBlock();
           closeTextBlock();
-          reply.raw.write(sse('error', { type: 'error', error: { type: 'upstream_error', message: err.message } }));
+          const proxyErr = toProxyError(err, ErrorCode.PROVIDER_PROTOCOL_ERROR);
+          // Anthropic 客户端按 error.type 分支，这里给出规范类型而非自定义串。
+          reply.raw.write(sse('error', { type: 'error', error: proxyErr.anthropicPayload().error }));
           reply.raw.write(
             sse('message_delta', {
               type: 'message_delta',
@@ -328,9 +326,8 @@ export async function messagesRoutes(fastify: FastifyInstance) {
     } catch (err: any) {
       if (isAbortError(err) || err?.isAbort) return reply.raw.end();
       logger.error(`[MESSAGES] Request failed: ${err.message}`);
-      return reply.status(502).send({
-        error: { type: 'upstream_error', message: err.message },
-      });
+      const proxyErr = toProxyError(err, ErrorCode.INTERNAL_ERROR);
+      return reply.status(proxyErr.status).send(proxyErr.anthropicPayload());
     }
   });
 }
