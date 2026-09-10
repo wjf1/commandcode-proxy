@@ -14,6 +14,7 @@ import Fastify from 'fastify';
 import { loadConfig, openBrowser, checkAndRotateAccountsOnQuota, getActiveApiKey, resolveBodyLimit, enrichDefaultAccountName } from './utils/config.js';
 import { fetchUpstreamModels } from './utils/models.js';
 import { logger } from './utils/logger.js';
+import { PROXY_VERSION } from './utils/version.js';
 import { chatRoutes, verifyProxyAuth } from './routes/chat.js';
 import { messagesRoutes } from './routes/messages.js';
 import { modelsRoutes } from './routes/models.js';
@@ -50,7 +51,7 @@ const start = async () => {
     await fastify.register(modelsRoutes);
 
     fastify.get('/health', async () => {
-      return { status: 'ok', version: '4.0.0', time: new Date().toISOString() };
+      return { status: 'ok', version: PROXY_VERSION, time: new Date().toISOString() };
     });
 
     logger.info('[BOOT] Initializing CommandCode Proxy v4...');
@@ -83,6 +84,7 @@ const start = async () => {
 
     console.log('\n=============================================================');
     console.log('  ⚡ CommandCode Proxy v4 is ACTIVE');
+    console.log(`  🏷️  Version:                 ${PROXY_VERSION}`);
     console.log(`  🌐 Controller GUI:          ${dashboardUrl}`);
     console.log(`  🤖 OpenAI Chat Completions: ${dashboardUrl}v1/chat/completions`);
     console.log(`  💬 Anthropic Messages:      ${dashboardUrl}v1/messages`);

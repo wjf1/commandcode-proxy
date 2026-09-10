@@ -22,7 +22,9 @@ function getProjectRootDir(): string {
   return process.cwd();
 }
 
-export const CONFIG_FILE_PATH = path.join(getProjectRootDir(), 'config.json');
+export const CONFIG_FILE_PATH = process.env.COMMANDCODE_CONFIG_PATH
+  ? path.resolve(process.env.COMMANDCODE_CONFIG_PATH)
+  : path.join(getProjectRootDir(), 'config.json');
 const ENV_FILE_PATH = path.join(getProjectRootDir(), '.env');
 
 const DEFAULTS = {

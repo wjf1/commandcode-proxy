@@ -1,4 +1,4 @@
-# CommandCode Proxy v4 <img src="https://img.shields.io/badge/version-4.4.0-6366f1" alt="v4">
+# CommandCode Proxy v4 <img src="https://img.shields.io/badge/version-4.5.0-6366f1" alt="v4">
 
 > 中文 | [English](#english-anchor)
 
@@ -48,6 +48,8 @@
 - **会话明细用量** — 面板的"用量与额度"标签页内置**会话明细**：逐会话记录 input/output token、耗时、成本、模型、状态，并给出按天趋势折线、模型分布饼图、今日/本周/本月成本卡片；持久化到本地 `~/.commandcode/usage-history.jsonl`，重启不丢
 - **官方用量总览** — 对齐官方 usage 页面（commandcode.ai/:login/settings/usage）的数据源：**Total Tokens**（含输入/输出拆分）、**Total Runs**（成功/失败/成功率）、**月度限额**进度条来自上游 `/alpha/usage/summary` 与 `/alpha/billing/credits`（与页面 `/internal/*` 接口字段一致，但接受 CLI API Key）；仪表盘新增 `GET /api/usage/overview` 聚合接口
 - **结构化错误码** — 任何失败都返回**稳定错误码 + 可执行提示**（`RATE_LIMIT` / `MODEL_NOT_IN_PLAN` / `STREAM_IDLE_TIMEOUT` 等 17 个码），并按出口分别给出 OpenAI 的 `error.type/error.code` 与 Anthropic 的 `error.type`；调用方可据此判断该等额度、换模型还是改配置，详见下节错误码表
+- **套餐与计费周期** — `/api/usage/overview` 新增 `plan` 块：套餐名（Go / GOAT / Pro …）、官方额度与 5 小时/周上限、`currentPeriodStart/End`、`cancelAtPeriodEnd`、以及 `totalDays / daysElapsed / daysLeft / cyclePct` 周期进度；仪表盘"用量与额度"页新增**计费周期卡片**（订阅额度到期不结转，这里一眼可见还剩几天）
+- **模型按套餐可用性** — 保留上游定价页的**全量档位映射**（此前被压成一个 `onGoPlan` 布尔），`GET /v1/models` 每个模型带 `availability` / `available_on_plan` / `plan_tier`；支持 `?plan=individual-go&available=1` **按档位过滤**（不带参数时行为不变，向后兼容）。判定采用 fail-open：数据缺失时保留而非误杀
 
 ## 🚀 快速开始
 
@@ -87,6 +89,12 @@ curl http://127.0.0.1:9090/v1/messages \
 > 模型名请以仪表盘"模型"页或 `GET /v1/models` 返回的实时目录为准；免费/折扣模型标有 FREE / DEAL 标签。
 
 客户端配置：OpenAI 风格设 base URL 为 `http://127.0.0.1:9090/v1`，Anthropic 风格设为 `http://127.0.0.1:9090`，密钥随意（若设置了 `PROXY_API_KEY` 则须一致）。
+
+按套餐筛选可用模型（`plan` 可显式指定，也可省略而使用当前账号的套餐；不带 `available` 则为完整目录）：
+
+```bash
+curl "http://127.0.0.1:9090/v1/models?plan=individual-go&available=1"
+```
 
 ## 🚨 错误码与重试语义
 
@@ -219,6 +227,8 @@ A local, fully-compatible **OpenAI Chat Completions** and **Anthropic Messages**
 - **Per-session usage history** — the dashboard's Usage tab includes a **session detail view**: records input/output tokens, latency, cost, model, and status per request, visualized with a daily trend line, model-distribution doughnut, and today/week/month cost cards; persisted to `~/.commandcode/usage-history.jsonl`, survives restarts
 - **Official usage overview** — mirrors the data sources of the official usage page (`commandcode.ai/:login/settings/usage`): **Total Tokens** (with input/output breakdown), **Total Runs** (completed/failed/success rate) and a **monthly limit** progress bar fetched from upstream `/alpha/usage/summary` and `/alpha/billing/credits` (same fields as the page's `/internal/*` endpoints, but accepting CLI API keys); exposed via the new `GET /api/usage/overview` dashboard endpoint
 - **Structured error codes** — every failure returns a **stable code plus an actionable hint** (17 codes such as `RATE_LIMIT`, `MODEL_NOT_IN_PLAN`, `STREAM_IDLE_TIMEOUT`), surfaced as OpenAI `error.type`/`error.code` on one route and Anthropic `error.type` on the other, so callers can tell whether to wait for quota, switch models, or fix configuration — see the error table below
+- **Subscription plan & billing cycle** — `/api/usage/overview` now includes a `plan` block: plan name (Go / GOAT / Pro …), official credits and 5-hour/weekly caps, `currentPeriodStart/End`, `cancelAtPeriodEnd`, plus `totalDays / daysElapsed / daysLeft / cyclePct`. The dashboard's Usage tab gains a **billing-cycle card**, since subscription credits expire at renewal instead of rolling over
+- **Per-plan model availability** — the upstream pricing page's **full per-plan availability map** is now preserved (it used to be collapsed into a single `onGoPlan` boolean). Each model in `GET /v1/models` carries `availability`, `available_on_plan` and `plan_tier`, and you can filter with `?plan=individual-go&available=1`; without parameters the response is unchanged (backward compatible). Judgement fails open — missing data keeps a model rather than dropping it
 
 ### Quick Start
 
@@ -240,6 +250,12 @@ npm run build:win    # dist/commandcode-proxy-v4.exe — runs with zero dependen
 ```
 
 On first launch the dashboard opens automatically. Log in via **Browser (OAuth)** or paste an API key. Keys are also auto-loaded from `~/.commandcode/auth.json` or `COMMANDCODE_API_KEY`.
+
+Filter models by plan (`plan` may be given explicitly, or omitted to use the active account's plan; drop `available` for the full catalog):
+
+```bash
+curl "http://127.0.0.1:9090/v1/models?plan=individual-go&available=1"
+```
 
 ### Error contract
 

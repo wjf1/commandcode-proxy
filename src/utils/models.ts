@@ -12,6 +12,7 @@ import fs from 'fs';
 import path from 'path';
 import { loadConfig, assertSafeUpstreamUrl } from './config.js';
 import { logger } from './logger.js';
+import { buildAvailabilityMap } from './plans.js';
 import { ModelItem, ModelPricing, ModelCaps, ModelDeal } from '../types/index.js';
 
 export interface UpstreamModel extends ModelItem {}
@@ -23,12 +24,21 @@ function getProjectRootDir(): string {
   return process.cwd();
 }
 
-const MODELS_FILE_PATH = path.join(getProjectRootDir(), 'models.json');
-const PRICING_FILE_PATH = path.join(getProjectRootDir(), 'pricing.json');
+const MODELS_FILE_PATH = process.env.COMMANDCODE_MODELS_CACHE_PATH
+  ? path.resolve(process.env.COMMANDCODE_MODELS_CACHE_PATH)
+  : path.join(getProjectRootDir(), 'models.json');
+const PRICING_FILE_PATH = process.env.COMMANDCODE_PRICING_CACHE_PATH
+  ? path.resolve(process.env.COMMANDCODE_PRICING_CACHE_PATH)
+  : path.join(getProjectRootDir(), 'pricing.json');
 /** 官方定价页。包含 CONTEXT / INPUT / OUTPUT / CACHE READ / CACHE WRITE / Caps / Deals。 */
-const PRICING_PLAN_URL = 'https://commandcode.ai/docs/plans/go';
+const PRICING_PLAN_URL = process.env.COMMANDCODE_PRICING_URL || 'https://commandcode.ai/docs/plans/go';
 /** 一次抓取的定价目录视为"新鲜"的有效期（毫秒）：6 小时。 */
 const PRICING_TTL_MS = 6 * 60 * 60 * 1000;
+/**
+ * pricing.json 的结构版本。改动缓存字段（如新增 availability 档位映射）时递增，
+ * 旧缓存会自动失效并重新抓取，避免升级后新功能静默不生效。
+ */
+const PRICING_SCHEMA_VERSION = 2;
 
 const DEFAULT_MODELS: ModelItem[] = [
   { id: 'claude-sonnet-5', object: 'model', created: Math.floor(Date.now() / 1000), owned_by: 'command-code', name: 'Claude Sonnet 5', context_length: 1000000, supports_vision: true },
@@ -85,6 +95,7 @@ interface PricingCatalogEntry {
   tip?: string;
   pricing?: ModelPricing;
   onGoPlan?: boolean;
+  availability?: Record<string, boolean>;
 }
 
 function normalizeId(s: string): string {
@@ -155,7 +166,7 @@ function parsePricingFromHtml(html: string): PricingCatalogEntry[] {
     if (!r || typeof r.id !== 'string') continue;
     const tier = Array.isArray(r.tiers) && r.tiers.length > 0 ? r.tiers[0] : null;
     const rates = tier?.rates || null;
-    const avail = r.availability || {};
+    const avail = buildAvailabilityMap(r.availability);
     out.push({
       id: r.id,
       name: r.name,
@@ -164,7 +175,8 @@ function parsePricingFromHtml(html: string): PricingCatalogEntry[] {
       caps: r.caps || undefined,
       deal: r.deal || undefined,
       tip: r.tip,
-      onGoPlan: avail['individual-go'] === true,
+      availability: avail,
+      onGoPlan: avail?.['individual-go'] === true,
       pricing: rates
         ? {
             input: typeof rates.input === 'number' ? rates.input : undefined,
@@ -183,6 +195,14 @@ function loadCachedPricing(): { fetchedAt: number; entries: PricingCatalogEntry[
     if (fs.existsSync(PRICING_FILE_PATH)) {
       const parsed = JSON.parse(fs.readFileSync(PRICING_FILE_PATH, 'utf-8'));
       if (parsed && Array.isArray(parsed.entries)) {
+        // 结构版本不匹配 → 视为过期：旧代码写入的缓存缺少 availability 等字段，
+        // 若继续沿用，升级后按套餐过滤会静默失效（看起来"全部可用"）。
+        if (parsed.schemaVersion !== PRICING_SCHEMA_VERSION) {
+          logger.info(
+            `[MODELS] pricing.json schema v${parsed.schemaVersion ?? 1} != v${PRICING_SCHEMA_VERSION}; refetching.`,
+          );
+          return null;
+        }
         return { fetchedAt: parsed.fetchedAt || 0, entries: parsed.entries };
       }
     }
@@ -194,7 +214,11 @@ function loadCachedPricing(): { fetchedAt: number; entries: PricingCatalogEntry[
 
 function savePricingCache(fetchedAt: number, entries: PricingCatalogEntry[]): void {
   try {
-    fs.writeFileSync(PRICING_FILE_PATH, JSON.stringify({ fetchedAt, entries }, null, 2), 'utf-8');
+    fs.writeFileSync(
+      PRICING_FILE_PATH,
+      JSON.stringify({ schemaVersion: PRICING_SCHEMA_VERSION, fetchedAt, entries }, null, 2),
+      'utf-8',
+    );
   } catch (err: any) {
     logger.error(`[MODELS] Error saving pricing.json: ${err.message}`);
   }
@@ -270,6 +294,7 @@ function mergePricingIntoModels(models: ModelItem[], pricingMap: Map<string, Pri
       pricing: e.pricing,
       deal: e.deal,
       tip: e.tip,
+      availability: e.availability,
       onGoPlan: e.onGoPlan,
       supports_vision: m.supports_vision ?? e.caps?.vision,
     };
@@ -359,6 +384,7 @@ export async function fetchUpstreamModels(apiKey: string, ccVersion: string, ref
           pricing: e.pricing,
           deal: e.deal,
           tip: e.tip,
+          availability: e.availability,
           onGoPlan: true,
           supports_vision: e.caps?.vision,
         });

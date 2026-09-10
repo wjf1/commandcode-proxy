@@ -2,6 +2,31 @@
 
 所有主要版本更新都记录在此文件。
 
+## [4.5.0] - 2026-09-10
+
+### 新增
+- **套餐与计费周期（`/api/usage/overview` 新增 `plan` 块）** — 此前该接口只读 `credits` / `summary`，完全没读订阅信息。现在补齐：`planId` / `name`（Go、GOAT、Pro…）、官方额度与上限（`monthlyCredits` / `fiveHourCap` / `weeklyCap`）、`status`、`cancelAtPeriodEnd`、`currentPeriodStart` / `currentPeriodEnd`，以及派生的周期进度 `totalDays` / `daysElapsed` / `daysLeft` / `cyclePct`。
+  - 仪表盘"用量与额度"页新增**计费周期卡片**：剩余天数、周期进度条、起止时间、是否自动续费。订阅额度在续费时刷新且**不结转**，这张卡片让"还剩几天、留了多少额度作废"一眼可见。
+- **模型按套餐可用性（新增 `src/utils/plans.ts`）** — 上游定价页的 `availability` 是**按档位的完整映射**（实测 9 个键：`individual-go` / `individual-goat` / `individual-pro` / `individual-pro-v1` / `individual-provider` / `individual-max` / `individual-ultra` / `teams-pro` / `all`），此前解析时被压成单个 `onGoPlan` 布尔，档位信息全部丢失。现在：
+  - 原样保留 `availability` 映射并落盘 `pricing.json` / `models.json`；
+  - `GET /v1/models` 每个模型新增 `availability` / `available_on_plan` / `plan_tier` 字段；
+  - 支持 `?plan=<planId>&available=1` 按档位过滤；不带参数时**行为与之前完全一致**（返回全部模型），避免打断既有客户端；
+  - 未显式给 `plan` 时回落到当前账号的套餐（内部 10 分钟缓存，不给每个请求都加一次上游调用）；
+  - 判定 **fail-open**：无 availability 数据 → 返回 `undefined` 并**保留**该模型，不误杀（与插件 `modelVisibleInPlan` 的取向一致）；
+  - `all` 键**刻意不参与判定**：实测 `claude-opus-4-8` 的 `all=true`，但在 Go 档位调用返回 403 `MODEL_NOT_IN_PLAN`。
+  - 档位数值只填官方文档可证实的（Go $10/$3/$6、GOAT $70/$14/$35、Pro $80/$16/$40、Team Pro $40/$12/$24）；`individual-max` / `individual-ultra` / `individual-pro-v1` 与文档中 "Max 10× / Max 20× / Pro" 的对应关系未证实，**只给名称不给数值**，避免面板展示错误数字。
+
+### 修复
+- **`/health` 版本号不再硬编码** — 此前固定返回 `"version":"4.0.0"`，与 `package.json` 实际版本无关（探活/监控拿不到真实版本）。现新增 `src/utils/version.ts` 从 `package.json` 读取（兼容 `pkg` 打包路径），`/health`、`/api/status` 与启动横幅统一使用该版本号。
+
+### 测试
+- 新增 `tests/plans.test.ts`（12 项）：档位表数值、未证实档位不编造数值、`all` 键不参与判定、fail-open 行为、档位标签折叠、`buildAvailabilityMap` 规范化（保留全部档位、丢弃非布尔值、非法输入返回 undefined）。
+- `tests/integration.test.ts` 新增 9 项：`/health` 与 `/api/status` 版本号等于 `package.json`；`plan` 块的套餐名与上限；由 `currentPeriodStart/End` 派生的周期窗口；`/v1/models` 默认响应向后兼容（无 `plan` 块、不过滤）；按档位过滤后不得残留被标记为不可用的模型；每个模型的 `plan_tier` 标签。
+- 集成测试的 mock 上游改为按路径分流（此前**所有**路径都返回 SSE，导致仪表盘的 JSON 接口在测试中不可用），并把 `capturedBodies` 的记录范围收窄到 `/alpha/generate`，避免非生成流量污染"重试次数"断言。
+- 全量 **98 项通过**（基线 79），`tsc --noEmit` 无错误。
+
+- 版本号 `4.4.0` → `4.5.0`。
+
 ## [4.4.0] - 2026-09-10
 
 ### 新增

@@ -358,6 +358,12 @@ export interface ModelItem {
   deal?: ModelDeal;
   /** Available on the individual Go plan (availability.individual-go). */
   onGoPlan?: boolean;
+  /**
+   * Per-plan availability map from the official pricing catalog, e.g.
+   * {"individual-go":true,"individual-goat":true,...}. Stored verbatim so the
+   * dashboard/API can filter by the caller's own plan instead of hardcoding one.
+   */
+  availability?: Record<string, boolean>;
   tip?: string;
 }
 

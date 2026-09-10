@@ -1,8 +1,12 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { spawn, ChildProcess } from 'child_process';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import http from 'node:http';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
+
+const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8')) as { version: string };
 
 const MOCK_PORT = 9911;
 const PROXY_PORT = 9091;
@@ -23,6 +27,98 @@ beforeAll(async () => {
     let body = '';
     req.on('data', c => (body += c));
     req.on('end', () => {
+      const path = new URL(req.url || '/', 'http://127.0.0.1').pathname;
+
+      // ── Non-generate endpoints: serve minimal JSON so the usage/plan paths
+      // can be exercised (before this, EVERY path answered with SSE, which made
+      // the dashboard's JSON endpoints unusable in tests). ──
+      if (path !== '/alpha/generate') {
+        res.setHeader('Content-Type', 'application/json');
+        if (path === '/alpha/whoami') {
+          res.end(JSON.stringify({ success: true, user: { id: 'u1', name: 'Integration Tester', userName: 'integration' } }));
+          return;
+        }
+        if (path === '/alpha/billing/subscriptions') {
+          res.end(JSON.stringify({
+            success: true,
+            data: {
+              planId: 'individual-go',
+              status: 'active',
+              cancelAtPeriodEnd: false,
+              currentPeriodStart: new Date(Date.now() - 14 * 864e5).toISOString(),
+              currentPeriodEnd: new Date(Date.now() + 17 * 864e5).toISOString(),
+            },
+          }));
+          return;
+        }
+        if (path === '/provider/v1/models') {
+          res.end(JSON.stringify({
+            object: 'list',
+            data: [
+              { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', context_length: 200000 },
+              { id: 'claude-opus-4-8', name: 'Claude Opus 4.8', context_length: 200000 },
+              { id: 'meituan/LongCat-2.0:free', name: 'LongCat 2.0', context_length: 131072 },
+            ],
+          }));
+          return;
+        }
+        if (path === '/pricing-fake') {
+          // 复刻官方定价页的 Next.js RSC payload 结构，让 availability 解析链路可测。
+          const rows = [
+            {
+              id: 'claude-sonnet-5',
+              name: 'Claude Sonnet 5',
+              category: 'premium',
+              contextWindow: 200000,
+              caps: { text: true, vision: true, reasoning: true },
+              availability: {
+                'individual-go': false,
+                'individual-goat': false,
+                'individual-pro': false,
+                'individual-provider': true,
+                all: true,
+              },
+              tiers: [{ rates: { input: 3, output: 15 } }],
+            },
+            {
+              id: 'claude-opus-4-8',
+              name: 'Claude Opus 4.8',
+              category: 'premium',
+              contextWindow: 200000,
+              caps: { text: true, vision: false, reasoning: true },
+              availability: {
+                'individual-go': false,
+                'individual-goat': false,
+                'individual-pro': false,
+                'individual-provider': true,
+                all: true,
+              },
+              tiers: [{ rates: { input: 15, output: 75 } }],
+            },
+            {
+              id: 'meituan/LongCat-2.0:free',
+              name: 'LongCat 2.0',
+              category: 'free',
+              contextWindow: 131072,
+              caps: { text: true, vision: false, reasoning: false },
+              availability: { 'individual-go': true, 'individual-goat': true, all: true },
+              tiers: [{ rates: { input: 0, output: 0 } }],
+            },
+          ];
+          res.setHeader('Content-Type', 'text/html');
+          res.end(
+            `<!doctype html><html><body><script>self.__next_f.push([1,${JSON.stringify(
+              JSON.stringify({ rows }),
+            )}])</script></body></html>`,
+          );
+          return;
+        }
+        res.statusCode = 404;
+        res.end(JSON.stringify({ message: 'not mocked' }));
+        return;
+      }
+
+      // 只记录 generate 请求，避免非生成流量污染"重试次数"断言。
       const parsed = JSON.parse(body || '{}');
       capturedBodies.push(parsed);
       const userText = JSON.stringify(parsed.params?.messages?.map((m: any) => m.content)) || '';
@@ -71,8 +167,11 @@ beforeAll(async () => {
 
   // ── Proxy under test ──
   const projectRoot = path.resolve(__dirname, '..');
-  proxyProcess = spawn(process.execPath, ['dist/index.js'], {
-    cwd: projectRoot,
+  // 状态文件（config/models/pricing）隔离到临时目录：否则启动时的账号名补全会把
+  // mock 的假身份与随机 key 写进仓库根的 config.json，污染之后的真实运行。
+  const stateDir = mkdtempSync(path.join(tmpdir(), 'ccproxy-it-'));
+  proxyProcess = spawn(process.execPath, [path.join(projectRoot, 'dist', 'index.js')], {
+    cwd: stateDir,
     env: {
       ...process.env,
       PORT: String(PROXY_PORT),
@@ -84,6 +183,11 @@ beforeAll(async () => {
       // 一律 401，整个集成套件都会失败。mock 上游不校验其值，因此现场
       // 生成一个随机占位符即可（不是任何真实凭据）。
       COMMANDCODE_API_KEY: randomUUID(),
+      // 状态与目录缓存全部落到临时目录，绝不写进仓库。
+      COMMANDCODE_CONFIG_PATH: path.join(stateDir, 'config.json'),
+      COMMANDCODE_MODELS_CACHE_PATH: path.join(stateDir, 'models.json'),
+      COMMANDCODE_PRICING_CACHE_PATH: path.join(stateDir, 'pricing.json'),
+      COMMANDCODE_PRICING_URL: `http://127.0.0.1:${MOCK_PORT}/pricing-fake`,
       NO_OPEN_BROWSER: '1',
     },
     stdio: 'ignore',
@@ -551,5 +655,108 @@ describe('structured error contract', () => {
     // Engine is back up: the same request now succeeds.
     const ok = await postChat(ask('Hi'));
     expect(ok.status).toBe(200);
+  });
+});
+
+// ─── Version reporting ────────────────────────────────────────────────────────
+
+describe('version reporting', () => {
+  it('/health reports the real package version instead of a hardcoded string', async () => {
+    const data = await (await fetch(`${PROXY_BASE}/health`)).json();
+    expect(data.status).toBe('ok');
+    expect(data.version).toBe(pkg.version);
+    expect(data.version).not.toBe('4.0.0');
+  });
+
+  it('/api/status reports the same version', async () => {
+    const data = await (await fetch(`${PROXY_BASE}/api/status`)).json();
+    expect(data.version).toBe(pkg.version);
+  });
+});
+
+// ─── Subscription plan + billing cycle (/api/usage/overview) ──────────────────
+
+describe('plan & billing cycle', () => {
+  it('exposes the subscription plan with its verified credit caps', async () => {
+    const res = await fetch(`${PROXY_BASE}/api/usage/overview`);
+    expect(res.status).toBe(200);
+    const d = await res.json();
+    expect(d.plan).toBeTruthy();
+    expect(d.plan.planId).toBe('individual-go');
+    expect(d.plan.name).toBe('Go');
+    expect(d.plan.status).toBe('active');
+    expect(d.plan.monthlyCredits).toBe(10);
+    expect(d.plan.fiveHourCap).toBe(3);
+    expect(d.plan.weeklyCap).toBe(6);
+    expect(d.plan.cancelAtPeriodEnd).toBe(false);
+  });
+
+  it('derives the billing cycle window from currentPeriodStart/End', async () => {
+    const d = await (await fetch(`${PROXY_BASE}/api/usage/overview`)).json();
+    const p = d.plan;
+    expect(p.currentPeriodStart).toBeGreaterThan(0);
+    expect(p.currentPeriodEnd).toBeGreaterThan(p.currentPeriodStart);
+    expect(p.totalDays).toBeGreaterThan(0);
+    expect(p.daysElapsed).toBeGreaterThanOrEqual(0);
+    expect(p.daysLeft).toBeGreaterThan(0);
+    expect(p.daysLeft).toBeLessThanOrEqual(Math.ceil(p.totalDays));
+    expect(p.cyclePct).toBeGreaterThanOrEqual(0);
+    expect(p.cyclePct).toBeLessThanOrEqual(100);
+  });
+});
+
+// ─── Per-plan model availability (③) ──────────────────────────────────────────
+
+describe('per-plan model availability', () => {
+  beforeAll(async () => {
+    // 显式同步一次目录 + 定价（含 availability），不依赖启动时的后台同步时序。
+    const res = await fetch(`${PROXY_BASE}/v1/models/refresh`, { method: 'POST' });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe('success');
+    expect(body.count).toBeGreaterThanOrEqual(2);
+  });
+
+  it('preserves the upstream per-plan availability map (no longer a single onGoPlan boolean)', async () => {
+    const d = await (await fetch(`${PROXY_BASE}/v1/models`)).json();
+    expect(d.object).toBe('list');
+    expect(d.plan).toBeUndefined(); // 默认行为不变：无 plan 块、不过滤
+    const opus = d.data.find((m: any) => m.id === 'claude-opus-4-8');
+    expect(opus.availability['individual-go']).toBe(false);
+    expect(opus.availability['individual-provider']).toBe(true);
+    expect(opus.onGoPlan).toBe(false);
+    expect(opus.pricing.input).toBe(15); // 定价富化仍然生效
+  });
+
+  it('reports availability per model for an explicitly requested plan', async () => {
+    const d = await (await fetch(`${PROXY_BASE}/v1/models?plan=individual-go`)).json();
+    const opus = d.data.find((m: any) => m.id === 'claude-opus-4-8');
+    const open = d.data.find((m: any) => m.id === 'meituan/LongCat-2.0:free');
+    expect(opus.available_on_plan).toBe(false);
+    expect(open.available_on_plan).toBe(true);
+    expect(opus.plan_tier).toBe('Provider'); // all=true 不计入，故只剩 Provider
+    expect(open.plan_tier).toBe('Go · GOAT');
+  });
+
+  it('filters to the requested plan with available=1', async () => {
+    const all = await (await fetch(`${PROXY_BASE}/v1/models`)).json();
+    const d = await (await fetch(`${PROXY_BASE}/v1/models?plan=individual-go&available=1`)).json();
+    expect(d.plan.id).toBe('individual-go');
+    expect(d.plan.name).toBe('Go');
+    expect(d.plan.monthlyCredits).toBe(10);
+    expect(d.plan.availableOnly).toBe(true);
+    expect(d.plan.filteredCount).toBe(d.data.length);
+    expect(d.data.length).toBeLessThan(all.data.length);
+    expect(d.data.some((m: any) => m.id === 'claude-opus-4-8')).toBe(false);
+    expect(d.data.some((m: any) => m.id === 'meituan/LongCat-2.0:free')).toBe(true);
+    for (const m of d.data) expect(m.available_on_plan).not.toBe(false);
+  });
+
+  it('falls back to the active account plan when plan is omitted', async () => {
+    const d = await (await fetch(`${PROXY_BASE}/v1/models?available=1`)).json();
+    // mock 的 /alpha/billing/subscriptions 返回 individual-go
+    expect(d.plan.id).toBe('individual-go');
+    expect(d.plan.monthlyCredits).toBe(10);
+    expect(d.data.some((m: any) => m.id === 'claude-opus-4-8')).toBe(false);
   });
 });

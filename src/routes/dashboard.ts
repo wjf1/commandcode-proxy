@@ -25,6 +25,8 @@ import {
   defaultAccountName,
 } from '../utils/config.js';
 import { getCachedModels } from '../utils/models.js';
+import { planName, planTier } from '../utils/plans.js';
+import { PROXY_VERSION } from '../utils/version.js';
 import { getUsageHistory, getUsageStats, clearUsageHistory } from '../utils/usage-store.js';
 
 const startTimestamp = Date.now();
@@ -70,6 +72,7 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
 
     return {
       status: 'active',
+      version: PROXY_VERSION,
       running: getGatewayRunning(),
       uptime: `${hrs}h ${mins}m ${secs}s`,
       port: config.port,
@@ -215,12 +218,55 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
       const c = Number(cap) || 0;
       return c > 0 ? Math.min(100, Math.round((u / c) * 1000) / 10) : 0;
     };
+
+    // ── 套餐与计费周期（/alpha/billing/subscriptions）──────────────────────────
+    // 订阅额度在续费时刷新，未用完的部分不会结转，因此周期信息对"要不要升档"
+    // 的判断很关键；之前这里只取了 credits/summary，完全没读订阅周期。
+    const sub: any = stats.subscription?.data ?? stats.subscription ?? {};
+    const planId = typeof sub.planId === 'string' ? sub.planId : '';
+    const tier = planTier(planId);
+    const toMs = (v: unknown): number => {
+      if (typeof v === 'number' && Number.isFinite(v)) return v;
+      if (typeof v === 'string') {
+        const t = Date.parse(v);
+        if (Number.isFinite(t)) return t;
+      }
+      return 0;
+    };
+    const periodStart = toMs(sub.currentPeriodStart);
+    const periodEnd = toMs(sub.currentPeriodEnd);
+    const cycle = (() => {
+      if (!periodStart || !periodEnd || periodEnd <= periodStart) return null;
+      const totalDays = (periodEnd - periodStart) / 86_400_000;
+      const elapsedDays = Math.min(Math.max((Date.now() - periodStart) / 86_400_000, 0), totalDays);
+      return {
+        totalDays: Math.round(totalDays * 100) / 100,
+        daysElapsed: Math.round(elapsedDays * 100) / 100,
+        daysLeft: Math.max(0, Math.ceil((periodEnd - Date.now()) / 86_400_000)),
+        cyclePct: Math.round((elapsedDays / totalDays) * 1000) / 10,
+      };
+    })();
+
     return {
       account: {
         id: acc.id,
         name: acc.name || stats.whoami?.user?.name || defaultAccountName(acc.apiKey, ''),
         userName: acc.userName || stats.whoami?.user?.userName || '',
       },
+      plan: planId
+        ? {
+            planId,
+            name: planName(planId),
+            status: sub.status || '',
+            cancelAtPeriodEnd: sub.cancelAtPeriodEnd === true,
+            monthlyCredits: tier?.monthlyCredits,
+            fiveHourCap: tier?.fiveHourCap,
+            weeklyCap: tier?.weeklyCap,
+            currentPeriodStart: periodStart || null,
+            currentPeriodEnd: periodEnd || null,
+            ...(cycle ?? {}),
+          }
+        : null,
       summary: {
         totalTokens: Number(s.totalTokens) || 0,
         totalTokensIn: Number(s.totalTokensIn) || 0,
@@ -380,7 +426,7 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
     <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl"><p class="text-xs text-slate-400 font-medium">成功率</p><h3 id="ovSuccessRate" class="text-2xl font-extrabold text-cyan-400 mt-1">--</h3><p id="ovPeriod" class="text-[11px] text-slate-400 mt-2">统计口径：--</p></div>
     <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl"><p class="text-xs text-slate-400 font-medium">月度限额</p><h3 id="ovMonthly" class="text-2xl font-extrabold text-emerald-400 mt-1">--</h3><div class="w-full bg-slate-950 rounded-full h-1.5 overflow-hidden border border-slate-800 mt-2"><div id="ovMonthlyBar" class="h-1.5 rounded-full bg-emerald-500 transition-all duration-500" style="width:0%"></div></div><p id="ovMonthlyDetail" class="text-[11px] text-slate-400 mt-1.5">--</p></div>
   </div>
-  <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
     <div class="bg-slate-900 border border-slate-800 p-6 rounded-xl space-y-3">
       <div class="flex items-center justify-between"><h3 class="font-bold text-sm text-white"><i class="fa-solid fa-clock text-indigo-400"></i> 5 小时窗口</h3><span id="window5hText" class="text-xs font-semibold text-slate-300">$0.00 / $0.00</span></div>
       <div class="w-full bg-slate-950 rounded-full h-2.5 overflow-hidden border border-slate-800"><div id="window5hBar" class="bg-indigo-500 h-2.5 rounded-full transition-all duration-500" style="width:0%"></div></div>
@@ -390,6 +436,12 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
       <div class="flex items-center justify-between"><h3 class="font-bold text-sm text-white"><i class="fa-solid fa-calendar-week text-violet-400"></i> 每周窗口</h3><span id="windowWeeklyText" class="text-xs font-semibold text-slate-300">$0.00 / $0.00</span></div>
       <div class="w-full bg-slate-950 rounded-full h-2.5 overflow-hidden border border-slate-800"><div id="windowWeeklyBar" class="bg-violet-500 h-2.5 rounded-full transition-all duration-500" style="width:0%"></div></div>
       <p id="windowWeeklyReset" class="text-[11px] text-slate-400 text-right">重置时间：--</p>
+    </div>
+    <div class="bg-slate-900 border border-slate-800 p-6 rounded-xl space-y-3">
+      <div class="flex items-center justify-between"><h3 class="font-bold text-sm text-white"><i class="fa-solid fa-calendar-days text-emerald-400"></i> 计费周期 <span id="cyclePlan" class="text-[11px] text-slate-400 font-normal"></span></h3><span id="cycleRenew" class="text-xs font-semibold text-slate-300">--</span></div>
+      <div class="flex items-baseline gap-2"><span id="cycleDays" class="text-2xl font-extrabold text-white">--</span><span class="text-xs text-slate-400">天后额度重置</span></div>
+      <div class="w-full bg-slate-950 rounded-full h-2.5 overflow-hidden border border-slate-800"><div id="cycleBar" class="bg-emerald-500 h-2.5 rounded-full transition-all duration-500" style="width:0%"></div></div>
+      <p id="cycleRange" class="text-[11px] text-slate-400 text-right">--</p>
     </div>
   </div>
 
@@ -626,6 +678,12 @@ async function loadUsageInit() {
 function ovFmtNum(n){ return Number(n || 0).toLocaleString('en-US'); }
 function ovFmtCost(v){ const c = Number(v || 0); return '$' + (c >= 1 ? c.toFixed(2) : c.toFixed(4).replace(/0+$/, '').replace(/\.$/, '')); }
 function ovFmtPct(p){ return (Math.round((Number(p) || 0) * 10) / 10) + '%'; }
+function ovFmtDate(ms){
+  const d = new Date(Number(ms));
+  if (!Number.isFinite(d.getTime())) return '--';
+  const p = n => String(n).padStart(2, '0');
+  return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
 
 async function loadUsageOverview() {
   const accEl = document.getElementById('ovPeriod');
@@ -650,6 +708,25 @@ async function loadUsageOverview() {
     } else {
       document.getElementById('ovMonthly').innerText = '无限制';
       document.getElementById('ovMonthlyDetail').innerText = '按量计费';
+    }
+
+    const pl = d.plan;
+    if (pl) {
+      document.getElementById('cyclePlan').innerText = pl.name ? '· ' + pl.name : '';
+      document.getElementById('cycleRenew').innerText = pl.cancelAtPeriodEnd ? '到期不续费' : '到期自动续费';
+      document.getElementById('cycleDays').innerText = (pl.daysLeft != null) ? pl.daysLeft : '--';
+      const cpct = Math.min(100, Math.max(0, Number(pl.cyclePct) || 0));
+      const cbar = document.getElementById('cycleBar');
+      cbar.style.width = cpct + '%';
+      cbar.className = 'h-2.5 rounded-full transition-all duration-500 ' + (cpct >= 90 ? 'bg-rose-500' : cpct >= 70 ? 'bg-amber-500' : 'bg-emerald-500');
+      document.getElementById('cycleRange').innerText = (pl.currentPeriodStart && pl.currentPeriodEnd)
+        ? ovFmtDate(pl.currentPeriodStart) + ' → ' + ovFmtDate(pl.currentPeriodEnd) + ' · 已过 ' + ovFmtPct(pl.cyclePct)
+        : '周期时间未知';
+    } else {
+      document.getElementById('cyclePlan').innerText = '';
+      document.getElementById('cycleRenew').innerText = '--';
+      document.getElementById('cycleDays').innerText = '--';
+      document.getElementById('cycleRange').innerText = '无法获取订阅信息';
     }
   } catch (e) { accEl.innerText = '总览加载失败'; }
 }
