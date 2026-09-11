@@ -28,6 +28,8 @@ import { getCachedModels } from '../utils/models.js';
 import { planName, planTier } from '../utils/plans.js';
 import { PROXY_VERSION } from '../utils/version.js';
 import { getUsageHistory, getUsageStats, clearUsageHistory, describeBillingWindow, getTimeOfDayModels } from '../utils/usage-store.js';
+import { recordQuotaSample, getQuotaProjection } from '../utils/quota-tracker.js';
+import { notify } from '../utils/notifier.js';
 
 const startTimestamp = Date.now();
 
@@ -94,6 +96,10 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
     if (body.running !== undefined) {
       setGatewayRunning(body.running);
       logger.info(`[DASHBOARD] Gateway engine toggled: ${body.running ? 'STARTED' : 'STOPPED'}`);
+      // 引擎暂停意味着所有经过代理的请求都会被拒，用户多半不在面板前。
+      if (body.running === false) {
+        notify('engine-paused', 'CommandCode 引擎已暂停', '代理将拒绝新的 /v1/* 请求，直到在面板恢复', 'warn');
+      }
     }
     return { status: 'success', running: getGatewayRunning() };
   });
@@ -312,10 +318,12 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
       month: stats.month,
       byDay: stats.byDay,
       byModel: stats.byModel,
+      byModelPerf: stats.byModelPerf,
       byProject: stats.byProject,
       bySession: stats.bySession,
       attribution: stats.attribution,
       recent: records.slice(-limit).reverse(),
+      quotaProjection: getQuotaProjection(),
       // 峰谷计费状态：受分时价影响的模型此刻按哪档计费、何时切换。
       billing: {
         window: describeBillingWindow(),
@@ -483,6 +491,28 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
       </div>
     </div>
 
+    <div class="mt-4 bg-slate-950/60 border border-slate-800 p-4 rounded-lg">
+      <div class="flex items-center justify-between flex-wrap gap-2">
+        <h3 class="font-bold text-xs text-white"><i class="fa-solid fa-gauge-high text-cyan-400"></i> 端到端性能</h3>
+        <span class="text-[11px] text-slate-500" title="耗时覆盖整个请求生命周期（上游排队、重试、网络往返），反映体感等待而非模型生成速度">口径：端到端，非模型生成速度</span>
+      </div>
+      <div class="overflow-x-auto mt-3">
+        <table class="w-full text-xs text-left">
+          <thead class="bg-slate-950/60 text-slate-400">
+            <tr>
+              <th class="px-2 py-2 font-medium">模型</th>
+              <th class="px-2 py-2 font-medium text-right">样本</th>
+              <th class="px-2 py-2 font-medium text-right">吞吐 P50</th>
+              <th class="px-2 py-2 font-medium text-right">吞吐 P95</th>
+              <th class="px-2 py-2 font-medium text-right">延迟 P50</th>
+              <th class="px-2 py-2 font-medium text-right">延迟 P95</th>
+            </tr>
+          </thead>
+          <tbody id="perfTableBody" class="divide-y divide-slate-800/60"></tbody>
+        </table>
+      </div>
+    </div>
+
     <div class="mt-4 bg-slate-950/40 border border-slate-800 rounded-lg overflow-hidden">
       <div class="flex items-center justify-between px-4 py-2.5 border-b border-slate-800">
         <h3 class="font-bold text-xs text-white"><i class="fa-solid fa-table-list text-emerald-400"></i> 请求明细</h3>
@@ -497,6 +527,7 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
               <th class="px-3 py-2 font-medium text-right">输入</th>
               <th class="px-3 py-2 font-medium text-right">缓存命中</th>
               <th class="px-3 py-2 font-medium text-right">输出</th>
+              <th class="px-3 py-2 font-medium text-right" title="输出 token / 端到端耗时（含上游排队、重试与网络），不等于模型生成速度">吞吐 <i class="fa-solid fa-circle-info text-slate-600"></i></th>
               <th class="px-3 py-2 font-medium text-right">耗时</th>
               <th class="px-3 py-2 font-medium text-right">成本</th>
               <th class="px-3 py-2 font-medium">状态</th>
@@ -815,6 +846,23 @@ function renderUsageForAccount(accId) {
     bar.className = ratio>=90?'bg-rose-500 h-2.5 rounded-full':ratio>=70?'bg-amber-500 h-2.5 rounded-full':'bg-indigo-500 h-2.5 rounded-full';
     const mins = w5h.resetAt ? Math.max(0,Math.ceil((w5h.resetAt-Date.now())/60000)) : 0;
     document.getElementById('window5hReset').innerText = '重置时间：'+mins+' 分钟';
+    // 燃烧速率预测：由官方 used 的时间差分外推（本地历史只覆盖代理流量，
+    // 不能用来预测全账号额度）。
+    const proj = usageHistoryCache && usageHistoryCache.quotaProjection;
+    const pNote = document.getElementById('window5hProjection');
+    if (pNote) {
+      if (!proj || proj.samples < 2 || proj.burnPerHour == null) {
+        pNote.innerText = '速率预测：采样中（需 10 分钟以上数据）';
+      } else if (proj.burnPerHour <= 0) {
+        pNote.innerText = '速率预测：当前无消耗';
+      } else if (proj.willHitCapBeforeReset === true) {
+        pNote.className = 'text-[11px] text-rose-400 mt-1';
+        pNote.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> 按当前 $' + proj.burnPerHour.toFixed(2) + '/h，约 <b>' + fmtDur(proj.minutesToCap) + '</b>后撞上限额（早于重置）';
+      } else {
+        pNote.className = 'text-[11px] text-slate-400 mt-1';
+        pNote.innerText = '按当前 $' + proj.burnPerHour.toFixed(2) + '/h 约需 ' + fmtDur(proj.minutesToCap) + ' 用完 · 重置更早到来';
+      }
+    }
   }
   const wk = t.credits?.windowLimits?.weekly;
   if (wk) {
@@ -966,6 +1014,8 @@ function fmtDur(mins){ if(mins==null) return '--'; if(mins>=1440) return Math.fl
 // 服务端同名的展示函数在前端不可用，这里用等价实现：只取路径末段
 // （完整路径可能含用户名，默认不直接展示，悬停才看全路径）。
 function projectDisplayName(p){ if(!p) return '未识别'; var parts=String(p).split(/[\\/]/).filter(Boolean); return parts.length?parts[parts.length-1]:String(p); }
+// 端到端吞吐：口径与后端 throughputTokS 一致（含排队/重试/网络，非模型生成速度）。
+function fmtTokS(out, ms){ if(!out||out<=0||!ms||ms<=0) return '<span class="text-slate-600">—</span>'; var v=out/(ms/1000); return v.toFixed(1)+' t/s'; }
 function fmtTime(ts){ try { const d=new Date(ts); return d.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit'}); } catch { return ts; } }
 
 async function loadUsageHistory(){
@@ -1017,6 +1067,29 @@ async function loadUsageHistory(){
   renderUsageTable(data.recent||[]);
   renderUsageCharts(data);
   renderAttribution(data);
+  renderModelPerf(data.byModelPerf||[]);
+}
+
+// 每模型端到端吞吐/延迟分布。空样本（无输出或失败的请求）不计入。
+function renderModelPerf(rows){
+  const body = document.getElementById('perfTableBody');
+  if (!body) return;
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="6" class="px-2 py-6 text-center text-slate-500">暂无性能数据</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.slice(0, 20).map(r => {
+    const t = v => (v==null ? '<span class="text-slate-600">—</span>' : v.toFixed(1)+' t/s');
+    const l = v => (v==null ? '<span class="text-slate-600">—</span>' : (v>=1000 ? (v/1000).toFixed(1)+'s' : Math.round(v)+'ms'));
+    return '<tr class="hover:bg-slate-800/40 transition">' +
+      '<td class="px-2 py-2 font-mono text-slate-200 truncate max-w-[260px]" title="' + esc(r.model) + '">' + esc(r.model) + '</td>' +
+      '<td class="px-2 py-2 text-right text-slate-400">' + r.samples + '</td>' +
+      '<td class="px-2 py-2 text-right text-slate-300">' + t(r.tokSP50) + '</td>' +
+      '<td class="px-2 py-2 text-right text-slate-400">' + t(r.tokSP95) + '</td>' +
+      '<td class="px-2 py-2 text-right text-slate-300">' + l(r.latencyP50Ms) + '</td>' +
+      '<td class="px-2 py-2 text-right text-slate-400">' + l(r.latencyP95Ms) + '</td>' +
+    '</tr>';
+  }).join('');
 }
 
 // 项目（推断）与会话（声明）两个维度的呈现。
@@ -1161,6 +1234,7 @@ function renderUsageTable(recent){
       '<td class="px-4 py-2.5 text-right text-slate-300">' + fmtTokens(r.inputTokens) + '</td>' +
       '<td class="px-4 py-2.5 text-right">' + cacheCell + '</td>' +
       '<td class="px-4 py-2.5 text-right text-slate-300">' + fmtTokens(r.outputTokens) + '</td>' +
+      '<td class="px-4 py-2.5 text-right text-slate-400">' + fmtTokS(r.outputTokens, r.timingMs) + '</td>' +
       '<td class="px-4 py-2.5 text-right text-slate-400">' + fmtMs(r.timingMs) + '</td>' +
       '<td class="px-4 py-2.5 text-right text-emerald-400"' + costTip + '>' + src + fmtUsd(r.costUsd) + pc + '</td>' +
       '<td class="px-4 py-2.5">' + badge + '</td>' +

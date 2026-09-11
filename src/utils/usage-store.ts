@@ -325,6 +325,64 @@ interface ModelBucket {
 }
 
 /** 项目聚合桶。project 为 null 表示归属"未识别"。 */
+/**
+ * 端到端吞吐（tok/s）= 输出 token / 耗时秒。
+ *
+ * **口径注意**：timingMs 覆盖整个请求生命周期（上游排队、重试、网络往返），
+ * 因此这是"端到端吞吐"，**不等于**模型生成速度 —— 用它评估模型快慢会失真，
+ * 但用于"这条请求体感多久出完"是准确的。无输出或无耗时时返回 null。
+ */
+export function throughputTokS(outputTokens: number, timingMs: number): number | null {
+  if (!Number.isFinite(outputTokens) || outputTokens <= 0) return null;
+  if (!Number.isFinite(timingMs) || timingMs <= 0) return null;
+  return outputTokens / (timingMs / 1000);
+}
+
+/** 线性插值百分位。输入须已升序排序；空数组返回 null。 */
+export function percentile(sorted: number[], p: number): number | null {
+  if (!sorted.length) return null;
+  if (sorted.length === 1) return sorted[0];
+  const idx = (sorted.length - 1) * p;
+  const lo = Math.floor(idx);
+  const hi = Math.ceil(idx);
+  if (lo === hi) return sorted[lo];
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo);
+}
+
+interface ModelPerf {
+  samples: number;
+  /** 端到端吞吐 tok/s：均值与中位数。 */
+  tokSAvg: number | null;
+  tokSP50: number | null;
+  tokSP95: number | null;
+  /** 端到端耗时（毫秒）P50 / P95。 */
+  latencyP50Ms: number | null;
+  latencyP95Ms: number | null;
+}
+
+/** 由一批记录算吞吐/延迟分布（只计 COMPLETED 且有输出的请求）。 */
+function perfOf(records: UsageRecord[]): ModelPerf {
+  const tok: number[] = [];
+  const lat: number[] = [];
+  for (const r of records) {
+    if (r.status !== 'COMPLETED') continue;
+    const t = throughputTokS(r.outputTokens, r.timingMs);
+    if (t !== null) tok.push(t);
+    if (Number.isFinite(r.timingMs) && r.timingMs > 0) lat.push(r.timingMs);
+  }
+  tok.sort((a, b) => a - b);
+  lat.sort((a, b) => a - b);
+  const avg = tok.length ? tok.reduce((s, x) => s + x, 0) / tok.length : null;
+  return {
+    samples: tok.length,
+    tokSAvg: avg === null ? null : Math.round(avg * 10) / 10,
+    tokSP50: percentile(tok, 0.5) === null ? null : Math.round(percentile(tok, 0.5)! * 10) / 10,
+    tokSP95: percentile(tok, 0.95) === null ? null : Math.round(percentile(tok, 0.95)! * 10) / 10,
+    latencyP50Ms: percentile(lat, 0.5) === null ? null : Math.round(percentile(lat, 0.5)!),
+    latencyP95Ms: percentile(lat, 0.95) === null ? null : Math.round(percentile(lat, 0.95)!),
+  };
+}
+
 interface ProjectBucket {
   project: string | null;
   /** 该项目下出现过的置信度来源，label 优先展示。 */
@@ -533,6 +591,15 @@ export function getUsageStats() {
         lastAt: p.lastAt,
       }))
       .sort((a, b) => b.costUsd - a.costUsd),
+    // 每模型端到端吞吐与延迟分布（口径说明见 throughputTokS）。
+    byModelPerf: Object.entries(
+      records.reduce<Record<string, UsageRecord[]>>((acc, r) => {
+        (acc[r.model] ||= []).push(r);
+        return acc;
+      }, {})
+    )
+      .map(([model, rs]) => ({ model, ...perfOf(rs) }))
+      .sort((a, b) => b.samples - a.samples),
     // 会话维度（客户端声明的事实性标识）。
     bySession: Array.from(bySession.values())
       .map(s => ({ ...s, models: Array.from(s.models) }))

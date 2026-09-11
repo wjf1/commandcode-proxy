@@ -11,7 +11,7 @@
 //   7. 监听端口；默认自动打开浏览器显示仪表盘
 // =============================================================================
 import Fastify from 'fastify';
-import { loadConfig, openBrowser, checkAndRotateAccountsOnQuota, getActiveApiKey, resolveBodyLimit, enrichDefaultAccountName } from './utils/config.js';
+import { loadConfig, openBrowser, checkAndRotateAccountsOnQuota, getActiveApiKey, resolveBodyLimit, enrichDefaultAccountName, fetchWindowLimits } from './utils/config.js';
 import { fetchUpstreamModels } from './utils/models.js';
 import { logger } from './utils/logger.js';
 import { PROXY_VERSION } from './utils/version.js';
@@ -19,6 +19,8 @@ import { chatRoutes, verifyProxyAuth } from './routes/chat.js';
 import { messagesRoutes } from './routes/messages.js';
 import { modelsRoutes } from './routes/models.js';
 import { dashboardRoutes } from './routes/dashboard.js';
+import { recordQuotaSample, getQuotaProjection } from './utils/quota-tracker.js';
+import { notify } from './utils/notifier.js';
 
 process.on('uncaughtException', err => {
   logger.error(`[CRITICAL] Uncaught Exception: ${err.message}`);
@@ -39,6 +41,36 @@ const fastify = Fastify({
 });
 
 const QUOTA_CHECK_INTERVAL_MS = 30 * 60 * 1000; // 每 30 分钟检查一次额度
+/** 额度采样周期：官方 used 的时间差分决定燃烧速率，太疏会漏掉短时高峰。 */
+const QUOTA_SAMPLE_INTERVAL_MS = 5 * 60 * 1000;
+
+/**
+ * 采样官方窗口用量并推进燃烧速率预测。只拉 credits 一个端点，开销最低。
+ * 采样允许失败（网络抖动跳过本次即可，预测基于历史窗口）。
+ */
+async function sampleQuotaWindow(): Promise<void> {
+  const apiKey = getActiveApiKey();
+  if (!apiKey) return;
+  try {
+    const wl = await fetchWindowLimits(apiKey, config.ccApiBase, config.ccVersion);
+    const fh = wl?.fiveHour;
+    if (fh && Number.isFinite(fh.used) && Number.isFinite(fh.cap)) {
+      recordQuotaSample(fh.used, fh.cap, typeof fh.resetAt === 'number' ? fh.resetAt : null);
+      const p = getQuotaProjection();
+      // 只在"会撞限"这个可行动结论上提醒，且由 notifier 去重限频。
+      if (p.willHitCapBeforeReset === true && p.minutesToCap !== null) {
+        notify(
+          'quota-window-cap',
+          'CommandCode 额度将耗尽',
+          `按当前速率约 ${p.minutesToCap} 分钟后用完 5 小时窗口（剩余 $${(p.remainingUsd ?? 0).toFixed(2)}），早于重置时间`,
+          'critical'
+        );
+      }
+    }
+  } catch (err: any) {
+    logger.warn(`[QUOTA-SAMPLE] ${err?.message || err}`);
+  }
+}
 
 const start = async () => {
   try {
@@ -75,6 +107,15 @@ const start = async () => {
         });
       }, QUOTA_CHECK_INTERVAL_MS);
       logger.info('[AUTO-QUOTA] Rotation scheduler active (every 30m).');
+    }
+
+    // 燃烧速率采样：立即采一次拿到基线，之后定时差分。
+    if (getActiveApiKey()) {
+      sampleQuotaWindow().catch(() => {});
+      setInterval(() => {
+        sampleQuotaWindow().catch(err => logger.warn(`[QUOTA-SAMPLE] ${err?.message || err}`));
+      }, QUOTA_SAMPLE_INTERVAL_MS);
+      logger.info('[QUOTA-SAMPLE] Window usage sampler active (every 5m).');
     }
 
     await fastify.listen({ port: config.port, host: config.host });

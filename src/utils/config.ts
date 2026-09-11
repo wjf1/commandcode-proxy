@@ -14,6 +14,7 @@ import crypto from 'crypto';
 import { spawn } from 'child_process';
 import { GatewayConfig, GatewayConfigFile, AccountInfo } from '../types/index.js';
 import { logger } from './logger.js';
+import { notify } from './notifier.js';
 
 function getProjectRootDir(): string {
   if ((process as any).pkg || process.execPath.toLowerCase().includes('commandcode-proxy')) {
@@ -464,6 +465,8 @@ export async function checkAndRotateAccountsOnQuota(): Promise<boolean> {
         if (altRatio < QUOTA_THRESHOLD) {
           setActiveAccount(altAcc.id);
           logger.info(`[AUTO-QUOTA] Switched active account to '${altAcc.name}' [Quota: ${(altRatio * 100).toFixed(1)}%]`);
+          // 换号会改变后续请求的归属与额度池，用户通常不在面板前，需主动告知。
+          notify('account-switched', 'CommandCode 已切换账号', `额度不足，已切换到 '${altAcc.name}'（余量 ${(100 - altRatio * 100).toFixed(0)}%）`, 'warn');
           return true;
         }
       } catch {}
@@ -517,6 +520,22 @@ export async function fetchLiveUsageStats(apiKey: string, ccApiBase: string, ccV
   ]);
 
   return { whoami, credits, subscription, summary };
+}
+
+/**
+ * 只拉额度（credits）以采样窗口用量 —— 供燃烧速率预测定期采样用。
+ * 与 fetchLiveUsageStats 的区别：不拉 whoami/subscriptions/summary，
+ * 把高频轮询的上游开销降到最低。失败返回 null（采样允许缺失）。
+ */
+export async function fetchWindowLimits(apiKey: string, ccApiBase: string, ccVersion: string): Promise<any | null> {
+  const headers = {
+    Authorization: `Bearer ${apiKey}`,
+    'User-Agent': 'cli',
+    'x-cli-environment': 'cli',
+    'x-command-code-version': ccVersion,
+  };
+  const credits = await fetchJson(`${ccApiBase}/alpha/billing/credits`, headers);
+  return credits?.windowLimits ?? null;
 }
 
 // ─── 打开浏览器（跨平台、无 shell）────────────────────────────────────────────
