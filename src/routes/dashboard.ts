@@ -27,7 +27,7 @@ import {
 import { getCachedModels } from '../utils/models.js';
 import { planName, planTier } from '../utils/plans.js';
 import { PROXY_VERSION } from '../utils/version.js';
-import { getUsageHistory, getUsageStats, clearUsageHistory } from '../utils/usage-store.js';
+import { getUsageHistory, getUsageStats, clearUsageHistory, describeBillingWindow, getTimeOfDayModels } from '../utils/usage-store.js';
 
 const startTimestamp = Date.now();
 
@@ -313,6 +313,11 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
       byDay: stats.byDay,
       byModel: stats.byModel,
       recent: records.slice(-limit).reverse(),
+      // 峰谷计费状态：受分时价影响的模型此刻按哪档计费、何时切换。
+      billing: {
+        window: describeBillingWindow(),
+        models: getTimeOfDayModels(),
+      },
     };
   });
 
@@ -454,10 +459,13 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
       <button onclick="clearUsageHistory()" class="px-3 py-1.5 bg-slate-800 hover:bg-rose-900/60 text-slate-300 hover:text-rose-200 text-xs rounded-lg flex items-center gap-1.5 border border-slate-700 transition"><i class="fa-solid fa-trash-can"></i> 清空历史</button>
     </div>
 
-    <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mt-4">
+    <div id="billingWindow" class="mt-4 hidden"></div>
+
+    <div class="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-4 mt-4">
       <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg"><p class="text-[11px] text-slate-400 font-medium">今日 Token</p><h3 id="usageTodayToken" class="text-lg font-bold text-white mt-1">--</h3><p id="usageTodayRuns" class="text-[11px] text-slate-400 mt-1">-- 次请求</p></div>
       <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg"><p class="text-[11px] text-slate-400 font-medium">本周成本</p><h3 id="usageWeekCost" class="text-lg font-bold text-emerald-400 mt-1">--</h3><p id="usageWeekToken" class="text-[11px] text-slate-400 mt-1">--</p></div>
       <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg"><p class="text-[11px] text-slate-400 font-medium">本月成本</p><h3 id="usageMonthCost" class="text-lg font-bold text-emerald-400 mt-1">--</h3><p id="usageMonthToken" class="text-[11px] text-slate-400 mt-1">--</p></div>
+      <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg" title="缓存命中的输入按缓存读单价计费（约为输入价的 1/50），此处为相比全价输入省下的金额"><p class="text-[11px] text-slate-400 font-medium">缓存节省 <i class="fa-solid fa-circle-info text-slate-600"></i></p><h3 id="usageSavings" class="text-lg font-bold text-sky-400 mt-1">--</h3><p id="usageSavingsNote" class="text-[11px] text-slate-400 mt-1">--</p></div>
       <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg"><p class="text-[11px] text-slate-400 font-medium">累计</p><h3 id="usageTotalToken" class="text-lg font-bold text-white mt-1">--</h3><p id="usageTotalRuns" class="text-[11px] text-slate-400 mt-1">-- 次请求</p><p id="usageCacheHit" class="text-[11px] text-sky-400 mt-1">--</p><p id="usagePricingNote" class="text-[11px] text-amber-400 mt-1 hidden"><i class="fa-solid fa-triangle-exclamation"></i> 未同步定价</p></div>
     </div>
 
@@ -896,7 +904,9 @@ let usageHistoryCache = null;
 function fmtTokens(n){ if(!n) return '0'; if(n>=1000000){var x=n/1000000; return (x%1===0?x:x.toFixed(1))+'M';} if(n>=1000){var k=n/1000; return (k%1===0?k:k.toFixed(1))+'K';} return String(n); }
 function fmtTokensM(n){ if(!n) return '0'; var x=n/1000000; return (x>=100?Math.round(x):x>=10?x.toFixed(1):x.toFixed(2))+'M'; }
 function fmtUsd(v){ return '$' + (v||0).toFixed(4); }
+function fmtUsdShort(v){ var x=v||0; if(x>=1000) return '$'+(x/1000).toFixed(2)+'k'; if(x>=1) return '$'+x.toFixed(2); return '$'+x.toFixed(4); }
 function fmtMs(ms){ if(!ms) return '--'; if(ms>=60000){var m=Math.floor(ms/60000),s=(ms%60000)/1000; return m+'m '+s.toFixed(1)+'s';} if(ms>=1000) return (ms/1000).toFixed(1)+'s'; return Math.round(ms)+'ms'; }
+function fmtDur(mins){ if(mins==null) return '--'; if(mins>=1440) return Math.floor(mins/1440)+'天'; if(mins>=60) return Math.floor(mins/60)+'h '+String(mins%60).padStart(2,'0')+'m'; return mins+'m'; }
 function fmtTime(ts){ try { const d=new Date(ts); return d.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit'}); } catch { return ts; } }
 
 async function loadUsageHistory(){
@@ -913,6 +923,23 @@ async function loadUsageHistory(){
   document.getElementById('usageTotalToken').innerText = fmtTokensM(s.inputTokens + s.outputTokens) + ' token';
   document.getElementById('usageTotalRuns').innerText = s.runs + ' 次请求 · 失败 ' + s.failures;
 
+  // 缓存节省：命中缓存的输入按缓存读单价计费（约输入价的 1/50），
+  // 这里显示相比"全价输入"省下的金额 —— 解释账单为何远低于直觉值。
+  const savEl = document.getElementById('usageSavings');
+  const savNote = document.getElementById('usageSavingsNote');
+  if (savEl) {
+    const saved = s.savingsUsd || 0;
+    savEl.innerText = saved > 0 ? fmtUsdShort(saved) : '--';
+    if (saved > 0) {
+      const mult = s.savingsMultiple || 0;
+      savNote.innerText = mult > 0
+        ? '约为账面成本 ' + fmtUsdShort(s.costUsd || 0) + ' 的 ' + mult.toFixed(1) + ' 倍'
+        : '相比全价输入省下';
+    } else {
+      savNote.innerText = '暂无缓存命中记录';
+    }
+  }
+
   // 缓存命中率：agent 场景常达 90%+，是成本远低于"输入×输入价"的主因。
   const hitEl = document.getElementById('usageCacheHit');
   if (hitEl) {
@@ -922,12 +949,60 @@ async function loadUsageHistory(){
       : '缓存命中 --';
   }
 
+  renderBillingWindow(data.billing);
+
   const hasAnyPricing = (data.recent||[]).some(r => r.hasPricing);
   document.getElementById('usagePricingNote').classList.toggle('hidden', hasAnyPricing);
   document.getElementById('usageRecentCount').innerText = '最近 ' + (data.recent||[]).length + ' 条';
 
   renderUsageTable(data.recent||[]);
   renderUsageCharts(data);
+}
+
+// 峰谷计费提示：官方对部分模型（deepseek 系列）设分时价，
+// 峰时为 UTC 周一至周五 01–04 与 06–10。此处提示当前档位与切换倒计时。
+function renderBillingWindow(billing){
+  const el = document.getElementById('billingWindow');
+  if (!el) return;
+  const w = billing && billing.window;
+  const models = (billing && billing.models) || [];
+  if (!w || !models.length) { el.classList.add('hidden'); el.innerHTML = ''; return; }
+  el.classList.remove('hidden');
+
+  const peak = !!w.isPeak;
+  const tone = peak
+    ? 'bg-amber-500/10 border-amber-500/30 text-amber-300'
+    : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300';
+  const icon = peak ? 'fa-solid fa-fire' : 'fa-solid fa-leaf';
+  const label = peak ? '峰时计费中' : '谷时计费中';
+
+  let when = '';
+  if (w.minutesUntilChange != null) {
+    when = ' · ' + fmtDur(w.minutesUntilChange) + '后转为' + (w.nextIsPeak ? '峰时' : '谷时');
+  }
+
+  // 各模型当前生效费率（只列有分时价的模型，通常 4 个）。
+  const rows = models.map(m => {
+    const a = m.activeRates || {};
+    return '<span class="inline-flex items-center gap-1.5 bg-slate-950/60 border border-slate-800 rounded px-2 py-1">' +
+      '<span class="text-slate-300 font-mono">' + esc(m.id) + '</span>' +
+      '<span class="text-slate-500">输入</span><span class="text-slate-200">' + fmtPrice(a.input) + '</span>' +
+      '<span class="text-slate-500">输出</span><span class="text-slate-200">' + fmtPrice(a.output) + '</span>' +
+      '<span class="text-slate-500">缓存读</span><span class="text-slate-200">' + fmtPrice(a.cacheRead) + '</span>' +
+    '</span>';
+  }).join('');
+
+  const windowsNote = w.windows ? '官方窗口：' + esc(w.windows) + ' UTC' + (w.peakHoursPerDay ? '（' + w.peakHoursPerDay + 'h/天）' : '') : '';
+
+  el.innerHTML =
+    '<div class="border ' + tone + ' rounded-lg p-3">' +
+      '<div class="flex items-center gap-2 flex-wrap">' +
+        '<span class="font-semibold text-xs"><i class="' + icon + '"></i> ' + label + '</span>' +
+        '<span class="text-xs opacity-90">' + when + '</span>' +
+        (windowsNote ? '<span class="text-[11px] opacity-70 ml-auto">' + windowsNote + '</span>' : '') +
+      '</div>' +
+      '<div class="flex gap-2 flex-wrap mt-2 text-[11px]">' + rows + '</div>' +
+    '</div>';
 }
 
 function renderUsageTable(recent){

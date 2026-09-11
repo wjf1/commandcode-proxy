@@ -137,7 +137,7 @@ describe('isPeakBillingTime — 官方 01–04 & 06–10 UTC, Mon–Fri', () => 
 
 describe('estimateCostUsd — 缓存读按 1/50 单价、峰谷分时', () => {
   let stateDir: string;
-  let estimateCostUsd: typeof import('../src/utils/usage-store.js').estimateCostUsd;
+  let store: typeof import('../src/utils/usage-store.js');
 
   beforeEach(async () => {
     stateDir = mkdtempSync(path.join(tmpdir(), 'ccproxy-cost-'));
@@ -150,10 +150,13 @@ describe('estimateCostUsd — 缓存读按 1/50 单价、峰谷分时', () => {
           object: 'model',
           created: 1,
           owned_by: 'deepseek',
+          name: 'DeepSeek V4.1 Flash',
           pricing: { input: 0.15, output: 0.6, cacheRead: 0.003 },
           timeOfDay: {
             peak: { input: 0.3, output: 1.2, cacheRead: 0.006 },
             offPeak: { input: 0.15, output: 0.6, cacheRead: 0.003 },
+            peakHoursPerDay: 7,
+            windows: '01–04 & 06–10 UTC, Mon–Fri',
           },
         },
         {
@@ -163,18 +166,28 @@ describe('estimateCostUsd — 缓存读按 1/50 单价、峰谷分时', () => {
           owned_by: 'x',
           pricing: { input: 1, output: 2, cacheRead: 0.1 },
         },
+        {
+          // 反常定价：缓存读比输入还贵 —— 节省额应为 0，不得为负
+          id: 'weird-model',
+          object: 'model',
+          created: 1,
+          owned_by: 'x',
+          pricing: { input: 1, output: 1, cacheRead: 2 },
+        },
       ]),
       'utf-8'
     );
     vi.resetModules();
     process.env.COMMANDCODE_MODELS_CACHE_PATH = path.join(stateDir, 'models.json');
-    ({ estimateCostUsd } = await import('../src/utils/usage-store.js'));
+    store = await import('../src/utils/usage-store.js');
   });
 
   afterEach(() => {
     delete process.env.COMMANDCODE_MODELS_CACHE_PATH;
     rmSync(stateDir, { recursive: true, force: true });
   });
+
+  const estimateCostUsd = (...args: Parameters<typeof store.estimateCostUsd>) => store.estimateCostUsd(...args);
 
   const PEAK = new Date('2026-09-11T02:00:00Z'); // 周五 峰时
   const OFF = new Date('2026-09-11T18:00:00Z'); // 周五 谷时
@@ -223,5 +236,131 @@ describe('estimateCostUsd — 缓存读按 1/50 单价、峰谷分时', () => {
     const { costUsd, hasPricing } = estimateCostUsd('nope', 100, 100);
     expect(hasPricing).toBe(false);
     expect(costUsd).toBe(0);
+  });
+
+  // ── 缓存节省可视化 ──────────────────────────────────────────────────────────
+
+  describe('estimateCacheSavingsUsd — 缓存命中省下多少', () => {
+    it('按 (输入价 − 缓存读价) 计算峰时节省', () => {
+      // 峰时 0.30 − 0.006 = 0.294 /M
+      const saved = store.estimateCacheSavingsUsd('deepseek/deepseek-v4.1-flash', 152448, PEAK);
+      expect(saved).toBeCloseTo((152448 / 1e6) * (0.3 - 0.006), 12);
+      expect(saved).toBeCloseTo(0.044819712, 12);
+    });
+
+    it('谷时节省按谷时差额（0.15 − 0.003）', () => {
+      const saved = store.estimateCacheSavingsUsd('deepseek/deepseek-v4.1-flash', 1250000, OFF);
+      expect(saved).toBeCloseTo((1250000 / 1e6) * (0.15 - 0.003), 12);
+    });
+
+    it('峰时节省严格大于谷时同量（费率差更大）', () => {
+      const peak = store.estimateCacheSavingsUsd('deepseek/deepseek-v4.1-flash', 1000000, PEAK);
+      const off = store.estimateCacheSavingsUsd('deepseek/deepseek-v4.1-flash', 1000000, OFF);
+      expect(peak).toBeGreaterThan(off);
+      expect(peak / off).toBeCloseTo(0.294 / 0.147, 6);
+    });
+
+    it('无缓存命中时为 0', () => {
+      expect(store.estimateCacheSavingsUsd('deepseek/deepseek-v4.1-flash', 0, PEAK)).toBe(0);
+    });
+
+    it('缓存价高于输入价时不报负节省（反常定价护栏）', () => {
+      // weird-model 的 cacheRead(2) > input(1)，节省应为 0 而非负数
+      expect(store.estimateCacheSavingsUsd('weird-model', 1000, PEAK)).toBe(0);
+    });
+
+    it('未知模型为 0（无定价）', () => {
+      expect(store.estimateCacheSavingsUsd('nope', 1000, PEAK)).toBe(0);
+    });
+  });
+
+  // ── 峰谷窗口描述 ────────────────────────────────────────────────────────────
+
+  describe('describeBillingWindow — 当前档位与切换倒计时', () => {
+    it('峰时：isPeak=true，nextChangeAt 指向 04:00 UTC', () => {
+      const at = new Date('2026-09-11T02:00:00Z'); // 周五 02:00 峰时
+      const w = store.describeBillingWindow(at);
+      expect(w.isPeak).toBe(true);
+      expect(w.nextIsPeak).toBe(false);
+      expect(w.nextChangeAt).toBe('2026-09-11T04:00:00.000Z');
+      expect(w.minutesUntilChange).toBe(120);
+      expect(w.windows).toContain('UTC');
+      expect(w.peakHoursPerDay).toBe(7);
+    });
+
+    it('峰时 06–10：切换点指向 10:00 UTC', () => {
+      const w = store.describeBillingWindow(new Date('2026-09-11T06:30:00Z'));
+      expect(w.isPeak).toBe(true);
+      expect(w.nextChangeAt).toBe('2026-09-11T10:00:00.000Z');
+    });
+
+    it('谷时：切换点指向当日 01:00 或 06:00 峰时起点', () => {
+      const w = store.describeBillingWindow(new Date('2026-09-11T00:30:00Z'));
+      expect(w.isPeak).toBe(false);
+      expect(w.nextIsPeak).toBe(true);
+      expect(w.nextChangeAt).toBe('2026-09-11T01:00:00.000Z');
+      expect(w.minutesUntilChange).toBe(30);
+    });
+
+    it('周五 10:00 后一直谷时，跨越周末到下周一 01:00', () => {
+      const w = store.describeBillingWindow(new Date('2026-09-11T12:00:00Z')); // 周五中午
+      expect(w.isPeak).toBe(false);
+      expect(w.nextIsPeak).toBe(true);
+      // 下周一 2026-09-14 01:00 UTC
+      expect(w.nextChangeAt).toBe('2026-09-14T01:00:00.000Z');
+    });
+
+    it('周六为谷时，下次切换仍是下周一 01:00', () => {
+      const w = store.describeBillingWindow(new Date('2026-09-12T09:00:00Z')); // 周六
+      expect(w.isPeak).toBe(false);
+      expect(w.nextChangeAt).toBe('2026-09-14T01:00:00.000Z');
+    });
+  });
+
+  describe('getTimeOfDayModels — 列出受分时价影响的模型', () => {
+    it('只返回带 timeOfDay 的模型，并给出当前生效费率', () => {
+      const peakList = store.getTimeOfDayModels(PEAK);
+      expect(peakList).toHaveLength(1);
+      expect(peakList[0].id).toBe('deepseek/deepseek-v4.1-flash');
+      expect(peakList[0].activeRates?.input).toBe(0.3); // 峰时档
+
+      const offList = store.getTimeOfDayModels(OFF);
+      expect(offList[0].activeRates?.input).toBe(0.15); // 谷时档
+    });
+  });
+});
+
+// 无分时价模型的场景需在全新模块实例下验证（模型缓存在导入时加载）。
+describe('describeBillingWindow — 全部模型均为静态定价时', () => {
+  let stateDir: string;
+  let store: typeof import('../src/utils/usage-store.js');
+
+  beforeEach(async () => {
+    stateDir = mkdtempSync(path.join(tmpdir(), 'ccproxy-nostat-'));
+    writeFileSync(
+      path.join(stateDir, 'models.json'),
+      JSON.stringify([{ id: 'static-model', object: 'model', created: 1, owned_by: 'x', pricing: { input: 1, output: 2 } }]),
+      'utf-8'
+    );
+    vi.resetModules();
+    process.env.COMMANDCODE_MODELS_CACHE_PATH = path.join(stateDir, 'models.json');
+    store = await import('../src/utils/usage-store.js');
+  });
+
+  afterEach(() => {
+    delete process.env.COMMANDCODE_MODELS_CACHE_PATH;
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  it('不返回窗口描述，且 isPeak 为 false', () => {
+    const w = store.describeBillingWindow(new Date('2026-09-11T02:00:00Z'));
+    expect(w.isPeak).toBe(false);
+    expect(w.windows).toBeUndefined();
+    expect(w.nextChangeAt).toBeNull();
+    expect(w.minutesUntilChange).toBeNull();
+  });
+
+  it('getTimeOfDayModels 返回空数组', () => {
+    expect(store.getTimeOfDayModels(new Date('2026-09-11T02:00:00Z'))).toEqual([]);
   });
 });

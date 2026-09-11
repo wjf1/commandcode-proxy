@@ -85,6 +85,120 @@ function selectRates(model: ModelItem | undefined, at: Date): ModelPricing | und
 }
 
 /**
+ * 缓存命中带来的节省额（USD）—— 即"这些输入若按全价计会多花多少"。
+ *
+ * 缓存读单价通常只有输入价的 1/50（如 deepseek-v4.1-flash 谷时
+ * $0.003/M vs $0.15/M），agent 场景输入命中率常达 96%–99%，这笔差额是
+ * 账单远低于"输入 × 输入价"的最主要原因，单列出来才看得出缓存的价值。
+ *
+ * 返回 0 表示无缓存命中或无定价数据。
+ */
+export function estimateCacheSavingsUsd(
+  modelId: string,
+  cacheReadTokens: number,
+  at: Date = new Date()
+): number {
+  if (!cacheReadTokens || cacheReadTokens <= 0) return 0;
+  const model = getModelForPricing(modelId);
+  const rates = selectRates(model, at);
+  if (!rates || rates.input === undefined) return 0;
+  const inRate = rates.input;
+  const cacheReadRate = rates.cacheRead ?? inRate;
+  // 缓存单价高于输入价（理论上不该出现）时不报"负节省"。
+  const delta = inRate - cacheReadRate;
+  if (delta <= 0) return 0;
+  return (cacheReadTokens / 1_000_000) * delta;
+}
+
+/**
+ * 官方峰谷计费窗口：UTC 周一至周五 01–04 与 06–10（合计 7h/day），
+ * 其余时段（含周末全天）为谷时。
+ */
+export interface BillingWindow {
+  /** 当前是否处于峰时。 */
+  isPeak: boolean;
+  /** 下一次费率切换的时刻（ISO）；已到边界或无分时价模型时为 null。 */
+  nextChangeAt: string | null;
+  /** 切换后是否进入峰时。 */
+  nextIsPeak: boolean | null;
+  /** 距离下次切换的分钟数。 */
+  minutesUntilChange: number | null;
+  /** 官方对窗口的描述文案。 */
+  windows?: string;
+  /** 峰时窗口每天的小时数。 */
+  peakHoursPerDay?: number;
+}
+
+/**
+ * 描述给定时刻的峰谷状态与下一次切换点。
+ *
+ * 仅对含分时价的模型有意义；无分时价模型返回窗口描述为空、isPeak=false。
+ * 切换点通过枚举官方边界的候选时刻（UTC 01/04/06/10 点）求得，因此周末
+ * 与工作日交界也能正确跨越（如周五 10:00 之后一直谷时到下周一 01:00）。
+ */
+export function describeBillingWindow(at: Date = new Date()): BillingWindow {
+  const todModels = (() => {
+    try {
+      return getCachedModels().filter(m => m.timeOfDay && (m.timeOfDay.peak || m.timeOfDay.offPeak));
+    } catch {
+      return [];
+    }
+  })();
+
+  const sample = todModels.find(m => m.timeOfDay?.windows)?.timeOfDay;
+  const isPeak = isPeakBillingTime(at);
+
+  if (todModels.length === 0) {
+    return { isPeak: false, nextChangeAt: null, nextIsPeak: null, minutesUntilChange: null };
+  }
+
+  // 边界小时（UTC）：谷→峰在 01 与 06，峰→谷在 04 与 10。
+  const boundaries = [1, 4, 6, 10];
+  let best: Date | null = null;
+  for (let dayOffset = 0; dayOffset <= 3 && !best; dayOffset++) {
+    for (const hour of boundaries) {
+      const candidate = new Date(at);
+      candidate.setUTCDate(candidate.getUTCDate() + dayOffset);
+      candidate.setUTCHours(hour, 0, 0, 0);
+      if (candidate.getTime() <= at.getTime()) continue;
+      if (isPeakBillingTime(candidate) !== isPeak) {
+        best = candidate;
+        break;
+      }
+    }
+  }
+
+  return {
+    isPeak,
+    nextChangeAt: best ? best.toISOString() : null,
+    nextIsPeak: best ? isPeakBillingTime(best) : null,
+    minutesUntilChange: best ? Math.round((best.getTime() - at.getTime()) / 60000) : null,
+    windows: sample?.windows,
+    peakHoursPerDay: sample?.peakHoursPerDay,
+  };
+}
+
+/** 含峰谷分时价的模型及其当前生效费率（供面板展示"现在按哪档计费"）。 */
+export function getTimeOfDayModels(at: Date = new Date()) {
+  try {
+    return getCachedModels()
+      .filter(m => m.timeOfDay && (m.timeOfDay.peak || m.timeOfDay.offPeak))
+      .map(m => {
+        const rates = selectRates(m, at);
+        return {
+          id: m.id,
+          name: m.name,
+          activeRates: rates,
+          peak: m.timeOfDay!.peak,
+          offPeak: m.timeOfDay!.offPeak,
+        };
+      });
+  } catch {
+    return [];
+  }
+}
+
+/**
  * 估算单次会话成本（USD）。
  * 价格单位：USD / 1M tokens —— 与 /v1/models 的 model.pricing 一致。
  * 输入按缓存读/写与未命中量分别计价，并按请求时刻选择峰谷费率。
@@ -182,6 +296,7 @@ interface DayBucket {
   outputTokens: number;
   cacheReadTokens: number;
   costUsd: number;
+  savingsUsd: number;
   runs: number;
 }
 
@@ -191,6 +306,7 @@ interface ModelBucket {
   outputTokens: number;
   cacheReadTokens: number;
   costUsd: number;
+  savingsUsd: number;
   runs: number;
 }
 
@@ -213,25 +329,31 @@ export function getUsageStats() {
   let totalOutput = 0;
   let totalCacheRead = 0;
   let totalCost = 0;
+  let totalSavings = 0;
   let totalRuns = records.length;
   let failures = 0;
 
   for (const r of records) {
     const cacheRead = r.cacheReadTokens || 0;
+    // 节省额按该条记录**自身发生时刻**的费率算 —— 峰谷价不同，用当前时刻
+    // 会算错历史记录。
+    const savings = estimateCacheSavingsUsd(r.model, cacheRead, new Date(r.timestamp));
     const dk = dayKey(r.timestamp);
-    const db = byDay.get(dk) || { date: dk, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, costUsd: 0, runs: 0 };
+    const db = byDay.get(dk) || { date: dk, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, costUsd: 0, savingsUsd: 0, runs: 0 };
     db.inputTokens += r.inputTokens || 0;
     db.outputTokens += r.outputTokens || 0;
     db.cacheReadTokens += cacheRead;
     db.costUsd += r.costUsd || 0;
+    db.savingsUsd += savings;
     db.runs += 1;
     byDay.set(dk, db);
 
-    const mb = byModel.get(r.model) || { model: r.model, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, costUsd: 0, runs: 0 };
+    const mb = byModel.get(r.model) || { model: r.model, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, costUsd: 0, savingsUsd: 0, runs: 0 };
     mb.inputTokens += r.inputTokens || 0;
     mb.outputTokens += r.outputTokens || 0;
     mb.cacheReadTokens += cacheRead;
     mb.costUsd += r.costUsd || 0;
+    mb.savingsUsd += savings;
     mb.runs += 1;
     byModel.set(r.model, mb);
 
@@ -239,6 +361,7 @@ export function getUsageStats() {
     totalOutput += r.outputTokens || 0;
     totalCacheRead += cacheRead;
     totalCost += r.costUsd || 0;
+    totalSavings += savings;
     if (r.status === 'FAILED') failures += 1;
   }
 
@@ -260,10 +383,13 @@ export function getUsageStats() {
         output: a.output + (r.outputTokens || 0),
         cacheRead: a.cacheRead + (r.cacheReadTokens || 0),
         cost: a.cost + (r.costUsd || 0),
+        savings: a.savings + estimateCacheSavingsUsd(r.model, r.cacheReadTokens || 0, new Date(r.timestamp)),
         runs: a.runs + 1,
       }),
-      { input: 0, output: 0, cacheRead: 0, cost: 0, runs: 0 }
+      { input: 0, output: 0, cacheRead: 0, cost: 0, savings: 0, runs: 0 }
     );
+
+  const hitRate = totalInput > 0 ? totalCacheRead / totalInput : 0;
 
   return {
     total: {
@@ -271,10 +397,14 @@ export function getUsageStats() {
       outputTokens: totalOutput,
       cacheReadTokens: totalCacheRead,
       costUsd: totalCost,
+      /** 缓存命中相对全价输入省下的金额（USD）。 */
+      savingsUsd: totalSavings,
+      /** 省下的钱相当于账面成本的倍数（"白赚 N 倍"），无成本时为 0。 */
+      savingsMultiple: totalCost > 0 ? totalSavings / totalCost : 0,
       runs: totalRuns,
       failures,
       /** 缓存命中占输入的比例，便于一眼看出计费为何远低于"输入×输入价"。 */
-      cacheHitRate: totalInput > 0 ? totalCacheRead / totalInput : 0,
+      cacheHitRate: hitRate,
     },
     today: sum(today),
     week: sum(week),
