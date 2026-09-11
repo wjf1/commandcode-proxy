@@ -1,6 +1,14 @@
 @echo off
 rem CommandCode Proxy v4 - autostart launcher (Windows Task Scheduler)
-cd /d "C:\Users\Administrator\Doubao\chats\2026-09-03\new-chat-2\commandcode-proxy"
+rem Resolve this script's own directory so the checkout can live anywhere.
+cd /d "%~dp0"
 set NO_OPEN_BROWSER=1
 if not exist "logs" mkdir logs
-"C:\Program Files\nodejs\node.exe" dist/index.js >> logs\proxy.log 2>&1
+rem Prefer a standard Node.js install over whatever "node" PATH resolves to
+rem (bundled runtimes from other tools can shadow it), then fall back to PATH.
+set "NODE="
+if exist "%ProgramFiles%\nodejs\node.exe" set "NODE=%ProgramFiles%\nodejs\node.exe"
+if not defined NODE if exist "%LOCALAPPDATA%\Programs\nodejs\node.exe" set "NODE=%LOCALAPPDATA%\Programs\nodejs\node.exe"
+if not defined NODE if exist "%ProgramFiles(x86)%\nodejs\node.exe" set "NODE=%ProgramFiles(x86)%\nodejs\node.exe"
+if not defined NODE set "NODE=node"
+"%NODE%" dist/index.js >> logs\proxy.log 2>&1

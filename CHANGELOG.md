@@ -2,6 +2,41 @@
 
 所有主要版本更新都记录在此文件。
 
+## [4.6.0] - 2026-09-11
+
+### 修复
+- **面板成本与官方账单差约 15 倍（缓存命中被按全价输入计费）** — 上游 `finish` 事件的 `inputTokens` 是**含缓存命中的总量**，缓存明细在 `inputTokenDetails.cacheReadTokens`。此前 `usage-store` 把整段输入统一按 `pricing.input` 计价，而 agent 场景的输入约 **96%–99% 命中缓存**，官方缓存读单价仅为输入价的 **1/50**（如 `deepseek-v4.1-flash` 谷时输入 $0.15/M、缓存读 $0.003/M）。
+  - 实测对照：一条 `input 153,993（缓存命中 152,448）/ output 176` 的请求，旧口径记 **$0.023205**，官方账单为 **$0.001589388** —— 虚高 **14.6 倍**；缓存命中率更高时可达 29 倍。
+  - 现在按 `nonCache×input + cacheRead×cacheRead + cacheWrite×cacheWrite + output×output` 分项计价。
+- **峰时请求成本被低估一半** — 官方对 4 个 deepseek 模型设**峰谷分时价**（谷时 $0.15/$0.60、峰时 $0.30/$1.20，峰时为 UTC 周一至周五 01–04 与 06–10，共 7h/day）。此前解析定价页时只取 `tiers[0].rates`（= 谷时档），`timeOfDay` 整块被丢弃，峰时请求一律按谷时价估算。
+  - 现已解析 `timeOfDay.peak` / `offPeak` / `windows` / `peakHoursPerDay` 并落盘，估算时按请求时刻选档（`isPeakBillingTime`）。
+- **类型声明与上游实际结构不符** — `CCEvent.totalUsage` 原先声明的是 `cacheReadTokens` / `cacheWriteTokens`（顶层平铺），与上游实际的 `inputTokenDetails` 嵌套结构对不上，导致即使想读缓存量也读不到。现按实测结构重写并新增 `CCEventUsage` 类型。
+
+### 新增
+- **采集上游权威账单金额（`gateway.cost`）** — 上游 `provider-metadata` 事件带回网关已算好的账单字段（`cost` / `marketCost` / `surchargeCost` / `gatewayCost` / `inferenceCost` / `inputInferenceCost` / `outputInferenceCost` / `generationId`），此前该事件**完全没有处理分支**、整条被丢弃。新增 `src/adapters/commandcode/usage.ts` 统一采集：
+  - 成本**优先采用官方 `gateway.cost`**，上游未给出时才回落到本地估算 —— 连峰谷价、缓存折扣与加成都不必自行维护；
+  - 记录新增 `costSource`（`official` / `estimated`）与 `estimatedCostUsd`，面板对本地估算值加 `~` 前缀，悬停可看两者对照，便于上游调价时及早发现偏差；
+  - 采集对 `finish-step` / `finish` 两个事件做**覆盖**而非累加 —— 上游同一轮会发两次相同 usage，累加会让 token 翻倍。
+- **缓存用量落盘** — `UsageRecord` 新增 `cacheReadTokens` / `cacheWriteTokens`；聚合统计（`getUsageStats`）新增 `cacheReadTokens` 与 `cacheHitRate`（累计缓存命中率）。
+- **仪表盘"缓存命中"列与累计命中率** — "用量与监控"页的请求明细新增"缓存命中"列（显示命中量与占输入百分比，悬停看具体数值），"累计"卡片新增累计缓存命中率与命中 token 量，直观解释成本为何远低于"输入 × 输入价"。
+
+### 变更
+- `CCEvent.type` 新增 `provider-metadata`；`StreamEncoderState` 新增 `cacheReadTokens` / `noCacheTokens` / `upstreamCostUsd`；`ModelItem` 新增 `timeOfDay`。
+- `pricing.json` 结构版本 `PRICING_SCHEMA_VERSION` 2 → 3，旧缓存自动失效并重新抓取，避免升级后 `timeOfDay` 静默为空。
+- 旧记录（无缓存字段）在聚合时按缓存 0 处理，**历史成本数字无法回填**。
+
+### 测试
+- 新增 `tests/cost-usage.test.ts`（19 项）：
+  - **实测数据回归**——直接用真实上游响应的费率复算，断言本地估算与官方 `gateway.cost` 一致到 1e-12：缓存命中探针 `320 非缓存 + 7,296 缓存读 + 13 输出 = 0.000155376`（峰时）、零缓存探针 `64 + 162 = 0.0002136`（峰时）、同量谷时 `0.0002136 / 2`；
+  - 缓存明细拆分的多种形态（完整 `inputTokenDetails`、仅 `cachedInputTokens`、无缓存字段）；
+  - `finish-step` + `finish` 覆盖语义（防 token 翻倍）；
+  - `provider-metadata` 账单采集（字符串 / 数字 / 缺失）；
+  - 峰时窗口边界（01:00 / 03:59 / 04:00 / 06:00 / 09:59 / 10:00 UTC）与周末全天谷时；
+  - 无分时价的模型回落静态定价、未知模型 `hasPricing=false`。
+- 全量 **118 项通过**（基线 99），`tsc --noEmit` 无错误。
+
+- 版本号 `4.5.0` → `4.6.0`。
+
 ## [4.5.0] - 2026-09-10
 
 ### 新增

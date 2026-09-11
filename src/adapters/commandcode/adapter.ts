@@ -28,6 +28,7 @@ import {
 } from '../../types/index.js';
 import { resolveModelName } from '../../utils/models.js';
 import { logger } from '../../utils/logger.js';
+import { parseUsd } from './usage.js';
 
 // ─── 推理强度（reasoning effort）映射表（按 CLI wire 契约）───────────────────────
 // 不同模型支持不同的推理档位。请求方传入的 reasoning_effort 会被"向下就近对齐"
@@ -550,6 +551,8 @@ export class CommandCodeAdapter {
       thinkingState: 'none',
       inputTokens: 0,
       outputTokens: 0,
+      cacheReadTokens: 0,
+      noCacheTokens: 0,
     };
   }
 
@@ -687,13 +690,28 @@ export class CommandCodeAdapter {
       return chunks;
     }
 
+    if (event.type === 'provider-metadata') {
+      // 上游账单金额（gateway.cost）—— 用于成本对账，不产出任何下游 chunk。
+      const cost = parseUsd(event.providerMetadata?.gateway?.cost);
+      if (cost !== undefined) state.upstreamCostUsd = cost;
+      return chunks;
+    }
+
     if (event.type === 'finish' || event.type === 'finish-step') {
       state.sawFinish = true;
       // Original CLI: usage lives at event.totalUsage; data.usage is legacy.
       const usage = event.totalUsage ?? event.data?.usage;
       if (usage) {
-        if (usage.inputTokens) state.inputTokens = usage.inputTokens;
-        if (usage.outputTokens) state.outputTokens = usage.outputTokens;
+        if (usage.inputTokens != null) {
+          state.inputTokens = usage.inputTokens;
+          // 缓存命中量必须拆出来：单价仅为输入价的 1/50，混在 inputTokens 里会虚高成本。
+          const details = usage.inputTokenDetails || {};
+          const cacheRead = details.cacheReadTokens ?? usage.cachedInputTokens ?? 0;
+          const cacheWrite = details.cacheWriteTokens ?? 0;
+          state.cacheReadTokens = cacheRead;
+          state.noCacheTokens = details.noCacheTokens ?? Math.max(0, usage.inputTokens - cacheRead - cacheWrite);
+        }
+        if (usage.outputTokens != null) state.outputTokens = usage.outputTokens;
       }
       const rawFR = event.finishReason || event.data?.finishReason || (state.toolCallIdToIndex.size > 0 ? 'tool-calls' : 'stop');
       const finishReason =
@@ -767,8 +785,8 @@ export class CommandCodeAdapter {
         // Original CLI: totalUsage at top level; rawFinishReason ?? finishReason.
         const usage = event.totalUsage ?? event.data?.usage;
         if (usage) {
-          if (usage.inputTokens) inputTokens = usage.inputTokens;
-          if (usage.outputTokens) outputTokens = usage.outputTokens;
+          if (usage.inputTokens != null) inputTokens = usage.inputTokens;
+          if (usage.outputTokens != null) outputTokens = usage.outputTokens;
         }
         const rawFR = event.rawFinishReason || event.finishReason || event.data?.finishReason;
         if (rawFR === 'tool-calls' || rawFR === 'tool_calls') stopReason = 'tool_use';

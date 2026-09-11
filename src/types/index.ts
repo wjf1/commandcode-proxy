@@ -268,15 +268,58 @@ export interface CCRequestBody {
   };
 }
 
-export interface CCEvent {
-  type: 'start' | 'text-delta' | 'reasoning-delta' | 'tool-call' | 'tool-call-delta' | 'finish' | 'finish-step' | 'error';
-  text?: string;
-  /** Original CLI: finish events carry totalUsage at the top level. */
-  totalUsage?: {
-    inputTokens?: number;
-    outputTokens?: number;
+/**
+ * 上游 usage 结构。实测（/alpha/generate 的 finish 事件）形如：
+ *   { inputTokens, outputTokens, totalTokens, reasoningTokens, cachedInputTokens,
+ *     inputTokenDetails: { noCacheTokens, cacheReadTokens },
+ *     outputTokenDetails: { textTokens, reasoningTokens } }
+ * 注意 inputTokens 是**含缓存命中的总量**，缓存命中量在
+ * inputTokenDetails.cacheReadTokens / cachedInputTokens 里 —— 计费必须拆分，
+ * 否则会把单价仅为输入 1/50 的缓存读按全价输入计。
+ */
+export interface CCEventUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  reasoningTokens?: number;
+  /** 缓存命中的输入 token（与 inputTokenDetails.cacheReadTokens 同义）。 */
+  cachedInputTokens?: number;
+  inputTokenDetails?: {
+    noCacheTokens?: number;
     cacheReadTokens?: number;
     cacheWriteTokens?: number;
+  };
+  outputTokenDetails?: {
+    textTokens?: number;
+    reasoningTokens?: number;
+  };
+}
+
+/**
+ * provider-metadata 事件里的网关计费字段（权威账单金额，USD 字符串）。
+ * 网关已把峰谷价、缓存折扣与加成全部算好，直接采用即可，无需自行估算。
+ */
+export interface CCGatewayBilling {
+  /** 本次请求实际计入的总额（含加成）。 */
+  cost?: string | number;
+  marketCost?: string | number;
+  surchargeCost?: string | number;
+  gatewayCost?: string | number;
+  inferenceCost?: string | number;
+  inputInferenceCost?: string | number;
+  outputInferenceCost?: string | number;
+  generationId?: string;
+}
+
+export interface CCEvent {
+  type: 'start' | 'text-delta' | 'reasoning-delta' | 'tool-call' | 'tool-call-delta' | 'finish' | 'finish-step' | 'error' | 'provider-metadata';
+  text?: string;
+  /** Original CLI: finish events carry totalUsage at the top level. */
+  totalUsage?: CCEventUsage;
+  /** provider-metadata 事件：权威计费信息（gateway.cost 等）。 */
+  providerMetadata?: {
+    gateway?: CCGatewayBilling;
+    [key: string]: unknown;
   };
   data?: {
     text?: string;
@@ -286,7 +329,7 @@ export interface CCEvent {
     input?: unknown;
     arguments?: unknown;
     finishReason?: string;
-    usage?: { inputTokens?: number; outputTokens?: number };
+    usage?: CCEventUsage;
   };
   text2?: string;
   toolCallId?: string;
@@ -312,6 +355,12 @@ export interface StreamEncoderState {
   thinkingState: 'none' | 'in_think' | 'done';
   inputTokens: number;
   outputTokens: number;
+  /** 输入中命中缓存的 token 数（计费按 cacheRead 单价）。 */
+  cacheReadTokens: number;
+  /** 输入中未命中缓存的 token 数。 */
+  noCacheTokens: number;
+  /** 上游 provider-metadata 给出的权威账单金额（USD）；缺省为 undefined。 */
+  upstreamCostUsd?: number;
 }
 
 // ─── Models ──────────────────────────────────────────────────────────────────
@@ -322,6 +371,23 @@ export interface ModelPricing {
   output?: number;
   cacheRead?: number;
   cacheWrite?: number;
+}
+
+/**
+ * 官方定价页的峰谷分时价。部分模型（当前 4 个）在峰时段按更高费率计费，
+ * 例如 deepseek-v4.1-flash 谷时 $0.15/$0.60、峰时 $0.30/$1.20。
+ * 面板静态展示的 pricing 取谷时（官方页面默认展示档），实际估算需按时间选档。
+ */
+export interface TimeOfDayPricing {
+  /** 峰时费率。 */
+  peak?: ModelPricing;
+  /** 谷时费率。 */
+  offPeak?: ModelPricing;
+  peakHoursPerDay?: number;
+  offPeakHoursPerDay?: number;
+  /** 峰时窗口的人类可读描述，例如 "01–04 & 06–10 UTC, Mon–Fri"。 */
+  windows?: string;
+  tip?: string;
 }
 
 /** Model capability flags (Caps). */
@@ -355,6 +421,8 @@ export interface ModelItem {
   category?: string;
   caps?: ModelCaps;
   pricing?: ModelPricing;
+  /** 峰谷分时价（官方仅对部分模型提供）。 */
+  timeOfDay?: TimeOfDayPricing;
   deal?: ModelDeal;
   /** Available on the individual Go plan (availability.individual-go). */
   onGoPlan?: boolean;

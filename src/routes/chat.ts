@@ -14,6 +14,7 @@ import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { createInterface } from 'readline';
 import { CommandCodeAdapter } from '../adapters/commandcode/adapter.js';
 import { sendToCC, isAbortError, estimateTokens } from '../adapters/commandcode/upstream.js';
+import { accumulateUsage, createUsageAccumulator, UsageAccumulator } from '../adapters/commandcode/usage.js';
 import { OpenAIChatRequest, CCEvent } from '../types/index.js';
 import { getActiveApiKey, getGatewayRunning, checkAndRotateAccountsOnQuota } from '../utils/config.js';
 import { logger } from '../utils/logger.js';
@@ -37,17 +38,36 @@ function logCompletion(inputTokens: number, outputTokens: number, startTime: num
   logger.info(`Input Tokens ${fmtNum(inputTokens)} | Output Tokens ${fmtNum(outputTokens)} | Timing ${timing}s | Model ${model} | Status COMPLETED`);
 }
 
-/** 持久化一次会话记录到 usage-history.jsonl */
-function persistCompletion(inputTokens: number, outputTokens: number, startTime: number, model: string, status: 'COMPLETED' | 'FAILED', traceId?: string, mode: 'chat' | 'messages' = 'chat'): void {
-  const { costUsd, hasPricing } = estimateCostUsd(model, inputTokens || 0, outputTokens || 0);
+/**
+ * 持久化一次会话记录到 usage-history.jsonl。
+ * 成本优先取上游权威金额（上游已算好峰谷价与缓存折扣），缺失时才本地估算。
+ */
+function persistCompletion(
+  model: string,
+  usage: UsageAccumulator,
+  startTime: number,
+  status: 'COMPLETED' | 'FAILED',
+  traceId?: string,
+  mode: 'chat' | 'messages' = 'chat'
+): void {
+  const estimated = estimateCostUsd(model, usage.inputTokens || 0, usage.outputTokens || 0, {
+    cacheReadTokens: usage.cacheReadTokens,
+    cacheWriteTokens: usage.cacheWriteTokens,
+    at: new Date(startTime),
+  });
+  const hasUpstreamCost = usage.upstreamCostUsd !== undefined;
   recordCompletion({
     timestamp: new Date().toISOString(),
     model,
-    inputTokens: inputTokens || 0,
-    outputTokens: outputTokens || 0,
+    inputTokens: usage.inputTokens || 0,
+    outputTokens: usage.outputTokens || 0,
+    cacheReadTokens: usage.cacheReadTokens || 0,
+    cacheWriteTokens: usage.cacheWriteTokens || 0,
     timingMs: Date.now() - startTime,
-    costUsd,
-    hasPricing,
+    costUsd: hasUpstreamCost ? usage.upstreamCostUsd! : estimated.costUsd,
+    costSource: hasUpstreamCost ? 'official' : 'estimated',
+    estimatedCostUsd: estimated.costUsd,
+    hasPricing: hasUpstreamCost || estimated.hasPricing,
     status,
     traceId,
     mode,
@@ -133,6 +153,7 @@ export async function chatRoutes(fastify: FastifyInstance) {
     const translated = adapter.translateOpenAIRequest(body);
     const modelName = translated.params.model;
     let inputTokens = estimateTokens(JSON.stringify(translated).length);
+    const usageAcc = createUsageAccumulator();
 
     try {
       let upstreamStream: any;
@@ -182,6 +203,7 @@ export async function chatRoutes(fastify: FastifyInstance) {
           const event = parseEventLine(line);
           if (!event) return;
           try {
+            accumulateUsage(usageAcc, event);
             for (const c of adapter.encodeOpenAIChunk(event, state)) reply.raw.write(c);
           } catch (err: any) {
             logger.warn(`[CHAT] Chunk encode error: ${err.message}`);
@@ -195,8 +217,10 @@ export async function chatRoutes(fastify: FastifyInstance) {
               reply.raw.write(c);
             }
           }
-          logCompletion(inputTokens, state.outputTokens, startTime, modelName);
-          persistCompletion(inputTokens, state.outputTokens, startTime, modelName, 'COMPLETED', state.id, 'chat');
+          // 上游未回 usage 时回落到本地估算的输入量，避免记录为 0。
+          if (!usageAcc.sawUsage) usageAcc.inputTokens = inputTokens;
+          logCompletion(usageAcc.inputTokens, usageAcc.outputTokens, startTime, modelName);
+          persistCompletion(modelName, usageAcc, startTime, 'COMPLETED', state.id, 'chat');
           reply.raw.end();
         });
 
@@ -234,6 +258,8 @@ export async function chatRoutes(fastify: FastifyInstance) {
         const event = parseEventLine(line);
         if (!event) continue;
 
+        accumulateUsage(usageAcc, event);
+
         if (event.type === 'error') {
           const errMsg = typeof event.error === 'string' ? event.error : event.error?.message;
           if (errMsg && errMsg !== 'unknown') fullText += `\n[Upstream Error: ${errMsg}]\n`;
@@ -270,8 +296,8 @@ export async function chatRoutes(fastify: FastifyInstance) {
           }
           const usage = event.totalUsage ?? event.data?.usage;
           if (usage) {
-            if (usage.inputTokens) inputTokens = usage.inputTokens;
-            if (usage.outputTokens) outputTokens = usage.outputTokens;
+            if (usage.inputTokens != null) inputTokens = usage.inputTokens;
+            if (usage.outputTokens != null) outputTokens = usage.outputTokens;
           }
         }
       }
@@ -284,7 +310,12 @@ export async function chatRoutes(fastify: FastifyInstance) {
       }
 
       logCompletion(inputTokens, outputTokens, startTime, modelName);
-      persistCompletion(inputTokens, outputTokens, startTime, modelName, 'COMPLETED', undefined, 'chat');
+      // 本地 output 估算仅在上游未给出 usage 时才需要；有 usage 时以 usageAcc 为准。
+      if (!usageAcc.sawUsage) {
+        usageAcc.inputTokens = inputTokens;
+        usageAcc.outputTokens = outputTokens;
+      }
+      persistCompletion(modelName, usageAcc, startTime, 'COMPLETED', undefined, 'chat');
 
       return reply.send({
         id: `chatcmpl-${Math.random().toString(36).slice(2, 10)}`,

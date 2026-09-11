@@ -13,7 +13,7 @@ import path from 'path';
 import { loadConfig, assertSafeUpstreamUrl } from './config.js';
 import { logger } from './logger.js';
 import { buildAvailabilityMap } from './plans.js';
-import { ModelItem, ModelPricing, ModelCaps, ModelDeal } from '../types/index.js';
+import { ModelItem, ModelPricing, ModelCaps, ModelDeal, TimeOfDayPricing } from '../types/index.js';
 
 export interface UpstreamModel extends ModelItem {}
 
@@ -38,7 +38,7 @@ const PRICING_TTL_MS = 6 * 60 * 60 * 1000;
  * pricing.json 的结构版本。改动缓存字段（如新增 availability 档位映射）时递增，
  * 旧缓存会自动失效并重新抓取，避免升级后新功能静默不生效。
  */
-const PRICING_SCHEMA_VERSION = 2;
+const PRICING_SCHEMA_VERSION = 3;
 
 const DEFAULT_MODELS: ModelItem[] = [
   { id: 'claude-sonnet-5', object: 'model', created: Math.floor(Date.now() / 1000), owned_by: 'command-code', name: 'Claude Sonnet 5', context_length: 1000000, supports_vision: true },
@@ -94,8 +94,43 @@ interface PricingCatalogEntry {
   deal?: ModelDeal;
   tip?: string;
   pricing?: ModelPricing;
+  /** 峰谷分时价（官方仅部分模型提供）。 */
+  timeOfDay?: TimeOfDayPricing;
   onGoPlan?: boolean;
   availability?: Record<string, boolean>;
+}
+
+/** 官方 rates 对象 → 规范化的 ModelPricing（只保留数值字段）。 */
+function toPricing(rates: any): ModelPricing | undefined {
+  if (!rates || typeof rates !== 'object') return undefined;
+  const parsed: ModelPricing = {
+    input: typeof rates.input === 'number' ? rates.input : undefined,
+    output: typeof rates.output === 'number' ? rates.output : undefined,
+    cacheRead: typeof rates.cacheRead === 'number' ? rates.cacheRead : undefined,
+    cacheWrite: typeof rates.cacheWrite === 'number' ? rates.cacheWrite : undefined,
+  };
+  return parsed.input === undefined && parsed.output === undefined ? undefined : parsed;
+}
+
+/**
+ * 解析官方 timeOfDay 分时价。
+ * 官方对 4 个模型（deepseek 系列）给出 peak/offPeak 双档：谷时 $0.15/$0.60、
+ * 峰时 $0.30/$1.20。此前解析器只取 tiers[0].rates（= 谷时），峰时价被丢弃，
+ * 导致峰时请求成本被低估一半。
+ */
+function parseTimeOfDay(tod: any): TimeOfDayPricing | undefined {
+  if (!tod || typeof tod !== 'object') return undefined;
+  const peak = toPricing(tod.peak);
+  const offPeak = toPricing(tod.offPeak);
+  if (!peak && !offPeak) return undefined;
+  return {
+    peak,
+    offPeak,
+    peakHoursPerDay: typeof tod.peakHoursPerDay === 'number' ? tod.peakHoursPerDay : undefined,
+    offPeakHoursPerDay: typeof tod.offPeakHoursPerDay === 'number' ? tod.offPeakHoursPerDay : undefined,
+    windows: typeof tod.windows === 'string' ? tod.windows : undefined,
+    tip: typeof tod.tip === 'string' ? tod.tip : undefined,
+  };
 }
 
 function normalizeId(s: string): string {
@@ -177,14 +212,8 @@ function parsePricingFromHtml(html: string): PricingCatalogEntry[] {
       tip: r.tip,
       availability: avail,
       onGoPlan: avail?.['individual-go'] === true,
-      pricing: rates
-        ? {
-            input: typeof rates.input === 'number' ? rates.input : undefined,
-            output: typeof rates.output === 'number' ? rates.output : undefined,
-            cacheRead: typeof rates.cacheRead === 'number' ? rates.cacheRead : undefined,
-            cacheWrite: typeof rates.cacheWrite === 'number' ? rates.cacheWrite : undefined,
-          }
-        : undefined,
+      pricing: toPricing(rates),
+      timeOfDay: parseTimeOfDay(r.timeOfDay),
     });
   }
   return out;
@@ -292,6 +321,7 @@ function mergePricingIntoModels(models: ModelItem[], pricingMap: Map<string, Pri
       category: e.category,
       caps: e.caps,
       pricing: e.pricing,
+      timeOfDay: e.timeOfDay,
       deal: e.deal,
       tip: e.tip,
       availability: e.availability,
@@ -382,6 +412,7 @@ export async function fetchUpstreamModels(apiKey: string, ccVersion: string, ref
           category: e.category,
           caps: e.caps,
           pricing: e.pricing,
+          timeOfDay: e.timeOfDay,
           deal: e.deal,
           tip: e.tip,
           availability: e.availability,

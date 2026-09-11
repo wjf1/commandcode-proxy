@@ -1,0 +1,227 @@
+// =============================================================================
+// 成本与缓存采集测试
+// -----------------------------------------------------------------------------
+// 覆盖两处曾导致面板成本与官方账单差 7 倍的缺陷：
+//   1. 上游 finish 的 inputTokens **含**缓存命中，缓存读单价仅为输入的 1/50，
+//      不拆分就会把 90%+ 的输入按全价计；
+//   2. 官方对 deepseek 等模型设峰时价（$0.30/$1.20），只取谷时价会低估一半。
+// 另覆盖 provider-metadata 的权威账单金额采集（gateway.cost）。
+// =============================================================================
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { accumulateUsage, createUsageAccumulator, parseUsd } from '../src/adapters/commandcode/usage.js';
+import { isPeakBillingTime } from '../src/utils/usage-store.js';
+
+// ─── 采集：缓存拆分与官方账单 ────────────────────────────────────────────────
+
+describe('accumulateUsage — 缓存明细拆分', () => {
+  it('把含缓存的 inputTokens 拆成 noCache / cacheRead（实测上游结构）', () => {
+    const acc = createUsageAccumulator();
+    accumulateUsage(acc, {
+      type: 'finish',
+      totalUsage: {
+        inputTokens: 7616,
+        outputTokens: 13,
+        cachedInputTokens: 7296,
+        inputTokenDetails: { noCacheTokens: 320, cacheReadTokens: 7296 },
+      },
+    });
+    expect(acc.inputTokens).toBe(7616);
+    expect(acc.cacheReadTokens).toBe(7296);
+    expect(acc.noCacheTokens).toBe(320);
+    expect(acc.outputTokens).toBe(13);
+    expect(acc.sawUsage).toBe(true);
+  });
+
+  it('兼容只有 cachedInputTokens 的简写形态', () => {
+    const acc = createUsageAccumulator();
+    accumulateUsage(acc, { type: 'finish', totalUsage: { inputTokens: 1000, cachedInputTokens: 900 } });
+    expect(acc.cacheReadTokens).toBe(900);
+    expect(acc.noCacheTokens).toBe(100);
+  });
+
+  it('无缓存字段时全部计入 noCache，不虚构缓存命中', () => {
+    const acc = createUsageAccumulator();
+    accumulateUsage(acc, { type: 'finish', totalUsage: { inputTokens: 500, outputTokens: 20 } });
+    expect(acc.cacheReadTokens).toBe(0);
+    expect(acc.noCacheTokens).toBe(500);
+  });
+
+  it('finish-step 与 finish 携带同一份 usage 时覆盖而非累加', () => {
+    const acc = createUsageAccumulator();
+    const usage = { inputTokens: 7616, outputTokens: 13, inputTokenDetails: { cacheReadTokens: 7296, noCacheTokens: 320 } };
+    accumulateUsage(acc, { type: 'finish-step', totalUsage: usage });
+    accumulateUsage(acc, { type: 'finish', totalUsage: usage });
+    // 累加会得到 15232 —— 上游两个事件是同一轮，必须覆盖。
+    expect(acc.inputTokens).toBe(7616);
+    expect(acc.outputTokens).toBe(13);
+  });
+
+  it('对无关事件是 no-op', () => {
+    const acc = createUsageAccumulator();
+    accumulateUsage(acc, { type: 'text-delta', text: 'hi' });
+    accumulateUsage(acc, { type: 'start' });
+    expect(acc.sawUsage).toBe(false);
+    expect(acc.inputTokens).toBe(0);
+  });
+});
+
+describe('accumulateUsage — 官方账单金额（provider-metadata）', () => {
+  it('抓取 gateway.cost 作为权威金额', () => {
+    const acc = createUsageAccumulator();
+    accumulateUsage(acc, {
+      type: 'provider-metadata',
+      providerMetadata: { gateway: { cost: '0.000155376', inferenceCost: '0.000155376' } },
+    });
+    expect(acc.upstreamCostUsd).toBeCloseTo(0.000155376, 12);
+  });
+
+  it('也接受数字形态', () => {
+    const acc = createUsageAccumulator();
+    accumulateUsage(acc, { type: 'provider-metadata', providerMetadata: { gateway: { cost: 0.5 } } });
+    expect(acc.upstreamCostUsd).toBe(0.5);
+  });
+
+  it('缺少 cost 时不写入（回落本地估算）', () => {
+    const acc = createUsageAccumulator();
+    accumulateUsage(acc, { type: 'provider-metadata', providerMetadata: { gateway: { marketCost: '0.1' } } });
+    expect(acc.upstreamCostUsd).toBeUndefined();
+  });
+});
+
+describe('parseUsd', () => {
+  it('解析字符串与数字', () => {
+    expect(parseUsd('0.001')).toBe(0.001);
+    expect(parseUsd(0.001)).toBe(0.001);
+  });
+  it('非法值返回 undefined', () => {
+    expect(parseUsd('abc')).toBeUndefined();
+    expect(parseUsd(undefined)).toBeUndefined();
+    expect(parseUsd(NaN)).toBeUndefined();
+    expect(parseUsd({})).toBeUndefined();
+  });
+});
+
+// ─── 峰谷时段判定 ────────────────────────────────────────────────────────────
+
+describe('isPeakBillingTime — 官方 01–04 & 06–10 UTC, Mon–Fri', () => {
+  const utc = (iso: string) => new Date(iso);
+
+  it('工作日 UTC 01–04 与 06–10 为峰时', () => {
+    // 2026-09-11 是周五
+    expect(isPeakBillingTime(utc('2026-09-11T01:00:00Z'))).toBe(true);
+    expect(isPeakBillingTime(utc('2026-09-11T03:59:00Z'))).toBe(true);
+    expect(isPeakBillingTime(utc('2026-09-11T06:00:00Z'))).toBe(true);
+    expect(isPeakBillingTime(utc('2026-09-11T09:59:00Z'))).toBe(true);
+  });
+
+  it('工作日窗口之间与之外为谷时', () => {
+    expect(isPeakBillingTime(utc('2026-09-11T00:59:00Z'))).toBe(false);
+    expect(isPeakBillingTime(utc('2026-09-11T04:00:00Z'))).toBe(false);
+    expect(isPeakBillingTime(utc('2026-09-11T05:59:00Z'))).toBe(false);
+    expect(isPeakBillingTime(utc('2026-09-11T10:00:00Z'))).toBe(false);
+    expect(isPeakBillingTime(utc('2026-09-11T18:00:00Z'))).toBe(false);
+  });
+
+  it('周末全天为谷时（官方 "all day Sat–Sun"）', () => {
+    // 2026-09-12 周六 / 2026-09-13 周日
+    expect(isPeakBillingTime(utc('2026-09-12T02:00:00Z'))).toBe(false);
+    expect(isPeakBillingTime(utc('2026-09-12T08:00:00Z'))).toBe(false);
+    expect(isPeakBillingTime(utc('2026-09-13T07:00:00Z'))).toBe(false);
+  });
+});
+
+// ─── 本地估算：缓存价 + 峰谷价（需注入模型定价缓存）────────────────────────────
+
+describe('estimateCostUsd — 缓存读按 1/50 单价、峰谷分时', () => {
+  let stateDir: string;
+  let estimateCostUsd: typeof import('../src/utils/usage-store.js').estimateCostUsd;
+
+  beforeEach(async () => {
+    stateDir = mkdtempSync(path.join(tmpdir(), 'ccproxy-cost-'));
+    // 官方实测费率：deepseek-v4.1-flash 谷时 0.15/0.6/0.003，峰时 0.30/1.20/0.006
+    writeFileSync(
+      path.join(stateDir, 'models.json'),
+      JSON.stringify([
+        {
+          id: 'deepseek/deepseek-v4.1-flash',
+          object: 'model',
+          created: 1,
+          owned_by: 'deepseek',
+          pricing: { input: 0.15, output: 0.6, cacheRead: 0.003 },
+          timeOfDay: {
+            peak: { input: 0.3, output: 1.2, cacheRead: 0.006 },
+            offPeak: { input: 0.15, output: 0.6, cacheRead: 0.003 },
+          },
+        },
+        {
+          id: 'static-model',
+          object: 'model',
+          created: 1,
+          owned_by: 'x',
+          pricing: { input: 1, output: 2, cacheRead: 0.1 },
+        },
+      ]),
+      'utf-8'
+    );
+    vi.resetModules();
+    process.env.COMMANDCODE_MODELS_CACHE_PATH = path.join(stateDir, 'models.json');
+    ({ estimateCostUsd } = await import('../src/utils/usage-store.js'));
+  });
+
+  afterEach(() => {
+    delete process.env.COMMANDCODE_MODELS_CACHE_PATH;
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  const PEAK = new Date('2026-09-11T02:00:00Z'); // 周五 峰时
+  const OFF = new Date('2026-09-11T18:00:00Z'); // 周五 谷时
+
+  it('峰时高缓存命中：与官方账单口径一致（曾虚高约 7 倍）', () => {
+    // 实测探针：320 非缓存 + 7296 缓存读 + 13 输出 → 官方 0.000155376
+    const { costUsd, hasPricing } = estimateCostUsd('deepseek/deepseek-v4.1-flash', 7616, 13, {
+      cacheReadTokens: 7296,
+      at: PEAK,
+    });
+    expect(hasPricing).toBe(true);
+    expect(costUsd).toBeCloseTo(0.000155376, 12);
+  });
+
+  it('峰时零缓存：非缓存输入按峰时输入价（曾低估一半）', () => {
+    // 实测探针：64 输入全未命中 + 162 输出 → 官方 0.0002136
+    const { costUsd } = estimateCostUsd('deepseek/deepseek-v4.1-flash', 64, 162, { at: PEAK });
+    expect(costUsd).toBeCloseTo(0.0002136, 12);
+  });
+
+  it('谷时同量请求按谷时价（比峰时低一半）', () => {
+    const { costUsd } = estimateCostUsd('deepseek/deepseek-v4.1-flash', 64, 162, { at: OFF });
+    expect(costUsd).toBeCloseTo(0.0001068, 12);
+  });
+
+  it('旧口径（整段输入×输入价）会明显高估 —— 回归保护', () => {
+    const { costUsd } = estimateCostUsd('deepseek/deepseek-v4.1-flash', 7616, 13, {
+      cacheReadTokens: 7296,
+      at: PEAK,
+    });
+    const oldFormula = (7616 / 1e6) * 0.15 + (13 / 1e6) * 0.6; // 0.0011502
+    expect(costUsd).toBeLessThan(oldFormula / 5);
+  });
+
+  it('无分时价的模型回落到静态定价', () => {
+    const { costUsd, hasPricing } = estimateCostUsd('static-model', 1000, 1000, {
+      cacheReadTokens: 500,
+      at: PEAK,
+    });
+    // 500×1 + 500×0.1 + 1000×2 = 500 + 50 + 2000 微美元
+    expect(hasPricing).toBe(true);
+    expect(costUsd).toBeCloseTo((500 * 1 + 500 * 0.1 + 1000 * 2) / 1e6, 12);
+  });
+
+  it('未知模型 hasPricing=false 且成本为 0', () => {
+    const { costUsd, hasPricing } = estimateCostUsd('nope', 100, 100);
+    expect(hasPricing).toBe(false);
+    expect(costUsd).toBe(0);
+  });
+});

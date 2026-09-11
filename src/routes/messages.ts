@@ -14,6 +14,7 @@ import { createInterface } from 'readline';
 import crypto from 'node:crypto';
 import { CommandCodeAdapter } from '../adapters/commandcode/adapter.js';
 import { sendToCC, isAbortError, estimateTokens } from '../adapters/commandcode/upstream.js';
+import { accumulateUsage, createUsageAccumulator, UsageAccumulator } from '../adapters/commandcode/usage.js';
 import { AnthropicRequest, CCEvent } from '../types/index.js';
 import { getActiveApiKey, getGatewayRunning, checkAndRotateAccountsOnQuota } from '../utils/config.js';
 import { logger } from '../utils/logger.js';
@@ -44,17 +45,35 @@ function sse(event: string, data: unknown): string {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
-/** 持久化一次会话记录到 usage-history.jsonl */
-function persistCompletion(inputTokens: number, outputTokens: number, startTime: number, model: string, status: 'COMPLETED' | 'FAILED', traceId?: string): void {
-  const { costUsd, hasPricing } = estimateCostUsd(model, inputTokens || 0, outputTokens || 0);
+/**
+ * 持久化一次会话记录到 usage-history.jsonl。
+ * 成本优先取上游权威金额（上游已算好峰谷价与缓存折扣），缺失时才本地估算。
+ */
+function persistCompletion(
+  model: string,
+  usage: UsageAccumulator,
+  startTime: number,
+  status: 'COMPLETED' | 'FAILED',
+  traceId?: string
+): void {
+  const estimated = estimateCostUsd(model, usage.inputTokens || 0, usage.outputTokens || 0, {
+    cacheReadTokens: usage.cacheReadTokens,
+    cacheWriteTokens: usage.cacheWriteTokens,
+    at: new Date(startTime),
+  });
+  const hasUpstreamCost = usage.upstreamCostUsd !== undefined;
   recordCompletion({
     timestamp: new Date().toISOString(),
     model,
-    inputTokens: inputTokens || 0,
-    outputTokens: outputTokens || 0,
+    inputTokens: usage.inputTokens || 0,
+    outputTokens: usage.outputTokens || 0,
+    cacheReadTokens: usage.cacheReadTokens || 0,
+    cacheWriteTokens: usage.cacheWriteTokens || 0,
     timingMs: Date.now() - startTime,
-    costUsd,
-    hasPricing,
+    costUsd: hasUpstreamCost ? usage.upstreamCostUsd! : estimated.costUsd,
+    costSource: hasUpstreamCost ? 'official' : 'estimated',
+    estimatedCostUsd: estimated.costUsd,
+    hasPricing: hasUpstreamCost || estimated.hasPricing,
     status,
     traceId,
     mode: 'messages',
@@ -101,6 +120,7 @@ export async function messagesRoutes(fastify: FastifyInstance) {
     const modelName = translated.params.model;
     const msgId = `msg_${crypto.randomUUID().slice(0, 8)}`;
     let inputTokens = estimateTokens(JSON.stringify(translated).length);
+    const usageAcc = createUsageAccumulator();
 
     try {
       let upstreamStream: any;
@@ -189,6 +209,8 @@ export async function messagesRoutes(fastify: FastifyInstance) {
           const event = parseEventLine(line);
           if (!event) return;
 
+          accumulateUsage(usageAcc, event);
+
           if (event.type === 'text-delta') {
             const text = event.text || event.data?.text;
             if (text) {
@@ -251,8 +273,8 @@ export async function messagesRoutes(fastify: FastifyInstance) {
           } else if (event.type === 'finish' || event.type === 'finish-step') {
             const usage = event.totalUsage ?? event.data?.usage;
             if (usage) {
-              if (usage.inputTokens) inputTokens = usage.inputTokens;
-              if (usage.outputTokens) outputTokens = usage.outputTokens;
+              if (usage.inputTokens != null) inputTokens = usage.inputTokens;
+              if (usage.outputTokens != null) outputTokens = usage.outputTokens;
             }
             const rawFR = event.finishReason || event.data?.finishReason;
             if (rawFR === 'tool-calls' || rawFR === 'tool_calls') stopReason = 'tool_use';
@@ -266,6 +288,11 @@ export async function messagesRoutes(fastify: FastifyInstance) {
           closeThinkingBlock();
           closeTextBlock();
           if (!stopReason) stopReason = 'end_turn';
+          // 上游未回 usage 时回落到本地估算，避免记录为 0。
+          if (!usageAcc.sawUsage) {
+            usageAcc.inputTokens = inputTokens;
+            usageAcc.outputTokens = outputTokens;
+          }
           reply.raw.write(
             sse('message_delta', {
               type: 'message_delta',
@@ -278,7 +305,7 @@ export async function messagesRoutes(fastify: FastifyInstance) {
           logger.info(
             `Input Tokens ${inputTokens.toLocaleString('en-US')} | Output Tokens ${outputTokens.toLocaleString('en-US')} | Timing ${timing}s | Model ${modelName} | Status COMPLETED`
           );
-          persistCompletion(inputTokens, outputTokens, startTime, modelName, 'COMPLETED', msgId);
+          persistCompletion(modelName, usageAcc, startTime, 'COMPLETED', msgId);
           reply.raw.end();
         });
 
@@ -314,14 +341,21 @@ export async function messagesRoutes(fastify: FastifyInstance) {
       const rl = createInterface({ input: upstreamStream, crlfDelay: Infinity });
       for await (const line of rl) {
         const event = parseEventLine(line);
-        if (event) events.push(event);
+        if (event) {
+          events.push(event);
+          accumulateUsage(usageAcc, event);
+        }
       }
 
       const message = adapter.buildAnthropicResponse(events, msgId, modelName, inputTokens);
       logger.info(
         `Input Tokens ${message.usage.input_tokens.toLocaleString('en-US')} | Output Tokens ${message.usage.output_tokens.toLocaleString('en-US')} | Timing ${((Date.now() - startTime) / 1000).toFixed(3)}s | Model ${modelName} | Status COMPLETED`
       );
-      persistCompletion(message.usage.input_tokens, message.usage.output_tokens, startTime, modelName, 'COMPLETED', msgId);
+      if (!usageAcc.sawUsage) {
+        usageAcc.inputTokens = message.usage.input_tokens;
+        usageAcc.outputTokens = message.usage.output_tokens;
+      }
+      persistCompletion(modelName, usageAcc, startTime, 'COMPLETED', msgId);
       return reply.send(message);
     } catch (err: any) {
       if (isAbortError(err) || err?.isAbort) return reply.raw.end();

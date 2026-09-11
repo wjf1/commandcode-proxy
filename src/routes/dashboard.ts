@@ -458,7 +458,7 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
       <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg"><p class="text-[11px] text-slate-400 font-medium">今日 Token</p><h3 id="usageTodayToken" class="text-lg font-bold text-white mt-1">--</h3><p id="usageTodayRuns" class="text-[11px] text-slate-400 mt-1">-- 次请求</p></div>
       <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg"><p class="text-[11px] text-slate-400 font-medium">本周成本</p><h3 id="usageWeekCost" class="text-lg font-bold text-emerald-400 mt-1">--</h3><p id="usageWeekToken" class="text-[11px] text-slate-400 mt-1">--</p></div>
       <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg"><p class="text-[11px] text-slate-400 font-medium">本月成本</p><h3 id="usageMonthCost" class="text-lg font-bold text-emerald-400 mt-1">--</h3><p id="usageMonthToken" class="text-[11px] text-slate-400 mt-1">--</p></div>
-      <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg"><p class="text-[11px] text-slate-400 font-medium">累计</p><h3 id="usageTotalToken" class="text-lg font-bold text-white mt-1">--</h3><p id="usageTotalRuns" class="text-[11px] text-slate-400 mt-1">-- 次请求</p><p id="usagePricingNote" class="text-[11px] text-amber-400 mt-1 hidden"><i class="fa-solid fa-triangle-exclamation"></i> 未同步定价</p></div>
+      <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg"><p class="text-[11px] text-slate-400 font-medium">累计</p><h3 id="usageTotalToken" class="text-lg font-bold text-white mt-1">--</h3><p id="usageTotalRuns" class="text-[11px] text-slate-400 mt-1">-- 次请求</p><p id="usageCacheHit" class="text-[11px] text-sky-400 mt-1">--</p><p id="usagePricingNote" class="text-[11px] text-amber-400 mt-1 hidden"><i class="fa-solid fa-triangle-exclamation"></i> 未同步定价</p></div>
     </div>
 
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
@@ -484,6 +484,7 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
               <th class="px-3 py-2 font-medium">时间</th>
               <th class="px-3 py-2 font-medium">模型</th>
               <th class="px-3 py-2 font-medium text-right">输入</th>
+              <th class="px-3 py-2 font-medium text-right">缓存命中</th>
               <th class="px-3 py-2 font-medium text-right">输出</th>
               <th class="px-3 py-2 font-medium text-right">耗时</th>
               <th class="px-3 py-2 font-medium text-right">成本</th>
@@ -912,6 +913,15 @@ async function loadUsageHistory(){
   document.getElementById('usageTotalToken').innerText = fmtTokensM(s.inputTokens + s.outputTokens) + ' token';
   document.getElementById('usageTotalRuns').innerText = s.runs + ' 次请求 · 失败 ' + s.failures;
 
+  // 缓存命中率：agent 场景常达 90%+，是成本远低于"输入×输入价"的主因。
+  const hitEl = document.getElementById('usageCacheHit');
+  if (hitEl) {
+    const rate = (s.cacheHitRate || 0) * 100;
+    hitEl.innerText = rate > 0
+      ? '缓存命中 ' + rate.toFixed(1) + '% · ' + fmtTokensM(s.cacheReadTokens || 0) + ' token'
+      : '缓存命中 --';
+  }
+
   const hasAnyPricing = (data.recent||[]).some(r => r.hasPricing);
   document.getElementById('usagePricingNote').classList.toggle('hidden', hasAnyPricing);
   document.getElementById('usageRecentCount').innerText = '最近 ' + (data.recent||[]).length + ' 条';
@@ -931,13 +941,24 @@ function renderUsageTable(recent){
       : '<span class="px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">完成</span>';
     const pc = r.hasPricing ? '' : '<span class="text-amber-400" title="未同步官方定价">*</span>';
     const mode = r.mode === 'messages' ? 'Messages' : 'Chat';
+    // 官方账单金额优先，本地估算加 "~" 前缀区分；悬停显示本地估算值便于对照。
+    const src = r.costSource === 'official' ? '' : '~';
+    const costTip = r.estimatedCostUsd != null && r.costSource === 'official'
+      ? ' title="官方账单；本地估算 $' + (r.estimatedCostUsd || 0).toFixed(6) + '"'
+      : (r.costSource === 'estimated' ? ' title="本地按官方定价估算（上游未返回账单金额）"' : '');
+    const cache = r.cacheReadTokens || 0;
+    const cacheCell = cache > 0
+      ? '<span class="text-sky-400" title="缓存命中 ' + cache.toLocaleString('en-US') + ' / 输入 ' + (r.inputTokens || 0).toLocaleString('en-US') + '">' +
+          fmtTokens(cache) + ' <span class="text-slate-500">(' + Math.round(cache / Math.max(1, r.inputTokens || 1) * 100) + '%)</span></span>'
+      : '<span class="text-slate-600">—</span>';
     return '<tr class="hover:bg-slate-800/40 transition">' +
       '<td class="px-4 py-2.5 whitespace-nowrap text-slate-300">' + esc(fmtTime(r.timestamp)) + '</td>' +
       '<td class="px-4 py-2.5 text-slate-200 font-mono">' + esc(r.model) + '</td>' +
       '<td class="px-4 py-2.5 text-right text-slate-300">' + fmtTokens(r.inputTokens) + '</td>' +
+      '<td class="px-4 py-2.5 text-right">' + cacheCell + '</td>' +
       '<td class="px-4 py-2.5 text-right text-slate-300">' + fmtTokens(r.outputTokens) + '</td>' +
       '<td class="px-4 py-2.5 text-right text-slate-400">' + fmtMs(r.timingMs) + '</td>' +
-      '<td class="px-4 py-2.5 text-right text-emerald-400">' + fmtUsd(r.costUsd) + pc + '</td>' +
+      '<td class="px-4 py-2.5 text-right text-emerald-400"' + costTip + '>' + src + fmtUsd(r.costUsd) + pc + '</td>' +
       '<td class="px-4 py-2.5">' + badge + '</td>' +
       '<td class="px-4 py-2.5 text-slate-400">' + mode + '</td>' +
     '</tr>';
