@@ -2,6 +2,25 @@
 
 所有主要版本更新都记录在此文件。
 
+## [4.9.1] - 2026-09-12
+
+### 修复
+- **桌面通知被 Windows 静默丢弃（从未真正显示过）** — toast 必须以**已注册的应用标识（AUMID）**发出，此前随手用了 `'CommandCode Proxy'` 这个未注册字符串，导致 PowerShell 调用成功返回（日志显示已发送）但 **Win11 在展示层直接丢弃且不报任何错**——即通知功能实际上从未生效。实测环境 Win11 25H2（build 26200）。
+  - 现按本机其他应用（豆包/抖音/Steam++）的同一方式，把 AUMID 注册进 `HKCU\Software\Classes\AppUserModelId\CommandCode.Proxy`（`DisplayName` + `ShowInSettings`），**无需管理员权限、无需打包**，通知显示为 "CommandCode Proxy" 并可在 Windows 通知设置中单独管理。
+  - 注册幂等（已存在则不再写注册表），进程内缓存探测结果，并在启动时预注册（`setImmediate`，不阻塞）。
+  - 注册失败时**回退到 PowerShell 自身的 AUMID**——通知显示名会变成 "Windows PowerShell"，但至少能显示出来；日志中以 `[own]` / `[fallback]` 区分实际使用的标识。
+  - 可选环境变量 `COMMANDCODE_NOTIFY_ICON` 指定 .ico 路径，设置后通知带图标。
+- **头部注释中的错别字**（`採接` → `拼接`）。
+
+### 测试
+- 新增 `tests/notifier.test.ts`（8 项）：事件去重（窗口期内只发一次、跨键互不影响、超窗重发）、`COMMANDCODE_NOTIFY` 多种关闭写法、自有 AUMID 与回退标识的区分、通知正文 XML 转义（防拼进 PowerShell 脚本时注入）。
+- 全量 **193 项通过**（基线 185），`tsc --noEmit` 无错误。
+
+### 验证
+- 注册表确认写入成功（`reg query` 可见 `DisplayName=CommandCode Proxy`、`ShowInSettings=1`）；启动日志输出 `AUMID registered`；实发通知日志标记为 `[own]`，表示走的是自有标识而非回退。
+
+- 版本号 `4.9.0` → `4.9.1`。
+
 ## [4.9.0] - 2026-09-11
 
 ### 新增

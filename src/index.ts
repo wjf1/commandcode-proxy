@@ -20,7 +20,7 @@ import { messagesRoutes } from './routes/messages.js';
 import { modelsRoutes } from './routes/models.js';
 import { dashboardRoutes } from './routes/dashboard.js';
 import { recordQuotaSample, getQuotaProjection } from './utils/quota-tracker.js';
-import { notify } from './utils/notifier.js';
+import { notify, ensureAumidRegistered } from './utils/notifier.js';
 
 process.on('uncaughtException', err => {
   logger.error(`[CRITICAL] Uncaught Exception: ${err.message}`);
@@ -116,6 +116,12 @@ const start = async () => {
         sampleQuotaWindow().catch(err => logger.warn(`[QUOTA-SAMPLE] ${err?.message || err}`));
       }, QUOTA_SAMPLE_INTERVAL_MS);
       logger.info('[QUOTA-SAMPLE] Window usage sampler active (every 5m).');
+    }
+
+    // 预注册通知 AUMID：让第一条 toast 就能以 "CommandCode Proxy" 名义显示，
+    // 而不是回退到 PowerShell。幂等，且失败只影响显示名，不阻断启动。
+    if (process.platform === 'win32') {
+      setImmediate(() => { try { ensureAumidRegistered(); } catch { /* 非关键路径 */ } });
     }
 
     await fastify.listen({ port: config.port, host: config.host });
