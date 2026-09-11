@@ -99,6 +99,67 @@ export function resetAumidState(): void {
   aumidState = null;
 }
 
+// ── 系统级通知开关自诊断 ────────────────────────────────────────────────────
+//
+// 实测案例：本机 ToastEnabled=0（系统通知总开关关闭）时，toast 在 API 层
+// Show() 成功返回、日志也显示已发送，但通知平台在策略层以
+// PolicyReason=GlobalSettingDisabled 拒绝（事件 3150），屏幕与通知中心都
+// 不会有任何痕迹 —— 且**所有应用**（包括 electron.app.ZCode 自己）都一样。
+// 因此这里主动读取该开关：关闭时不再白白 spawn PowerShell，并把原因讲清楚。
+
+const TOAST_ENABLED_REG = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\PushNotifications';
+/**
+ * 用 reg.exe 的**绝对路径**：实测不带路径时解析结果随调用方 PATH 而异
+ * （本机调试环境曾解析到行为不同的 reg，报"无效语法"），写死系统目录
+ * 消除这一差异。
+ */
+/**
+ * 用 **PowerShell** 读注册表：本机实测 reg.exe 的命令行查询会被以"无效语法"
+ * 拒绝（status=1、无输出，疑似安全软件干扰），而 PowerShell 的
+ * Get-ItemProperty 读同一键稳定可用 —— 以实测可用者为准。
+ */
+const PS_EXE = 'powershell.exe';
+/** 开关状态缓存时长：用户随时可能在设置里改，不宜永久缓存。 */
+const TOAST_ENABLED_TTL_MS = 60_000;
+let toastEnabledCache: { value: boolean; at: number } | null = null;
+
+/** 读取系统通知总开关（Windows 设置 → 系统 → 通知 的主开关）。 */
+export function isGlobalToastEnabled(now: number = Date.now()): boolean {
+  if (toastEnabledCache && now - toastEnabledCache.at < TOAST_ENABLED_TTL_MS) {
+    return toastEnabledCache.value;
+  }
+  let enabled = true;
+  try {
+    const r = spawnSync(
+      PS_EXE,
+      [
+        '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command',
+        `(Get-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\PushNotifications' -Name ToastEnabled -ErrorAction SilentlyContinue).ToastEnabled`,
+      ],
+      { windowsHide: true, encoding: 'utf8', timeout: 15000 },
+    );
+    if (r.status === 0 && typeof r.stdout === 'string') {
+      const t = r.stdout.trim();
+      // 输出为空 = 值不存在 = 用户从未改过 = 默认允许。
+      if (t !== '') {
+        const n = Number.parseInt(t, 10);
+        if (Number.isFinite(n)) enabled = n !== 0;
+      }
+    } else {
+      logger.warn(`[NOTIFY] Failed to read global toast switch (status=${r.status}).`);
+    }
+  } catch (err: any) {
+    logger.warn(`[NOTIFY] Failed to read global toast switch: ${err?.message || err}`);
+  }
+  toastEnabledCache = { value: enabled, at: now };
+  return enabled;
+}
+
+/** 测试用。 */
+export function resetToastEnabledCache(): void {
+  toastEnabledCache = null;
+}
+
 /**
  * 发送一条 Windows toast。非 Windows 平台与被禁用时静默跳过。
  *
@@ -111,6 +172,18 @@ export function resetAumidState(): void {
 export function notify(key: string, title: string, body: string, level: NotifyLevel = 'info'): boolean {
   if (!notificationsEnabled()) return false;
   if (process.platform !== 'win32') return false;
+
+  // 系统总开关关闭时，toast 会被通知平台以 GlobalSettingDisabled 拒绝且不留
+  // 痕迹 —— 与其白白 spawn 一个注定失败的 PowerShell，不如把原因写进日志。
+  if (!isGlobalToastEnabled()) {
+    if (!shouldSend('sys-toast-off', Date.now())) return false;
+    logger.warn(
+      '[NOTIFY] 系统通知总开关已关闭（HKCU...PushNotifications\\ToastEnabled=0）。' +
+      'toast 会被 Windows 以 GlobalSettingDisabled 拒绝，本次跳过。' +
+      '修复：设置 → 系统 → 通知，打开总开关。'
+    );
+    return false;
+  }
 
   const now = Date.now();
   if (!shouldSend(key, now)) return false;
