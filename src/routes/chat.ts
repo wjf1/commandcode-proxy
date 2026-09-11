@@ -15,6 +15,7 @@ import { createInterface } from 'readline';
 import { CommandCodeAdapter } from '../adapters/commandcode/adapter.js';
 import { sendToCC, isAbortError, estimateTokens } from '../adapters/commandcode/upstream.js';
 import { accumulateUsage, createUsageAccumulator, UsageAccumulator } from '../adapters/commandcode/usage.js';
+import { buildRequestContext, RequestContext } from '../utils/request-context.js';
 import { OpenAIChatRequest, CCEvent } from '../types/index.js';
 import { getActiveApiKey, getGatewayRunning, checkAndRotateAccountsOnQuota } from '../utils/config.js';
 import { logger } from '../utils/logger.js';
@@ -45,6 +46,7 @@ function logCompletion(inputTokens: number, outputTokens: number, startTime: num
 function persistCompletion(
   model: string,
   usage: UsageAccumulator,
+  context: RequestContext,
   startTime: number,
   status: 'COMPLETED' | 'FAILED',
   traceId?: string,
@@ -71,7 +73,20 @@ function persistCompletion(
     status,
     traceId,
     mode,
+    ...contextRecordFields(context),
   });
+}
+
+/** 把请求上下文摊平成记录字段；不确定的项留空，不写占位值。 */
+function contextRecordFields(ctx: RequestContext) {
+  return {
+    ...(ctx.sessionId ? { sessionId: ctx.sessionId } : {}),
+    ...(ctx.project ? { project: ctx.project } : {}),
+    ...(ctx.projectSource ? { projectSource: ctx.projectSource } : {}),
+    ...(ctx.sessionType ? { sessionType: ctx.sessionType } : {}),
+    ...(ctx.agent ? { agent: ctx.agent } : {}),
+    ...(ctx.timezone ? { timezone: ctx.timezone } : {}),
+  };
 }
 
 /** 解析一行 SSE 为一个 CCEvent；空行或 [DONE] 返回 null。 */
@@ -154,6 +169,8 @@ export async function chatRoutes(fastify: FastifyInstance) {
     const modelName = translated.params.model;
     let inputTokens = estimateTokens(JSON.stringify(translated).length);
     const usageAcc = createUsageAccumulator();
+    // 会话/项目等归因信息：会话 ID 来自客户端声明，项目为推断（见模块注释）。
+    const requestContext = buildRequestContext(req.headers as any, body);
 
     try {
       let upstreamStream: any;
@@ -220,7 +237,7 @@ export async function chatRoutes(fastify: FastifyInstance) {
           // 上游未回 usage 时回落到本地估算的输入量，避免记录为 0。
           if (!usageAcc.sawUsage) usageAcc.inputTokens = inputTokens;
           logCompletion(usageAcc.inputTokens, usageAcc.outputTokens, startTime, modelName);
-          persistCompletion(modelName, usageAcc, startTime, 'COMPLETED', state.id, 'chat');
+          persistCompletion(modelName, usageAcc, requestContext, startTime, 'COMPLETED', state.id, 'chat');
           reply.raw.end();
         });
 
@@ -315,7 +332,7 @@ export async function chatRoutes(fastify: FastifyInstance) {
         usageAcc.inputTokens = inputTokens;
         usageAcc.outputTokens = outputTokens;
       }
-      persistCompletion(modelName, usageAcc, startTime, 'COMPLETED', undefined, 'chat');
+      persistCompletion(modelName, usageAcc, requestContext, startTime, 'COMPLETED', undefined, 'chat');
 
       return reply.send({
         id: `chatcmpl-${Math.random().toString(36).slice(2, 10)}`,

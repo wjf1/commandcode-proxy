@@ -21,3 +21,4 @@ logs/
 # 本地运维脚本（含机器绝对路径与计划任务绑定，不入库）
 watchdog.ps1
 watchdog.log
+watchdog_launcher.vbs

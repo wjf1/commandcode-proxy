@@ -312,6 +312,9 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
       month: stats.month,
       byDay: stats.byDay,
       byModel: stats.byModel,
+      byProject: stats.byProject,
+      bySession: stats.bySession,
+      attribution: stats.attribution,
       recent: records.slice(-limit).reverse(),
       // 峰谷计费状态：受分时价影响的模型此刻按哪档计费、何时切换。
       billing: {
@@ -505,6 +508,59 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
         <p id="usageEmpty" class="text-center text-slate-500 text-xs py-8 hidden">暂无会话记录，触发一次对话后在这里查看。</p>
       </div>
     </div>
+
+    <!-- 归因：项目（推断）与会话（客户端声明） -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
+      <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg">
+        <div class="flex items-center justify-between flex-wrap gap-2">
+          <h3 class="font-bold text-xs text-white flex items-center gap-2">
+            <i class="fa-solid fa-folder-tree text-amber-400"></i> 项目分布
+            <span class="px-1.5 py-0.5 rounded text-[10px] bg-amber-500/10 text-amber-400 border border-amber-500/20" title="项目无权威字段来源，由 system prompt 文本推断；上游不提供该维度">推断</span>
+          </h3>
+          <p id="projectCoverage" class="text-[11px] text-slate-500">--</p>
+        </div>
+        <p class="text-[11px] text-slate-500 mt-1">标签来源为 system prompt 中的工作目录字段（较可靠）；启发式来源按路径频次推测，可能不准。</p>
+        <div class="overflow-x-auto max-h-72 overflow-y-auto mt-3">
+          <table class="w-full text-xs text-left">
+            <thead class="bg-slate-950/60 text-slate-400 sticky top-0 z-10">
+              <tr>
+                <th class="px-2 py-2 font-medium">项目</th>
+                <th class="px-2 py-2 font-medium text-right">请求</th>
+                <th class="px-2 py-2 font-medium text-right">Token</th>
+                <th class="px-2 py-2 font-medium text-right">成本</th>
+              </tr>
+            </thead>
+            <tbody id="projectTableBody" class="divide-y divide-slate-800/60"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg">
+        <div class="flex items-center justify-between flex-wrap gap-2">
+          <h3 class="font-bold text-xs text-white flex items-center gap-2">
+            <i class="fa-solid fa-comments text-indigo-400"></i> 会话排行
+            <span class="px-1.5 py-0.5 rounded text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" title="会话 ID 由客户端声明（x-session-id），属事实性标识">声明值</span>
+          </h3>
+          <p id="sessionCoverage" class="text-[11px] text-slate-500">--</p>
+        </div>
+        <p class="text-[11px] text-slate-500 mt-1">仅统计携带会话 ID 的请求；未携带的客户端归入下方「未识别」。</p>
+        <div class="overflow-x-auto max-h-72 overflow-y-auto mt-3">
+          <table class="w-full text-xs text-left">
+            <thead class="bg-slate-950/60 text-slate-400 sticky top-0 z-10">
+              <tr>
+                <th class="px-2 py-2 font-medium">会话</th>
+                <th class="px-2 py-2 font-medium">项目</th>
+                <th class="px-2 py-2 font-medium text-right">请求</th>
+                <th class="px-2 py-2 font-medium text-right">成本</th>
+              </tr>
+            </thead>
+            <tbody id="sessionTableBody" class="divide-y divide-slate-800/60"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <p class="text-[11px] text-slate-500 mt-2"><i class="fa-solid fa-circle-info"></i> 归因仅覆盖<b>经过本代理</b>的流量：上游 usage 汇总通常显著高于此处（直连 CLI 等不受代理记录）。</p>
   </div>
 </section>
 
@@ -907,6 +963,9 @@ function fmtUsd(v){ return '$' + (v||0).toFixed(4); }
 function fmtUsdShort(v){ var x=v||0; if(x>=1000) return '$'+(x/1000).toFixed(2)+'k'; if(x>=1) return '$'+x.toFixed(2); return '$'+x.toFixed(4); }
 function fmtMs(ms){ if(!ms) return '--'; if(ms>=60000){var m=Math.floor(ms/60000),s=(ms%60000)/1000; return m+'m '+s.toFixed(1)+'s';} if(ms>=1000) return (ms/1000).toFixed(1)+'s'; return Math.round(ms)+'ms'; }
 function fmtDur(mins){ if(mins==null) return '--'; if(mins>=1440) return Math.floor(mins/1440)+'天'; if(mins>=60) return Math.floor(mins/60)+'h '+String(mins%60).padStart(2,'0')+'m'; return mins+'m'; }
+// 服务端同名的展示函数在前端不可用，这里用等价实现：只取路径末段
+// （完整路径可能含用户名，默认不直接展示，悬停才看全路径）。
+function projectDisplayName(p){ if(!p) return '未识别'; var parts=String(p).split(/[\\/]/).filter(Boolean); return parts.length?parts[parts.length-1]:String(p); }
 function fmtTime(ts){ try { const d=new Date(ts); return d.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit'}); } catch { return ts; } }
 
 async function loadUsageHistory(){
@@ -957,6 +1016,76 @@ async function loadUsageHistory(){
 
   renderUsageTable(data.recent||[]);
   renderUsageCharts(data);
+  renderAttribution(data);
+}
+
+// 项目（推断）与会话（声明）两个维度的呈现。
+// 关键：推断值必须与事实值在视觉上区分，不能让用户误以为是权威数据。
+function renderAttribution(data){
+  const a = data.attribution || {};
+  const projBody = document.getElementById('projectTableBody');
+  const sessBody = document.getElementById('sessionTableBody');
+
+  // ── 项目 ──
+  const projects = data.byProject || [];
+  const cov = document.getElementById('projectCoverage');
+  if (cov) {
+    const n = projects.filter(p => p.project).length;
+    cov.innerText = n + ' 个项目 · 已归因 ' + (a.projectsIdentified||0) + '/' + (a.totalRecords||0) + ' 条';
+  }
+  if (projBody) {
+    if (!projects.length) {
+      projBody.innerHTML = '<tr><td colspan="4" class="px-2 py-6 text-center text-slate-500">暂无数据</td></tr>';
+    } else {
+      projBody.innerHTML = projects.slice(0, 50).map(p => {
+        const name = p.project ? projectDisplayName(p.project) : '未识别';
+        // 置信度徽章：label = 较可靠；heuristic = 明确标记为推测
+        let badge = '';
+        if (p.projectSource === 'label') {
+          badge = '<span class="ml-1 px-1 py-0.5 rounded text-[9px] bg-sky-500/10 text-sky-400 border border-sky-500/20" title="来自 system prompt 的工作目录字段">标签</span>';
+        } else if (p.projectSource === 'heuristic') {
+          badge = '<span class="ml-1 px-1 py-0.5 rounded text-[9px] bg-amber-500/10 text-amber-400 border border-amber-500/20" title="按路径出现频次推测，不保证准确">推测</span>';
+        }
+        const title = p.project ? ' title="' + esc(p.project) + '"' : '';
+        const dim = p.project ? 'text-slate-200' : 'text-slate-500 italic';
+        return '<tr class="hover:bg-slate-800/40 transition">' +
+          '<td class="px-2 py-2 truncate max-w-[220px]"><span class="' + dim + '"' + title + '>' + esc(name) + '</span>' + badge + '</td>' +
+          '<td class="px-2 py-2 text-right text-slate-400">' + p.runs + (p.sessionCount ? ' <span class="text-slate-600">/' + p.sessionCount + '会话</span>' : '') + '</td>' +
+          '<td class="px-2 py-2 text-right text-slate-400">' + fmtTokensM((p.inputTokens||0)+(p.outputTokens||0)) + '</td>' +
+          '<td class="px-2 py-2 text-right text-emerald-400">' + fmtUsdShort(p.costUsd) + '</td>' +
+        '</tr>';
+      }).join('');
+    }
+  }
+
+  // ── 会话 ──
+  const sessions = data.bySession || [];
+  const scov = document.getElementById('sessionCoverage');
+  if (scov) {
+    scov.innerText = sessions.length + ' 个会话 · 已识别 ' + (a.sessionsIdentified||0) + '/' + (a.totalRecords||0) + ' 条';
+  }
+  if (sessBody) {
+    if (!sessions.length) {
+      sessBody.innerHTML = '<tr><td colspan="4" class="px-2 py-6 text-center text-slate-500">暂无携带会话 ID 的请求</td></tr>';
+    } else {
+      sessBody.innerHTML = sessions.slice(0, 50).map(s => {
+        const shortId = esc(String(s.sessionId).slice(0, 8));
+        const pname = s.project ? esc(projectDisplayName(s.project)) : '<span class="text-slate-600">—</span>';
+        const pTitle = s.project ? ' title="' + esc(s.project) + (s.projectSource === 'heuristic' ? '（推测）' : '') + '"' : '';
+        const typeBadge = s.sessionType && s.sessionType !== 'main'
+          ? '<span class="ml-1 px-1 py-0.5 rounded text-[9px] bg-violet-500/10 text-violet-400 border border-violet-500/20">' + esc(s.sessionType) + '</span>'
+          : '';
+        const span = fmtDur(Math.max(0, Math.round((new Date(s.lastAt) - new Date(s.firstAt)) / 60000)));
+        return '<tr class="hover:bg-slate-800/40 transition">' +
+          '<td class="px-2 py-2"><span class="font-mono text-slate-200" title="' + esc(s.sessionId) + '">' + shortId + '</span>' + typeBadge +
+            '<span class="block text-[10px] text-slate-500">' + (s.agent ? esc(s.agent) + ' · ' : '') + span + '</span></td>' +
+          '<td class="px-2 py-2 text-slate-400 truncate max-w-[120px]"><span' + pTitle + '>' + pname + '</span></td>' +
+          '<td class="px-2 py-2 text-right text-slate-400">' + s.runs + '</td>' +
+          '<td class="px-2 py-2 text-right text-emerald-400">' + fmtUsdShort(s.costUsd) + '</td>' +
+        '</tr>';
+      }).join('');
+    }
+  }
 }
 
 // 峰谷计费提示：官方对部分模型（deepseek 系列）设分时价，

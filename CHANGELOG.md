@@ -2,6 +2,46 @@
 
 所有主要版本更新都记录在此文件。
 
+## [4.8.0] - 2026-09-11
+
+### 新增
+- **会话维度聚合（客户端声明的标识）** — 按会话归因每次请求的成本与 token。
+  - 会话 ID 取自客户端发送的 `x-session-id` 头，实测值与磁盘上的会话目录名 `sess_<uuid>` 完全一致（独立交叉印证），属**事实性标识**而非推测。
+  - 三级回退：`x-session-id` → 请求体 `metadata.user_id`（实测是**被编码成字符串的 JSON**，需二次解析）→ OpenAI 兼容客户端的 `user` 字段。全部失败则留空，**不猜测填充**。
+  - 同时采集 `x-zcode-session-type`（main / subagent）、`x-zcode-agent`。
+  - 面板新增**会话排行**表：会话 ID、所属项目、请求数、成本、agent、持续时长，并标注「声明值」徽章。
+- **项目维度聚合（文本推断，带置信度）** — 按项目归因成本。
+  - 上游**不提供**该维度（`/alpha/usage/{projects,sessions,history,breakdown,daily,...}` 等 12 个候选端点实测全部 404），代理自身也没有调用方工作目录（原 `x-project-slug` 取自代理自己的 `process.cwd()`，是无效值），因此只能从 system prompt 文本提取。
+  - 两级来源并**逐条标注置信度**：`label` = 命中显式字段（实测 ZCode 的 `Primary working directory: <路径>`，高置信）；`heuristic` = 按路径**父目录**出现频次推断（低置信，≥2 次才采纳）。
+  - 护栏「宁可留空，不标错」：无标签且无可信频次 → `project` 为空，面板显示「未识别」。显式排除 `node_modules` / `AppData\Local\Temp` / `Windows` / `.zcode\cli\{plugins,skills,artifacts,exec,log,db}` 等噪声目录。
+  - 面板新增**项目分布**表，`推断` 徽章 + 每行 `标签`/`推测` 置信度标记，与「声明值」会话表**视觉上明确区分**，并写明「项目无权威字段来源」。
+- **归因覆盖度披露** — `GET /api/usage/history` 新增 `attribution` 块（`sessionsIdentified` / `projectsIdentified` / `projectsLabeled` / `totalRecords`），面板显示"已归因 N/M 条"。
+- **按客户端时区分组日期** — 此前 `dayKey` 用服务器本地时区，跨时区调用方会看到日期错位（UTC+8 用户在本地 00:30 的请求被归到前一天）。现读取 `x-client-timezone`（经 `Intl` 校验，非法值回退服务器时区）按其计算。
+
+### 修复
+- **头部大小写处理不完整** — `header()` 原先只查小写名，真实的原始大小写头部（如 `X-Session-Id`）取不到值；现按小写归一后遍历匹配。
+- **`normalizeProjectPath` 误截断合法路径段** — 原先用 `split(/\\n/)` 处理提示词里的字面量 `\n`，把 `C:\proj\node_modules\foo` 这类**以 `n` 开头的路径段**切成了 `C:\proj`。现改为仅在字面量 `\n` 后紧跟字段标记（`-` 或 `#`）时才截断。
+- **频次启发式失效** — 原先按**完整文件路径**计数，而同一项目下各文件路径互不相同，导致计数永远为 1、推断永不生效；现改为按**父目录**计数，并在频次相同时取更浅（更接近项目根）的路径。
+
+### 变更
+- `UsageRecord` 新增 `sessionId` / `project` / `projectSource` / `sessionType` / `agent` / `timezone`（均为可选，不确定则不写入）。
+- `getUsageStats()` 新增 `byProject` / `bySession` / `attribution`；未识别项目单独成组而非静默丢弃。
+- 同一会话跨多次推断得到不同项目时保留首个非空值，避免抖动。
+
+### 测试
+- 新增 `tests/attribution.test.ts`（36 项）：
+  - 会话 ID 三级回退、双层编码 metadata、空白值、大小写头部、裸客户端返回 null；
+  - 时区校验（合法 IANA vs `Not/AZone`）；
+  - 路径规范化：盘符小写、双重转义还原、引号剥离、噪声目录排除、相对路径拒绝、超长拒绝，以及**三个已修缺陷的回归**（`\node_modules` 误截断、父目录计数、字面量 `\n` 截断）；
+  - 项目推断：标签优先、无标签时频次推断、**只出现一次必须返回 null**、空/非法输入、标签值不可用时回落启发式；
+  - 聚合：项目按成本排序并保留置信度、未识别单独成组、会话仅计有 ID 的记录、`attribution` 计数、跨推断抖动保护、**客户端时区分组生效**（23:30 UTC 在上海时区归到次日）。
+- 全量 **168 项通过**（基线 132），`tsc --noEmit` 无错误。
+
+### 验证
+- 实机：新记录正确落盘 `sessionId=72c84a09-…`、`project=c:\Users\admin\.zcode\workspace\default`、`projectSource=label`、`agent=glm`、`timezone=Asia/Shanghai`；`/api/usage/history` 的 `byProject` / `bySession` / `attribution` 均返回正确数据。
+
+- 版本号 `4.7.0` → `4.8.0`。
+
 ## [4.7.0] - 2026-09-11
 
 ### 新增

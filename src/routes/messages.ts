@@ -15,6 +15,7 @@ import crypto from 'node:crypto';
 import { CommandCodeAdapter } from '../adapters/commandcode/adapter.js';
 import { sendToCC, isAbortError, estimateTokens } from '../adapters/commandcode/upstream.js';
 import { accumulateUsage, createUsageAccumulator, UsageAccumulator } from '../adapters/commandcode/usage.js';
+import { buildRequestContext, RequestContext } from '../utils/request-context.js';
 import { AnthropicRequest, CCEvent } from '../types/index.js';
 import { getActiveApiKey, getGatewayRunning, checkAndRotateAccountsOnQuota } from '../utils/config.js';
 import { logger } from '../utils/logger.js';
@@ -52,6 +53,7 @@ function sse(event: string, data: unknown): string {
 function persistCompletion(
   model: string,
   usage: UsageAccumulator,
+  context: RequestContext,
   startTime: number,
   status: 'COMPLETED' | 'FAILED',
   traceId?: string
@@ -77,6 +79,12 @@ function persistCompletion(
     status,
     traceId,
     mode: 'messages',
+    ...(context.sessionId ? { sessionId: context.sessionId } : {}),
+    ...(context.project ? { project: context.project } : {}),
+    ...(context.projectSource ? { projectSource: context.projectSource } : {}),
+    ...(context.sessionType ? { sessionType: context.sessionType } : {}),
+    ...(context.agent ? { agent: context.agent } : {}),
+    ...(context.timezone ? { timezone: context.timezone } : {}),
   });
 }
 
@@ -121,6 +129,8 @@ export async function messagesRoutes(fastify: FastifyInstance) {
     const msgId = `msg_${crypto.randomUUID().slice(0, 8)}`;
     let inputTokens = estimateTokens(JSON.stringify(translated).length);
     const usageAcc = createUsageAccumulator();
+    // 会话/项目等归因信息：会话 ID 来自客户端声明，项目为推断（见模块注释）。
+    const requestContext = buildRequestContext(req.headers as any, body);
 
     try {
       let upstreamStream: any;
@@ -305,7 +315,7 @@ export async function messagesRoutes(fastify: FastifyInstance) {
           logger.info(
             `Input Tokens ${inputTokens.toLocaleString('en-US')} | Output Tokens ${outputTokens.toLocaleString('en-US')} | Timing ${timing}s | Model ${modelName} | Status COMPLETED`
           );
-          persistCompletion(modelName, usageAcc, startTime, 'COMPLETED', msgId);
+          persistCompletion(modelName, usageAcc, requestContext, startTime, 'COMPLETED', msgId);
           reply.raw.end();
         });
 
@@ -355,7 +365,7 @@ export async function messagesRoutes(fastify: FastifyInstance) {
         usageAcc.inputTokens = message.usage.input_tokens;
         usageAcc.outputTokens = message.usage.output_tokens;
       }
-      persistCompletion(modelName, usageAcc, startTime, 'COMPLETED', msgId);
+      persistCompletion(modelName, usageAcc, requestContext, startTime, 'COMPLETED', msgId);
       return reply.send(message);
     } catch (err: any) {
       if (isAbortError(err) || err?.isAbort) return reply.raw.end();

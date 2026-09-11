@@ -44,6 +44,20 @@ export interface UsageRecord {
   status: 'COMPLETED' | 'FAILED';
   traceId?: string;
   mode: 'chat' | 'messages';
+
+  // ── 归因字段 ──────────────────────────────────────────────────────────────
+  /** 客户端声明的会话 ID（x-session-id 等）。拿不到为 undefined，不猜测。 */
+  sessionId?: string;
+  /** 推断出的项目路径。注意：这是**推断值**，务必结合 projectSource 判断可信度。 */
+  project?: string;
+  /** 项目归属的置信度：label = 显式标签字段；heuristic = 频次推断。 */
+  projectSource?: 'label' | 'heuristic';
+  /** 会话类型（main / subagent 等）。 */
+  sessionType?: string;
+  /** 发起方 agent 标识。 */
+  agent?: string;
+  /** 客户端时区（IANA），用于按调用方本地日期分组。 */
+  timezone?: string;
 }
 
 const USAGE_FILE_PATH = process.env.USAGE_HISTORY_PATH
@@ -310,20 +324,67 @@ interface ModelBucket {
   runs: number;
 }
 
-/** 把时间戳归一到本地日期（YYYY-MM-DD）。 */
-function dayKey(ts: string): string {
+/** 项目聚合桶。project 为 null 表示归属"未识别"。 */
+interface ProjectBucket {
+  project: string | null;
+  /** 该项目下出现过的置信度来源，label 优先展示。 */
+  sources: Set<'label' | 'heuristic'>;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  costUsd: number;
+  savingsUsd: number;
+  runs: number;
+  sessions: Set<string>;
+  lastAt: string;
+}
+
+/** 会话聚合桶。会话 ID 为客户端声明值，属事实性标识。 */
+interface SessionBucket {
+  sessionId: string;
+  project: string | null;
+  projectSource: 'label' | 'heuristic' | null;
+  sessionType: string | null;
+  agent: string | null;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  costUsd: number;
+  savingsUsd: number;
+  runs: number;
+  firstAt: string;
+  lastAt: string;
+  models: Set<string>;
+}
+
+/**
+ * 把时间戳归一到指定时区的日期（YYYY-MM-DD）。
+ *
+ * 此前用服务器本地时区，跨时区调用方会看到日期错位（例如 UTC+8 用户在
+ * 本地 00:30 的请求会被归到前一天）。记录里带了客户端时区就按其计算。
+ */
+function dayKey(ts: string, timeZone?: string | null): string {
   const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return String(ts).slice(0, 10);
+  if (timeZone) {
+    try {
+      // en-CA 的 toLocaleDateString 输出恰为 YYYY-MM-DD
+      return new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+    } catch { /* 时区非法则回落到服务器本地 */ }
+  }
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, '0');
   const dd = String(d.getDate()).padStart(2, '0');
   return `${y}-${m}-${dd}`;
 }
 
-/** 汇总统计：按天趋势、按模型分布、总计、今日/本周/本月。 */
+/** 汇总统计：按天趋势、按模型/项目/会话分布、总计、今日/本周/本月。 */
 export function getUsageStats() {
   const records = getUsageHistory();
   const byDay = new Map<string, DayBucket>();
   const byModel = new Map<string, ModelBucket>();
+  const byProject = new Map<string, ProjectBucket>();
+  const bySession = new Map<string, SessionBucket>();
 
   let totalInput = 0;
   let totalOutput = 0;
@@ -338,7 +399,7 @@ export function getUsageStats() {
     // 节省额按该条记录**自身发生时刻**的费率算 —— 峰谷价不同，用当前时刻
     // 会算错历史记录。
     const savings = estimateCacheSavingsUsd(r.model, cacheRead, new Date(r.timestamp));
-    const dk = dayKey(r.timestamp);
+    const dk = dayKey(r.timestamp, r.timezone);
     const db = byDay.get(dk) || { date: dk, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, costUsd: 0, savingsUsd: 0, runs: 0 };
     db.inputTokens += r.inputTokens || 0;
     db.outputTokens += r.outputTokens || 0;
@@ -357,6 +418,47 @@ export function getUsageStats() {
     mb.runs += 1;
     byModel.set(r.model, mb);
 
+    // 项目维度：未识别（null）也单独成组，避免被静默丢弃。
+    const pKey = r.project || '\u0000unattributed';
+    const pb = byProject.get(pKey) || {
+      project: r.project ?? null, sources: new Set<'label' | 'heuristic'>(),
+      inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, costUsd: 0, savingsUsd: 0,
+      runs: 0, sessions: new Set<string>(), lastAt: r.timestamp,
+    };
+    if (r.projectSource) pb.sources.add(r.projectSource);
+    pb.inputTokens += r.inputTokens || 0;
+    pb.outputTokens += r.outputTokens || 0;
+    pb.cacheReadTokens += cacheRead;
+    pb.costUsd += r.costUsd || 0;
+    pb.savingsUsd += savings;
+    pb.runs += 1;
+    if (r.sessionId) pb.sessions.add(r.sessionId);
+    if (r.timestamp > pb.lastAt) pb.lastAt = r.timestamp;
+    byProject.set(pKey, pb);
+
+    // 会话维度：仅统计有会话 ID 的记录（客户端声明值，不做猜测填充）。
+    if (r.sessionId) {
+      const sb = bySession.get(r.sessionId) || {
+        sessionId: r.sessionId, project: r.project ?? null,
+        projectSource: r.projectSource ?? null, sessionType: r.sessionType ?? null,
+        agent: r.agent ?? null, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0,
+        costUsd: 0, savingsUsd: 0, runs: 0, firstAt: r.timestamp, lastAt: r.timestamp,
+        models: new Set<string>(),
+      };
+      // 同一会话若跨了不同推断结果，保留首次的非空值，避免抖动。
+      if (!sb.project && r.project) { sb.project = r.project; sb.projectSource = r.projectSource ?? null; }
+      sb.inputTokens += r.inputTokens || 0;
+      sb.outputTokens += r.outputTokens || 0;
+      sb.cacheReadTokens += cacheRead;
+      sb.costUsd += r.costUsd || 0;
+      sb.savingsUsd += savings;
+      sb.runs += 1;
+      sb.models.add(r.model);
+      if (r.timestamp < sb.firstAt) sb.firstAt = r.timestamp;
+      if (r.timestamp > sb.lastAt) sb.lastAt = r.timestamp;
+      bySession.set(r.sessionId, sb);
+    }
+
     totalInput += r.inputTokens || 0;
     totalOutput += r.outputTokens || 0;
     totalCacheRead += cacheRead;
@@ -364,6 +466,10 @@ export function getUsageStats() {
     totalSavings += savings;
     if (r.status === 'FAILED') failures += 1;
   }
+
+  const withSessions = records.filter(r => r.sessionId).length;
+  const withProject = records.filter(r => r.project).length;
+  const withLabeledProject = records.filter(r => r.projectSource === 'label').length;
 
   const now = Date.now();
   const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
@@ -411,5 +517,34 @@ export function getUsageStats() {
     month: sum(month),
     byDay: Array.from(byDay.values()).sort((a, b) => a.date.localeCompare(b.date)),
     byModel: Array.from(byModel.values()).sort((a, b) => b.costUsd - a.costUsd),
+    // 项目维度（推断）：costSource 意义上的 projectSource 保留在每行上，
+    // 汇总时取"该项目下最强证据"，label 优先于 heuristic。
+    byProject: Array.from(byProject.values())
+      .map(p => ({
+        project: p.project,
+        projectSource: p.sources.has('label') ? ('label' as const) : p.sources.has('heuristic') ? ('heuristic' as const) : null,
+        inputTokens: p.inputTokens,
+        outputTokens: p.outputTokens,
+        cacheReadTokens: p.cacheReadTokens,
+        costUsd: p.costUsd,
+        savingsUsd: p.savingsUsd,
+        runs: p.runs,
+        sessionCount: p.sessions.size,
+        lastAt: p.lastAt,
+      }))
+      .sort((a, b) => b.costUsd - a.costUsd),
+    // 会话维度（客户端声明的事实性标识）。
+    bySession: Array.from(bySession.values())
+      .map(s => ({ ...s, models: Array.from(s.models) }))
+      .sort((a, b) => b.costUsd - a.costUsd),
+    attribution: {
+      /** 有会话 ID 的记录数（客户端声明值）。 */
+      sessionsIdentified: withSessions,
+      /** 有项目归属的记录数（含推断）。 */
+      projectsIdentified: withProject,
+      /** 其中来自显式标签字段（高置信）的记录数。 */
+      projectsLabeled: withLabeledProject,
+      totalRecords: records.length,
+    },
   };
 }
