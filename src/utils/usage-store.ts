@@ -249,7 +249,6 @@ export function estimateCostUsd(
 }
 
 let writeQueue: Promise<void> = Promise.resolve();
-let lastFlush = 0;
 
 /**
  * 历史文件大小上限（字节）。默认 20MB，可用环境变量 USAGE_HISTORY_MAX_MB 调整。
@@ -295,7 +294,6 @@ export function recordCompletion(entry: UsageRecord): void {
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       fs.appendFileSync(USAGE_FILE_PATH, line + '\n', 'utf-8');
       // 每 2s 最多 flush 一次（appendFileSync 本身立即落盘，此为保守节流说明）
-      lastFlush = Date.now();
 
       // 今日花费增量累计（跨日归零）；首条记录时从历史回填，重启不误报
       const now = new Date();
@@ -562,7 +560,7 @@ export function getUsageStats() {
   let totalCacheRead = 0;
   let totalCost = 0;
   let totalSavings = 0;
-  let totalRuns = records.length;
+  const totalRuns = records.length;
   let failures = 0;
 
   for (const r of records) {
@@ -642,7 +640,6 @@ export function getUsageStats() {
   const withProject = records.filter(r => r.project).length;
   const withLabeledProject = records.filter(r => r.projectSource === 'label').length;
 
-  const now = Date.now();
   const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
   const weekStart = new Date(); weekStart.setDate(weekStart.getDate() - 7); weekStart.setHours(0, 0, 0, 0);
   const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);

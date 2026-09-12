@@ -35,20 +35,10 @@ import { getCachedModels, MODELS_FILE_PATH } from '../utils/models.js';
 import { planName, planTier } from '../utils/plans.js';
 import { PROXY_VERSION } from '../utils/version.js';
 import { getUsageHistory, getUsageStats, clearUsageHistory, describeBillingWindow, getTimeOfDayModels, USAGE_FILE_PATH, getTodaySpendUsd } from '../utils/usage-store.js';
-import { recordQuotaSample, getQuotaProjection } from '../utils/quota-tracker.js';
+import { getQuotaProjection } from '../utils/quota-tracker.js';
 import { notify } from '../utils/notifier.js';
 
 const startTimestamp = Date.now();
-
-/** HTML 转义 —— 所有动态渲染进 SPA 的值都必须经过它。 */
-function esc(s: unknown): string {
-  return String(s ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
 
 export async function dashboardRoutes(fastify: FastifyInstance) {
   // 仅对公共 API 表面（/v1/*）开放 CORS。管理 /api/* 路由不发 CORS 头，
@@ -156,6 +146,7 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
       },
       limits: {
         maxBodyMb: Math.round(resolveBodyLimit() / 1048576),
+        todaySpendUsd: Math.round(getTodaySpendUsd() * 100) / 100,
         maxUpstreamConcurrency: process.env.MAX_UPSTREAM_CONCURRENCY || 'unlimited',
         dailyBudgetUsd: process.env.DAILY_BUDGET_USD || 'off',
       },

@@ -142,7 +142,7 @@ export function assertSafeUpstreamUrl(rawUrl: string): URL {
   try {
     url = new URL(String(rawUrl));
   } catch (e: any) {
-    throw new Error(`[NET] Invalid upstream URL: ${e?.message || 'parse error'}`);
+    throw new Error(`[NET] Invalid upstream URL: ${e?.message || 'parse error'}`, { cause: e });
   }
   if (url.username || url.password) {
     throw new Error('[NET] Upstream URL must not embed credentials');
@@ -265,7 +265,7 @@ export function loadConfig(): GatewayConfig {
     process.env.ROTATION_MODE === 'auto-quota' || fileConfig.rotationMode === 'auto-quota'
       ? 'auto-quota'
       : 'manual';
-  let accounts: AccountInfo[] = Array.isArray(fileConfig.accounts) ? fileConfig.accounts : [];
+  const accounts: AccountInfo[] = Array.isArray(fileConfig.accounts) ? fileConfig.accounts : [];
   if (accounts.length === 0) {
     const { apiKey: sysKey, source } = loadDefaultApiKeyFromEnvOrSystem();
     if (sysKey) {

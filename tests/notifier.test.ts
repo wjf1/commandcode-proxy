@@ -8,7 +8,7 @@
 //      静默吞掉（实测 Win11 会丢弃未注册 AUMID 的 toast 且不报错）。
 // 不对真实注册表/toast 做断言 —— 那属于手工验证项。
 // =============================================================================
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import {
   shouldSend,
   notificationsEnabled,

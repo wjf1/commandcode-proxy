@@ -18,7 +18,7 @@ import { sendToCC, isAbortError, estimateTextTokens } from '../adapters/commandc
 import { accumulateUsage, createUsageAccumulator } from '../adapters/commandcode/usage.js';
 import { buildRequestContext } from '../utils/request-context.js';
 import { hardenConnectionForLongStream, persistCompletion, writeSSEHeaders, parseEventLine } from './sse-common.js';
-import { OpenAIChatRequest, CCEvent } from '../types/index.js';
+import { OpenAIChatRequest } from '../types/index.js';
 import { getActiveApiKey, getGatewayRunning, checkAndRotateAccountsOnQuota } from '../utils/config.js';
 import { logger } from '../utils/logger.js';
 import { ErrorCode, ProxyError, toProxyError } from '../utils/errors.js';

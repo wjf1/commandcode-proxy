@@ -7,7 +7,13 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # ubuntu 是基线；windows 是本项目的主要部署形态（start.cmd / 计划任务 /
+        # pkg exe / 注册表通知），必须同缸回归路径分隔符与 spawn 行为差异
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -19,6 +25,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Lint
+        run: npm run lint
+
       - name: Typecheck
         run: npm run typecheck
 
@@ -28,3 +37,8 @@ jobs:
 
       - name: Test
         run: npx vitest run
+
+      # 覆盖率只在基线系统跑一份，避免矩阵重复
+      - name: Coverage
+        if: matrix.os == 'ubuntu-latest'
+        run: npx vitest run --coverage --coverage.reporter=text-summary

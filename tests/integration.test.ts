@@ -8,8 +8,20 @@ import path from 'node:path';
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8')) as { version: string };
 
-const MOCK_PORT = 9911;
-const PROXY_PORT = 9091;
+// 随机空闲端口：多人并行跑测试或端口被占时不再假失败。
+async function getFreePort(): Promise<number> {
+  const net = await import('node:net');
+  return await new Promise((resolve, reject) => {
+    const srv = new net.default.createServer();
+    srv.listen(0, '127.0.0.1', () => {
+      const addr = srv.address() as net.AddressInfo;
+      srv.close(() => resolve(addr.port));
+    });
+    srv.on('error', reject);
+  });
+}
+const MOCK_PORT = await getFreePort();
+const PROXY_PORT = await getFreePort();
 const PROXY_BASE = `http://127.0.0.1:${PROXY_PORT}`;
 
 // 集成测试启动的是编译产物 dist/index.js；干净克隆上没有 dist 会必然超时。
@@ -19,7 +31,7 @@ const distReady = existsSync(DIST_ENTRY);
 
 let mockServer: http.Server;
 let proxyProcess: ChildProcess;
-let capturedBodies: any[] = [];
+const capturedBodies: any[] = [];
 
 /** Build an SSE response body from CC events. */
 function sse(events: any[]): string {
@@ -411,7 +423,7 @@ describe.skipIf(!distReady)('OpenAI /v1/chat/completions — real-client feel', 
 
 describe.skipIf(!distReady)('Reasoning effort mapping (verified on the wire)', () => {
   async function captureEffort(model: string, effort?: string | number) {
-    const before = capturedBodies.length;
+    const _before = capturedBodies.length;
     await fetch(`${PROXY_BASE}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

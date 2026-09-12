@@ -16,7 +16,6 @@ import {
   OpenAIChatRequest,
   OpenAIMessage,
   AnthropicRequest,
-  AnthropicMessage,
   AnthropicContentBlock,
   CCRequestBody,
   CCMessage,
@@ -27,7 +26,6 @@ import {
   StreamEncoderState,
 } from '../../types/index.js';
 import { resolveModelName } from '../../utils/models.js';
-import { logger } from '../../utils/logger.js';
 import { parseUsd } from './usage.js';
 import { estimateTextTokens } from './upstream.js';
 
@@ -309,7 +307,7 @@ export class CommandCodeAdapter {
         }
         if (m.tool_calls && m.tool_calls.length > 0) {
           for (const tc of m.tool_calls) {
-            let parsedInput: Record<string, unknown> = {};
+            let parsedInput: Record<string, unknown>;
             try {
               parsedInput =
                 typeof tc.function.arguments === 'string'

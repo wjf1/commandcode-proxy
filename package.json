@@ -26,7 +26,9 @@
     "build:exe": "npm run build && esbuild dist/index.js --bundle --platform=node --format=cjs --outfile=dist/bundle.cjs --external:fsevents",
     "build:win": "npm run build:exe && pkg dist/bundle.cjs --target node18-win-x64 --output dist/commandcode-proxy-v4.exe --compress GZip",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test:coverage": "vitest run --coverage"
   },
   "pkg": {
     "assets": [
@@ -44,11 +46,15 @@
   ],
   "license": "MIT",
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^20.19.43",
+    "@vitest/coverage-v8": "^2.1.9",
     "esbuild": "^0.21.0",
+    "eslint": "^10.10.0",
     "pkg": "^5.8.1",
     "tsx": "^4.11.0",
     "typescript": "^5.5.0",
+    "typescript-eslint": "^8.70.0",
     "vitest": "^2.0.0"
   },
   "dependencies": {

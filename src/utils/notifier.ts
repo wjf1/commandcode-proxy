@@ -107,7 +107,6 @@ export function resetAumidState(): void {
 // 不会有任何痕迹 —— 且**所有应用**（包括 electron.app.ZCode 自己）都一样。
 // 因此这里主动读取该开关：关闭时不再白白 spawn PowerShell，并把原因讲清楚。
 
-const TOAST_ENABLED_REG = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\PushNotifications';
 /**
  * 用 reg.exe 的**绝对路径**：实测不带路径时解析结果随调用方 PATH 而异
  * （本机调试环境曾解析到行为不同的 reg，报"无效语法"），写死系统目录

@@ -32,6 +32,7 @@ function sanitize(message: string): string {
   return String(message)
     // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+    // eslint-disable-next-line no-control-regex -- \u001B(ESC) 即目标清洗字符
     .replace(/\u001B\[[0-9;]*[A-Za-z]/g, '');
 }
 

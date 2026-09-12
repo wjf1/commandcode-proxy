@@ -166,6 +166,7 @@ export function normalizeProjectPath(raw: string): string | null {
   if (!isWinAbs && !isPosixAbs) return null;
   if (NOISE_PATH_RE.test(s)) return null;
   // 只保留路径合法字符，防止把整句话当成路径
+  // eslint-disable-next-line no-useless-escape -- 字符类转义保持自文档正则
   if (!/^[\w\s.:\\/~\-+@()\[\]]+$/.test(s)) return null;
   if (s.length > 200) return null;
 

@@ -16,8 +16,6 @@ import { logger } from './logger.js';
 import { buildAvailabilityMap } from './plans.js';
 import { ModelItem, ModelPricing, ModelCaps, ModelDeal, TimeOfDayPricing } from '../types/index.js';
 
-export interface UpstreamModel extends ModelItem {}
-
 export const MODELS_FILE_PATH = process.env.COMMANDCODE_MODELS_CACHE_PATH
   ? path.resolve(process.env.COMMANDCODE_MODELS_CACHE_PATH)
   : path.join(getProjectRootDir(), 'models.json');
@@ -65,12 +63,6 @@ function savePersistedModels(models: ModelItem[]): void {
   } catch (err: any) {
     logger.error(`[MODELS] Error saving models.json: ${err.message}`);
   }
-}
-
-function hasModelsChanged(existing: ModelItem[], fresh: ModelItem[]): boolean {
-  if (existing.length !== fresh.length) return true;
-  const existingIds = new Set(existing.map(m => m.id));
-  return fresh.some(m => !existingIds.has(m.id));
 }
 
 export function getCachedModels(): ModelItem[] {
@@ -454,7 +446,7 @@ export function resolveModelName(requestedModel: string): string {
 
   if (available.some(m => m.id === raw)) return raw;
 
-  let clean = raw.replace(/^([a-z0-9_-]+)[:\/]/i, '').trim();
+  const clean = raw.replace(/^([a-z0-9_-]+)[:/]/i, '').trim();
   if (available.some(m => m.id === clean)) {
     logger.info(`[MODELS] Resolved '${requestedModel}' -> '${clean}'`);
     return clean;

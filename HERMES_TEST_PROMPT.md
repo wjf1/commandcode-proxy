@@ -31,6 +31,7 @@ as a client. Everything you need is at `http://127.0.0.1:9090`.
 
 - `POST /v1/chat/completions` — main target
 - `POST /v1/messages` — Anthropic-style (secondary; test if time permits)
+- `POST /v1/messages/count_tokens` — local token estimate (CJK-aware; never calls upstream, safe to call anytime)
 - `GET  /v1/models` — list available model ids first; pick 2-3 for your tests (one claude, one gpt, one other)
 - `GET  /health` — confirm proxy is up before starting
 
@@ -51,7 +52,8 @@ Verify against OpenAI spec:
 - Last data chunk: `delta: {}` with `finish_reason: "stop"`
 - Very last line: `data: [DONE]`
 - All chunks share the same `id`/`created`/`model`
-Report: chunk count, any chunk missing fields, any ` thinking` text leaking into `content`.
+Report: chunk count, any chunk missing fields, any raw `<think>` tag text leaking into `content`.
+Extra: repeat with `stream_options: {include_usage: true}` — the final chunk should carry a `usage` object. Without that flag, no chunk should contain a `usage` field.
 
 ### T3 — Reasoning / thinking visibility
 Send with `reasoning_effort: "high"` (and separately omit it).
@@ -103,8 +105,10 @@ Verify: no 400/500 error, model responds about the image (even vaguely). Report 
 ### T10 — Model resolution
 Request a model with a vendor prefix (e.g. `"openai/gpt-5.6-sol"` if `gpt-5.6-sol` exists) and
 an unknown model (`"definitely-not-a-real-model"`).
-Verify: prefix version works (proxy strips/aliases); unknown falls back to a valid model rather
-than erroring — and the RESPONSE `model` field tells you which was actually used.
+Verify: prefix version works (proxy strips/aliases), and the RESPONSE `model` field tells you which
+was actually used. An unknown model id is passed through **as-is** to upstream (since 4.9 — the proxy
+must NOT silently substitute a default model), so expect a structured upstream error with a stable
+`code` (e.g. `MODEL_NOT_FOUND`) rather than a fabricated response.
 
 ### T11 — Edge inputs
 - Very long message (~20k chars): should not error.
@@ -118,6 +122,11 @@ than erroring — and the RESPONSE `model` field tells you which was actually us
 - Request with a paused/stopped engine (if dashboard allows toggling) → expect clean 503 error JSON, not a hang.
 - If any upstream error surfaces mid-stream, verify it arrives as a content chunk containing
   `[Upstream Error: ...]` followed by a proper finish + [DONE] (stream must always terminate cleanly).
+
+### T13 — Unsupported fields are accepted silently
+Send a request containing `stop: ["x"]`, `response_format: {type: "json_object"}`, `top_k`, and `logprobs`.
+Verify: no 4xx/5xx and a normal response comes back. These fields are **accepted but ignored** by design
+(documented in README) — report only if the proxy errors or the response envelope is malformed.
 
 ---
 
