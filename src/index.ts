@@ -20,6 +20,8 @@ import { messagesRoutes } from './routes/messages.js';
 import { modelsRoutes } from './routes/models.js';
 import { dashboardRoutes } from './routes/dashboard.js';
 import { recordQuotaSample, getQuotaProjection } from './utils/quota-tracker.js';
+import { flushPendingWrites } from './utils/usage-store.js';
+import { scheduleUpdateChecks } from './utils/update-check.js';
 import { notify, ensureAumidRegistered, isGlobalToastEnabled } from './utils/notifier.js';
 
 // 未捕获异常/拒绝：单次只记日志（代理要尽量活着）。
@@ -89,6 +91,24 @@ async function sampleQuotaWindow(): Promise<void> {
     logger.warn(`[QUOTA-SAMPLE] ${err?.message || err}`);
   }
 }
+
+// 优雅退出：SIGINT/SIGTERM 时先冲刷挂起的用量写入（内存写队列）再关闭，
+// 避免 Ctrl+C 丢掉最后一两条会话记录。二次信号直接强制退出。
+let shuttingDown = false;
+async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  logger.info(`[SERVER] ${signal} received; flushing pending usage writes and closing...`);
+  try {
+    await flushPendingWrites();
+  } catch { /* 尽力而为 */ }
+  try {
+    await fastify.close();
+  } catch { /* 尽力而为 */ }
+  process.exit(0);
+}
+process.on('SIGINT', () => void shutdown('SIGINT'));
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
 
 const start = async () => {
   try {
@@ -168,6 +188,7 @@ const start = async () => {
     console.log('=============================================================\n');
 
     logger.info(`[SERVER] CommandCode Proxy v4 running on ${dashboardUrl}`);
+    scheduleUpdateChecks();
 
     // 绑定到非回环地址 = API 与管理面对整个局域网可见。未设共享密钥时必须讲清楚后果。
     if (!['127.0.0.1', 'localhost', '::1'].includes(config.host) && !process.env.PROXY_API_KEY) {

@@ -33,7 +33,6 @@ const DEFAULTS = {
   apiBase: 'https://api.commandcode.ai',
   ccVersion: '1.27.1',
   rotationMode: 'manual' as const,
-  permissionMode: 'auto-accept',
   upstreamTimeoutMs: 600_000,
   idleTimeoutMs: 120_000,
   maxRetries: 2,
@@ -201,15 +200,59 @@ export function defaultAccountName(apiKey: string, source: 'env' | 'auth.json' |
   return `${label} (尾4位 ${tail})`;
 }
 
-export function loadConfig(): GatewayConfig {
-  let fileConfig: Partial<GatewayConfigFile> = {};
-  if (fs.existsSync(CONFIG_FILE_PATH)) {
-    try {
-      fileConfig = JSON.parse(fs.readFileSync(CONFIG_FILE_PATH, 'utf-8'));
-    } catch (err: any) {
-      logger.error(`[CONFIG] Error reading config.json: ${err.message}`);
+/**
+ * 解析项目根的 .env（KEY=VALUE、# 注释、成对引号），**已存在的环境变量优先**，
+ * 因此 docker/systemd 等外部注入不受影响。与 syncEnvFile 的写入形成闭环：
+ * 仪表盘添加账号后 .env 会同步最新 Key，重启即生效，无需手动 export。
+ */
+let envLoaded = false;
+function loadEnvFileOnce(): void {
+  if (envLoaded) return;
+  envLoaded = true;
+  try {
+    if (!fs.existsSync(ENV_FILE_PATH)) return;
+    for (const raw of fs.readFileSync(ENV_FILE_PATH, 'utf-8').split(/\r?\n/)) {
+      const line = raw.trim();
+      if (!line || line.startsWith('#')) continue;
+      const eq = line.indexOf('=');
+      if (eq <= 0) continue;
+      const key = line.slice(0, eq).trim();
+      let val = line.slice(eq + 1).trim();
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1);
+      }
+      if (key && process.env[key] === undefined) process.env[key] = val;
     }
+  } catch (err: any) {
+    logger.warn(`[CONFIG] Could not load .env: ${err.message}`);
   }
+}
+
+/** config.json 的 mtime 缓存：文件未变时跳过每请求的读盘+解析。 */
+let configFileCache: { mtimeMs: number; size: number; data: Partial<GatewayConfigFile> } | null = null;
+
+function readFileConfig(): Partial<GatewayConfigFile> {
+  try {
+    if (!fs.existsSync(CONFIG_FILE_PATH)) {
+      configFileCache = null;
+      return {};
+    }
+    const st = fs.statSync(CONFIG_FILE_PATH);
+    if (configFileCache && configFileCache.mtimeMs === st.mtimeMs && configFileCache.size === st.size) {
+      return configFileCache.data;
+    }
+    const data = JSON.parse(fs.readFileSync(CONFIG_FILE_PATH, 'utf-8')) as Partial<GatewayConfigFile>;
+    configFileCache = { mtimeMs: st.mtimeMs, size: st.size, data };
+    return data;
+  } catch (err: any) {
+    logger.error(`[CONFIG] Error reading config.json: ${err.message}`);
+    return {};
+  }
+}
+
+export function loadConfig(): GatewayConfig {
+  loadEnvFileOnce();
+  const fileConfig = readFileConfig();
 
   const envPort = process.env.PORT ? parseInt(process.env.PORT, 10) : undefined;
   const port = envPort || fileConfig.port || DEFAULTS.port;
@@ -222,8 +265,6 @@ export function loadConfig(): GatewayConfig {
     process.env.ROTATION_MODE === 'auto-quota' || fileConfig.rotationMode === 'auto-quota'
       ? 'auto-quota'
       : 'manual';
-  const permissionMode = fileConfig.permissionMode || DEFAULTS.permissionMode;
-
   let accounts: AccountInfo[] = Array.isArray(fileConfig.accounts) ? fileConfig.accounts : [];
   if (accounts.length === 0) {
     const { apiKey: sysKey, source } = loadDefaultApiKeyFromEnvOrSystem();
@@ -248,7 +289,6 @@ export function loadConfig(): GatewayConfig {
     ccApiBase,
     ccVersion,
     rotationMode,
-    permissionMode,
     activeAccountId,
     accounts,
     upstreamTimeoutMs: fileConfig.upstream?.timeoutMs || DEFAULTS.upstreamTimeoutMs,
@@ -272,7 +312,6 @@ export function saveConfigFile(updates: Partial<GatewayConfigFile>): void {
       host: updates.host ?? current.host ?? DEFAULTS.host,
       activeAccountId: updates.activeAccountId ?? current.activeAccountId ?? '',
       rotationMode: updates.rotationMode ?? current.rotationMode ?? 'manual',
-      permissionMode: updates.permissionMode ?? current.permissionMode ?? DEFAULTS.permissionMode,
       accounts: updates.accounts ?? current.accounts ?? [],
       upstream: {
         apiBase: updates.upstream?.apiBase ?? current.upstream?.apiBase ?? DEFAULTS.apiBase,

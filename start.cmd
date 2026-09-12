@@ -11,4 +11,6 @@ if exist "%ProgramFiles%\nodejs\node.exe" set "NODE=%ProgramFiles%\nodejs\node.e
 if not defined NODE if exist "%LOCALAPPDATA%\Programs\nodejs\node.exe" set "NODE=%LOCALAPPDATA%\Programs\nodejs\node.exe"
 if not defined NODE if exist "%ProgramFiles(x86)%\nodejs\node.exe" set "NODE=%ProgramFiles(x86)%\nodejs\node.exe"
 if not defined NODE set "NODE=node"
-"%NODE%" dist/index.js >> logs\proxy.log 2>&1
+rem Logger persists to logs/proxy.log itself; keep console output separate
+rem (two writers on one file would interleave/corrupt lines).
+"%NODE%" dist/index.js >> logs\console.log 2>&1

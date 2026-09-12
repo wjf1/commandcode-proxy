@@ -56,6 +56,9 @@ export function verifyProxyAuth(fastify: FastifyInstance): void {
 
   fastify.addHook('onRequest', async (req: FastifyRequest, reply: FastifyReply) => {
     if (!req.url.startsWith('/v1/') && !req.url.startsWith('/api/')) return;
+    // CORS 预检请求不携带自定义头（含鉴权），必须放行，否则浏览器客户端
+    // 在设置 PROXY_API_KEY 后连预检都过不去。
+    if (req.method === 'OPTIONS') return;
     const header = req.headers.authorization || '';
     const bearer = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
     const xKey = String(req.headers['x-api-key'] || '').trim();
@@ -123,7 +126,10 @@ export async function chatRoutes(fastify: FastifyInstance) {
         const proxyErr = toProxyError(err, ErrorCode.PROVIDER_PROTOCOL_ERROR);
         if (body.stream) {
           writeSSEHeaders(reply);
-          const state = adapter.createStreamEncoderState(modelName);
+          const state = adapter.createStreamEncoderState(modelName, {
+          includeUsage: body.stream_options?.include_usage === true,
+          estimatedInputTokens: inputTokens,
+        });
           // 流已经开始后无法再改 HTTP 状态码，把稳定错误码并入内容，便于调用方自愈。
           for (const c of adapter.encodeOpenAIChunk({ type: 'error', error: { message: `${proxyErr.code}: ${proxyErr.message}` } }, state)) {
             reply.raw.write(c);
@@ -138,7 +144,10 @@ export async function chatRoutes(fastify: FastifyInstance) {
 
       if (body.stream) {
         writeSSEHeaders(reply);
-        const state = adapter.createStreamEncoderState(modelName);
+        const state = adapter.createStreamEncoderState(modelName, {
+          includeUsage: body.stream_options?.include_usage === true,
+          estimatedInputTokens: inputTokens,
+        });
         for (const c of adapter.encodeOpenAIChunk({ type: 'start' }, state)) reply.raw.write(c);
 
         // 每 15s 发一条 SSE 注释行 —— 防止 CDN/代理的空闲断开。

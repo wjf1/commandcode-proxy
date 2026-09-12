@@ -10,6 +10,7 @@ async function buildApp() {
   verifyProxyAuth(app);
   app.get('/v1/ping', async () => ({ ok: true }));
   app.post('/v1/messages', async () => ({ ok: true }));
+  app.options('/v1/chat/completions', async () => ({ ok: true }));
   app.get('/api/status', async () => ({ ok: true }));
   app.get('/health', async () => ({ ok: true }));
   await app.ready();
@@ -61,6 +62,14 @@ describe('verifyProxyAuth — PROXY_API_KEY set', () => {
   it('leaves non-protected paths (e.g. /health, dashboard /) open', async () => {
     const app = await buildApp();
     expect((await app.inject({ method: 'GET', url: '/health' })).statusCode).toBe(200);
+    await app.close();
+  });
+
+  it('exempts CORS preflight (OPTIONS) from auth — browsers send no auth headers on preflight', async () => {
+    const app = await buildApp();
+    expect(
+      (await app.inject({ method: 'OPTIONS', url: '/v1/chat/completions', headers: { origin: 'https://web.example' } })).statusCode
+    ).toBe(200);
     await app.close();
   });
 });

@@ -17,6 +17,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { getCachedModels } from './models.js';
+import { notify } from './notifier.js';
 import { logger } from './logger.js';
 import { ModelItem, ModelPricing } from '../types/index.js';
 
@@ -60,7 +61,7 @@ export interface UsageRecord {
   timezone?: string;
 }
 
-const USAGE_FILE_PATH = process.env.USAGE_HISTORY_PATH
+export const USAGE_FILE_PATH = process.env.USAGE_HISTORY_PATH
   ? path.resolve(process.env.USAGE_HISTORY_PATH)
   : path.join(os.homedir(), '.commandcode', 'usage-history.jsonl');
 
@@ -295,10 +296,73 @@ export function recordCompletion(entry: UsageRecord): void {
       fs.appendFileSync(USAGE_FILE_PATH, line + '\n', 'utf-8');
       // 每 2s 最多 flush 一次（appendFileSync 本身立即落盘，此为保守节流说明）
       lastFlush = Date.now();
+
+      // 今日花费增量累计（跨日归零）；首条记录时从历史回填，重启不误报
+      const now = new Date();
+      const k = localDateKey(now);
+      if (!todayInitialized) {
+        todayInitialized = true;
+        todayKey = k;
+        try {
+          todaySpend = getUsageHistory()
+            .filter(r => localDateKey(new Date(r.timestamp)) === k)
+            .reduce((acc, r) => acc + (r.costUsd || 0), 0);
+        } catch {
+          todaySpend = 0;
+        }
+      } else if (k !== todayKey) {
+        todayKey = k;
+        todaySpend = 0;
+        budgetNotifiedOn = null;
+      }
+      todaySpend += entry.costUsd || 0;
+      checkDailyBudget();
     } catch (err: any) {
       logger.warn(`[USAGE] Failed to append usage history: ${err.message}`);
     }
   });
+}
+
+// ─── 今日花费追踪（每日预算告警用）─────────────────────────────────────────
+// 进程内增量累计；启动后第一条记录时从历史回填当日已计费金额（重启不误报）。
+let todayKey = '';
+let todaySpend = 0;
+let todayInitialized = false;
+let budgetNotifiedOn: string | null = null;
+
+function localDateKey(d: Date): string {
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${d.getFullYear()}-${m}-${day}`;
+}
+
+/** 今日（服务器本地日）已计费金额，供仪表盘与预算检查使用。 */
+export function getTodaySpendUsd(): number {
+  return todaySpend;
+}
+
+/**
+ * 每日预算检查：DAILY_BUDGET_USD 设置后，当日累计成本达到阈值时弹一次
+ * toast（每日最多提醒一次）。未设置/非正数 = 关闭。
+ */
+export function checkDailyBudget(): void {
+  const budget = Number(process.env.DAILY_BUDGET_USD);
+  if (!Number.isFinite(budget) || budget <= 0) return;
+  const today = localDateKey(new Date());
+  if (todaySpend < budget || budgetNotifiedOn === today) return;
+  budgetNotifiedOn = today;
+  notify(
+    'daily-budget',
+    'CommandCode 今日花费已达预算',
+    `今日已计费 $${todaySpend.toFixed(2)}（阈值 $${budget.toFixed(2)}）`,
+    'warn',
+  );
+  logger.info(`[BUDGET] Daily spend $${todaySpend.toFixed(2)} >= budget $${budget.toFixed(2)}`);
+}
+
+/** 等待挂起的写入完成（优雅退出时避免丢最后一两条用量记录）。 */
+export function flushPendingWrites(): Promise<void> {
+  return writeQueue;
 }
 
 /** 清空全部历史。 */
@@ -306,6 +370,9 @@ export function clearUsageHistory(): void {
   try {
     if (fs.existsSync(USAGE_FILE_PATH)) {
       fs.writeFileSync(USAGE_FILE_PATH, '', 'utf-8');
+      historyCache = null;
+      todaySpend = 0;
+      todayInitialized = true;
       logger.info('[USAGE] Usage history file cleared.');
     }
   } catch (err: any) {
@@ -314,9 +381,20 @@ export function clearUsageHistory(): void {
 }
 
 /** 读取全部会话历史（JSONL 逐行解析，容错跳过损坏行）。 */
+/** 历史文件缓存：mtime+size 未变时复用上次解析结果（仪表盘 30s 轮询复用）。 */
+let historyCache: { mtimeMs: number; size: number; records: UsageRecord[] } | null = null;
+
+/** 读取全部会话历史（JSONL 逐行解析，容错跳过损坏行）。 */
 export function getUsageHistory(): UsageRecord[] {
   try {
-    if (!fs.existsSync(USAGE_FILE_PATH)) return [];
+    if (!fs.existsSync(USAGE_FILE_PATH)) {
+      historyCache = null;
+      return [];
+    }
+    const st = fs.statSync(USAGE_FILE_PATH);
+    if (historyCache && historyCache.mtimeMs === st.mtimeMs && historyCache.size === st.size) {
+      return historyCache.records;
+    }
     const raw = fs.readFileSync(USAGE_FILE_PATH, 'utf-8');
     const out: UsageRecord[] = [];
     for (const line of raw.split('\n')) {
@@ -331,6 +409,7 @@ export function getUsageHistory(): UsageRecord[] {
         // 跳过损坏行
       }
     }
+    historyCache = { mtimeMs: st.mtimeMs, size: st.size, records: out };
     return out;
   } catch (err: any) {
     logger.warn(`[USAGE] Error reading usage history: ${err.message}`);

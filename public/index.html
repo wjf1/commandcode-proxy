@@ -16,7 +16,7 @@
   <div class="flex items-center space-x-3">
     <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-600 to-violet-500 flex items-center justify-center text-white shadow-lg shadow-indigo-500/20"><i class="fa-solid fa-bolt text-lg"></i></div>
     <div>
-      <h1 class="font-bold text-lg leading-tight text-white flex items-center gap-2">CommandCode 代理 <span class="text-xs font-semibold px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">v4</span></h1>
+      <h1 class="font-bold text-lg leading-tight text-white flex items-center gap-2">CommandCode 代理 <span class="text-xs font-semibold px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">v4</span><a id="updateBadge" href="https://github.com/wjf1/commandcode-proxy/releases" target="_blank" rel="noopener" class="hidden text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 hover:bg-amber-500/20"><i class="fa-solid fa-arrow-up-right-from-square text-[9px]"></i> 新版本 <span id="updateVer"></span></a></h1>
       <p class="text-xs text-slate-400">OpenAI Chat 与 Anthropic Messages 兼容网关</p>
     </div>
   </div>
@@ -175,6 +175,7 @@
     <div class="mt-4 bg-slate-950/40 border border-slate-800 rounded-lg overflow-hidden">
       <div class="flex items-center justify-between px-4 py-2.5 border-b border-slate-800">
         <h3 class="font-bold text-xs text-white"><i class="fa-solid fa-table-list text-emerald-400"></i> 请求明细</h3>
+        <button onclick="exportUsageCsv()" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] rounded-lg border border-slate-700 flex items-center gap-1.5"><i class="fa-solid fa-file-csv"></i> 导出 CSV</button>
         <span id="usageRecentCount" class="text-[11px] text-slate-400"></span>
       </div>
       <div class="overflow-x-auto max-h-[360px] overflow-y-auto">
@@ -381,6 +382,11 @@ async function fetchStatus() {
       bindEl.title = '';
     }
     document.getElementById('statAuth').innerText = 'API 鉴权：' + (data.authRequired ? '开' : '关');
+    const ub = document.getElementById('updateBadge');
+    if (ub && data.update && data.update.available) {
+      ub.classList.remove('hidden');
+      document.getElementById('updateVer').innerText = data.update.latest;
+    }
     document.getElementById('statModels').innerText = data.modelsCount;
     document.getElementById('rotationSelect').value = data.rotationMode;
   } catch {}
@@ -451,7 +457,7 @@ function bindAccountActionsOnce() {
   if (!grid || grid.dataset.bound) return;
   grid.dataset.bound = '1';
   grid.addEventListener('click', (e) => {
-    const btn = (e.target as HTMLElement).closest('[data-action]') as HTMLElement | null;
+    const btn = e.target instanceof Element ? e.target.closest('[data-action]') : null;
     if (!btn) return;
     const id = btn.dataset.id || '';
     if (btn.dataset.action === 'activate') setActiveAcc(id);
@@ -913,6 +919,22 @@ function renderBillingWindow(billing){
       '</div>' +
       '<div class="flex gap-2 flex-wrap mt-2 text-[11px]">' + rows + '</div>' +
     '</div>';
+}
+
+function exportUsageCsv() {
+  const rows = (usageHistoryCache && usageHistoryCache.recent) || [];
+  if (!rows.length) { showToast('暂无可导出的记录', 'info'); return; }
+  const q = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
+  const head = ['timestamp','model','inputTokens','cacheReadTokens','outputTokens','timingMs','costUsd','costSource','status','mode','sessionId','project'];
+  const lines = [head.join(',')].concat(rows.map(r => [r.timestamp, r.model, r.inputTokens || 0, r.cacheReadTokens || 0, r.outputTokens || 0, r.timingMs || 0,
+    r.costUsd || 0, r.costSource || '', r.status, r.mode, r.sessionId || '', r.project || ''].map(q).join(',')));
+  const blob = new Blob(['\uFEFF' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'commandcode-usage-' + new Date().toISOString().slice(0, 10) + '.csv';
+  a.click();
+  URL.revokeObjectURL(a.href);
+  showToast('已导出 ' + rows.length + ' 条记录', 'success');
 }
 
 function renderUsageTable(recent){

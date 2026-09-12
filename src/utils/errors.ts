@@ -31,6 +31,7 @@ export const ErrorCode = {
   CATALOG_UNAVAILABLE: 'CATALOG_UNAVAILABLE',
   BLOCKED_HOST: 'BLOCKED_HOST',
   GATEWAY_PAUSED: 'GATEWAY_PAUSED',
+  GATEWAY_BUSY: 'GATEWAY_BUSY',
   INTERNAL_ERROR: 'INTERNAL_ERROR',
 } as const;
 
@@ -70,6 +71,8 @@ const HINTS: Record<ErrorCodeName, string> = {
     'The upstream URL was rejected by the SSRF guard: non-http(s), embedded credentials, private/loopback host, or a domain outside the allowlist.',
   GATEWAY_PAUSED:
     'The gateway engine is paused. Resume it from the dashboard or via POST /api/gateway/toggle.',
+  GATEWAY_BUSY:
+    'Too many concurrent upstream requests (MAX_UPSTREAM_CONCURRENCY). Retry with backoff or raise the limit.',
   INTERNAL_ERROR:
     'Unexpected proxy-side failure. Check the dashboard log tab for the underlying stack trace.',
 };
@@ -117,6 +120,7 @@ const STATUS_BY_CODE: Record<ErrorCodeName, number> = {
   BLOCKED_HOST: 500,
   CATALOG_UNAVAILABLE: 503,
   GATEWAY_PAUSED: 503,
+  GATEWAY_BUSY: 503,
   REQUEST_TIMEOUT: 504,
   STREAM_IDLE_TIMEOUT: 504,
   NETWORK_ERROR: 502,
@@ -138,6 +142,7 @@ const OPENAI_TYPE: Record<ErrorCodeName, string> = {
   BLOCKED_HOST: 'api_error',
   CATALOG_UNAVAILABLE: 'api_error',
   GATEWAY_PAUSED: 'api_error',
+  GATEWAY_BUSY: 'api_error',
   REQUEST_TIMEOUT: 'api_error',
   STREAM_IDLE_TIMEOUT: 'api_error',
   NETWORK_ERROR: 'api_error',
@@ -159,6 +164,7 @@ const ANTHROPIC_TYPE: Record<ErrorCodeName, string> = {
   BLOCKED_HOST: 'api_error',
   CATALOG_UNAVAILABLE: 'api_error',
   GATEWAY_PAUSED: 'api_error',
+  GATEWAY_BUSY: 'api_error',
   REQUEST_TIMEOUT: 'api_error',
   STREAM_IDLE_TIMEOUT: 'api_error',
   NETWORK_ERROR: 'api_error',

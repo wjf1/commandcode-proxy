@@ -538,7 +538,10 @@ export class CommandCodeAdapter {
 
   // ── 流式编码器状态 ──────────────────────────────────────────────────────────
 
-  createStreamEncoderState(model: string): StreamEncoderState {
+  createStreamEncoderState(
+    model: string,
+    opts?: { includeUsage?: boolean; estimatedInputTokens?: number },
+  ): StreamEncoderState {
     return {
       id: `chatcmpl-${crypto.randomUUID().slice(0, 8)}`,
       created: Math.floor(Date.now() / 1000),
@@ -547,8 +550,8 @@ export class CommandCodeAdapter {
       toolCallIdToIndex: new Map<string, number>(),
       sawFinish: false,
       hasEmittedText: false,
-      promptTokens: 0,
-      completionTokens: 0,
+      includeUsage: opts?.includeUsage === true,
+      estimatedInputTokens: opts?.estimatedInputTokens,
       thinkingState: 'none',
       inputTokens: 0,
       outputTokens: 0,
@@ -724,7 +727,21 @@ export class CommandCodeAdapter {
           : rawFR === 'length' || rawFR === 'max_tokens'
             ? 'length'
             : 'stop';
-      chunks.push(this.openAIDelta(state, {}, finishReason));
+      // OpenAI 语义：stream_options.include_usage 时收尾 chunk 携带 usage
+      //（输入量优先用上游 totalUsage，缺失时回落本地估算）。
+      if (state.includeUsage) {
+        const pt = state.inputTokens || state.estimatedInputTokens || 0;
+        chunks.push(`data: ${JSON.stringify({
+          id: state.id,
+          object: 'chat.completion.chunk',
+          created: state.created,
+          model: state.model,
+          choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
+          usage: { prompt_tokens: pt, completion_tokens: state.outputTokens, total_tokens: pt + state.outputTokens },
+        })}\n\n`);
+      } else {
+        chunks.push(this.openAIDelta(state, {}, finishReason));
+      }
       chunks.push('data: [DONE]\n\n');
       return chunks;
     }

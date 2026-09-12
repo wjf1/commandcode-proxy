@@ -15,9 +15,9 @@ import crypto from 'node:crypto';
 import { CommandCodeAdapter } from '../adapters/commandcode/adapter.js';
 import { sendToCC, isAbortError, estimateTextTokens } from '../adapters/commandcode/upstream.js';
 import { accumulateUsage, createUsageAccumulator } from '../adapters/commandcode/usage.js';
-import { buildRequestContext } from '../utils/request-context.js';
+import { buildRequestContext, systemTextOf } from '../utils/request-context.js';
 import { hardenConnectionForLongStream, persistCompletion, writeSSEHeaders, parseEventLine } from './sse-common.js';
-import { AnthropicRequest, CCEvent } from '../types/index.js';
+import { AnthropicRequest, AnthropicContentBlock, CCEvent } from '../types/index.js';
 import { getActiveApiKey, getGatewayRunning, checkAndRotateAccountsOnQuota } from '../utils/config.js';
 import { logger } from '../utils/logger.js';
 import { ErrorCode, ProxyError, toProxyError } from '../utils/errors.js';
@@ -28,6 +28,30 @@ function sse(event: string, data: unknown): string {
 
 export async function messagesRoutes(fastify: FastifyInstance) {
   const adapter = new CommandCodeAdapter();
+
+  // ── POST /v1/messages/count_tokens —— Anthropic SDK 兼容 ────────────────────
+  // 上游没有对应端点，这里用 CJK 感知的本地估算兜底（不发起上游请求、不受
+  // 引擎暂停影响），口径与 usage 缺失时的成本估算一致，供客户端做上下文预算。
+  fastify.post('/v1/messages/count_tokens', async (req, reply) => {
+    const body = req.body as AnthropicRequest;
+    if (!body || !Array.isArray(body.messages)) {
+      const err = new ProxyError(ErrorCode.UNSUPPORTED_OPTION, 'Invalid request: messages field is required');
+      return reply.status(err.status).send(err.anthropicPayload());
+    }
+    let text = systemTextOf(body) + '\n';
+    for (const m of body.messages || []) {
+      const blocks: AnthropicContentBlock[] =
+        typeof m.content === 'string' ? [{ type: 'text', text: m.content }] : m.content || [];
+      for (const b of blocks) {
+        if (b.type === 'text') text += b.text + '\n';
+        else if (b.type === 'thinking') text += b.thinking + '\n';
+        else if (b.type === 'tool_use') text += JSON.stringify(b.input ?? {});
+        else if (b.type === 'tool_result' && typeof b.content === 'string') text += b.content + '\n';
+      }
+      text += '\n';
+    }
+    return { input_tokens: estimateTextTokens(text) };
+  });
 
   fastify.post('/v1/messages', async (req, reply) => {
     if (!getGatewayRunning()) {

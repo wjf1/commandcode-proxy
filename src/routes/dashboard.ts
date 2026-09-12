@@ -12,10 +12,14 @@
 import fs from 'fs';
 import path from 'path';
 import { FastifyInstance } from 'fastify';
-import { logger } from '../utils/logger.js';
+import { logger, LOG_FILE_PATH } from '../utils/logger.js';
+import { getUpdateState } from '../utils/update-check.js';
 import { getProjectRootDir } from '../utils/config.js';
+import { isSameOriginIfPresent } from './sse-common.js';
 import {
   loadConfig,
+  resolveBodyLimit,
+  CONFIG_FILE_PATH,
   getGatewayRunning,
   setGatewayRunning,
   loginNewAccount,
@@ -27,10 +31,10 @@ import {
   getActiveApiKey,
   defaultAccountName,
 } from '../utils/config.js';
-import { getCachedModels } from '../utils/models.js';
+import { getCachedModels, MODELS_FILE_PATH } from '../utils/models.js';
 import { planName, planTier } from '../utils/plans.js';
 import { PROXY_VERSION } from '../utils/version.js';
-import { getUsageHistory, getUsageStats, clearUsageHistory, describeBillingWindow, getTimeOfDayModels } from '../utils/usage-store.js';
+import { getUsageHistory, getUsageStats, clearUsageHistory, describeBillingWindow, getTimeOfDayModels, USAGE_FILE_PATH, getTodaySpendUsd } from '../utils/usage-store.js';
 import { recordQuotaSample, getQuotaProjection } from '../utils/quota-tracker.js';
 import { notify } from '../utils/notifier.js';
 
@@ -54,18 +58,10 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
       reply.header('Access-Control-Allow-Origin', '*');
     }
     // 防跨站驱动管理操作：CORS 只能阻止"读响应"，阻止不了"发请求"。
-    // 浏览器发起的跨站写请求会带 Origin 头，这里校验其 host 必须与请求的
-    // host 一致；非浏览器客户端（curl/SDK）不带 Origin，直接放行。
+    // 校验逻辑见 isSameOriginIfPresent（纯函数，tests/guard.test.ts 锁定）。
     if (req.url.startsWith('/api/') && !['GET', 'OPTIONS', 'HEAD'].includes(req.method)) {
-      const origin = req.headers.origin;
-      if (origin) {
-        let sameHost = false;
-        try {
-          sameHost = new URL(origin).host === req.headers.host;
-        } catch { /* 非法 Origin 一律拒绝 */ }
-        if (!sameHost) {
-          return reply.status(403).send({ error: 'Cross-origin admin request rejected' });
-        }
+      if (!isSameOriginIfPresent(req.headers.origin as string | undefined, req.headers.host as string | undefined)) {
+        return reply.status(403).send({ error: 'Cross-origin admin request rejected' });
       }
     }
     // 仪表盘 HTML 与管理 API 禁用缓存：升级后浏览器不会再用旧页面调新接口。
@@ -137,6 +133,39 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
       authRequired: !!process.env.PROXY_API_KEY,
       // 绑定非回环地址 = API 与管理面对局域网可见；未设 PROXY_API_KEY 时前端要醒目警示
       boundNonLoopback: !['127.0.0.1', 'localhost', '::1'].includes(config.host),
+      // 版本更新检查（尽力而为，离线时 latest 为 null）
+      update: getUpdateState(),
+    };
+  });
+
+  // 只读运行配置视图：一眼可查部署参数（不含任何密钥）。
+  fastify.get('/api/config', async () => {
+    const config = loadConfig();
+    return {
+      version: PROXY_VERSION,
+      port: config.port,
+      host: config.host,
+      apiBase: config.ccApiBase,
+      cliVersion: config.ccVersion,
+      rotationMode: config.rotationMode,
+      accountsCount: config.accounts.length,
+      upstream: {
+        timeoutMs: config.upstreamTimeoutMs,
+        idleTimeoutMs: config.idleTimeoutMs,
+        maxRetries: config.maxRetries,
+      },
+      limits: {
+        maxBodyMb: Math.round(resolveBodyLimit() / 1048576),
+        maxUpstreamConcurrency: process.env.MAX_UPSTREAM_CONCURRENCY || 'unlimited',
+        dailyBudgetUsd: process.env.DAILY_BUDGET_USD || 'off',
+      },
+      paths: {
+        config: CONFIG_FILE_PATH,
+        log: LOG_FILE_PATH,
+        usageHistory: USAGE_FILE_PATH,
+        modelsCache: MODELS_FILE_PATH,
+      },
+      update: getUpdateState(),
     };
   });
 

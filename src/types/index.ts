@@ -22,8 +22,6 @@ export interface AccountInfo {
   email?: string;
   userId?: string;
   addedAt: string;
-  lastUsedAt?: string;
-  totalRequests?: number;
 }
 
 export interface UpstreamConfig {
@@ -39,7 +37,6 @@ export interface GatewayConfigFile {
   host?: string;
   activeAccountId?: string;
   rotationMode?: 'manual' | 'auto-quota';
-  permissionMode?: string;
   accounts?: AccountInfo[];
   upstream?: UpstreamConfig;
 }
@@ -50,7 +47,6 @@ export interface GatewayConfig {
   ccApiBase: string;
   ccVersion: string;
   rotationMode: 'manual' | 'auto-quota';
-  permissionMode: string;
   activeAccountId: string;
   accounts: AccountInfo[];
   upstreamTimeoutMs: number;
@@ -115,6 +111,8 @@ export interface OpenAIChatRequest {
   temperature?: number;
   top_p?: number;
   stream?: boolean;
+  /** OpenAI：流式请求是否在收尾 chunk 附带 usage。 */
+  stream_options?: { include_usage?: boolean };
   tools?: OpenAITool[];
   tool_choice?: 'auto' | 'none' | 'required' | { type: 'function'; function: { name: string } };
   reasoning_effort?: string | number;
@@ -350,9 +348,11 @@ export interface StreamEncoderState {
   toolCallIdToIndex: Map<string, number>;
   sawFinish: boolean;
   hasEmittedText: boolean;
-  promptTokens: number;
-  completionTokens: number;
   thinkingState: 'none' | 'in_think' | 'done';
+  /** OpenAI stream_options.include_usage：收尾 chunk 附带 usage。 */
+  includeUsage?: boolean;
+  /** 上游未回 usage 时收尾 chunk 的输入量兜底（本地估算）。 */
+  estimatedInputTokens?: number;
   inputTokens: number;
   outputTokens: number;
   /** 输入中命中缓存的 token 数（计费按 cacheRead 单价）。 */

@@ -252,6 +252,35 @@ describe.skipIf(!distReady)('OpenAI /v1/chat/completions — real-client feel', 
     expect(data.usage).toEqual({ prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 });
   });
 
+  it('stream_options.include_usage attaches usage to the final chunk', async () => {
+    const res = await fetch(`${PROXY_BASE}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-5',
+        messages: [{ role: 'user', content: 'Hi' }],
+        max_tokens: 100,
+        stream: true,
+        stream_options: { include_usage: true },
+      }),
+    });
+    const raw = await res.text();
+    const chunks = raw.split('\n\n').filter(l => l.startsWith('data: ') && !l.includes('[DONE]'));
+    const last = JSON.parse(chunks[chunks.length - 1].slice(6));
+    expect(last.choices[0].finish_reason).toBe('stop');
+    expect(last.usage).toBeDefined();
+    expect(last.usage.prompt_tokens).toBeGreaterThan(0);
+    expect(last.usage.total_tokens).toBe(last.usage.prompt_tokens + last.usage.completion_tokens);
+    // 未开启时不应出现 usage 字段
+    const res2 = await fetch(`${PROXY_BASE}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-sonnet-5', messages: [{ role: 'user', content: 'Hi' }], stream: true }),
+    });
+    const raw2 = await res2.text();
+    expect(raw2).not.toContain('"usage"');
+  });
+
   it('streaming: chunk sequence matches OpenAI SSE spec exactly', async () => {
     const res = await fetch(`${PROXY_BASE}/v1/chat/completions`, {
       method: 'POST',
@@ -427,6 +456,31 @@ describe.skipIf(!distReady)('Reasoning effort mapping (verified on the wire)', (
 // ─── Anthropic compatibility ─────────────────────────────────────────────────
 
 describe.skipIf(!distReady)('Anthropic /v1/messages — real-client feel', () => {
+  it('count_tokens returns a local estimate without hitting the upstream', async () => {
+    const res = await fetch(`${PROXY_BASE}/v1/messages/count_tokens`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-5',
+        max_tokens: 16,
+        system: 'You are helpful.',
+        messages: [{ role: 'user', content: '你好，世界 hello world' }],
+      }),
+    });
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { input_tokens: number };
+    expect(Number.isFinite(data.input_tokens)).toBe(true);
+    expect(data.input_tokens).toBeGreaterThan(0);
+    // 不应产生上游 generate 调用
+    const generateCalls = capturedBodies.length;
+    await fetch(`${PROXY_BASE}/v1/messages/count_tokens`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'x', max_tokens: 1, messages: [{ role: 'user', content: 'a' }] }),
+    });
+    expect(capturedBodies.length).toBe(generateCalls);
+  });
+
   it('thinking budget_tokens maps to effort tiers on the wire', async () => {
     await fetch(`${PROXY_BASE}/v1/messages`, {
       method: 'POST',

@@ -5,22 +5,16 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'node:url';
-
-function projectRoot(): string {
-  if ((process as any).pkg || process.execPath.toLowerCase().includes('commandcode-proxy')) {
-    return path.dirname(process.execPath);
-  }
-  return process.cwd();
-}
+import { getProjectRootDir } from './paths.js';
 
 function readVersion(): string {
   const candidates = [
     // 1) 模块相对路径：无论 cwd 在哪都指向仓库根（dist/utils/version.js → ../../package.json）
     fileURLToPath(new URL('../../package.json', import.meta.url)),
     // 2) 打包（pkg）或可执行文件与包同目录的场景
-    path.join(projectRoot(), 'package.json'),
+    path.join(getProjectRootDir(), 'package.json'),
     // 3) 兜底：上一级目录
-    path.join(projectRoot(), '..', 'package.json'),
+    path.join(getProjectRootDir(), '..', 'package.json'),
   ];
   for (const file of candidates) {
     try {

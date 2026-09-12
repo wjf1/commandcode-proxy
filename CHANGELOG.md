@@ -2,6 +2,37 @@
 
 所有主要版本更新都记录在此文件。
 
+## [4.11.0] - 2026-09-12
+
+### 修复
+- **仪表盘在浏览器完全不可用（4.10.0 回归，紧急）** — 4.10.0 重构时把 TypeScript 的 `as HTMLElement` 断言写进了纯 `<script>`，浏览器解析整个脚本块直接 SyntaxError，**所有仪表盘交互全部失效**（Node 侧 diff/冒烟抓不到，因为没人执行页面脚本）。已修复，并新增 `tests/dashboard-spa.test.ts` 三项守卫：内联脚本必须能作为纯 JS 解析、`getElementById` 引用的元素 id 必须存在、不得引用外部 CDN。
+- **`start.cmd` 与 logger 双写同一日志文件** — 启动脚本 `>> logs\proxy.log` 与 4.10.0 起的日志落盘指向同一文件，两个写入者会交错/重复。控制台输出改到独立的 `logs/console.log`。
+- **CORS 预检被鉴权挡死** — 设置 `PROXY_API_KEY` 后，浏览器的 `OPTIONS` 预检请求（不携带鉴权头）会 401，纯浏览器客户端无法使用。预检现已豁免（`tests/auth.test.ts` 锁定）。
+
+### 兼容性
+- **`POST /v1/messages/count_tokens`** — Anthropic SDK/工具会调用它做上下文预算，此前 404。现返回 CJK 感知的本地估算（不发起上游请求、不受引擎暂停影响）。
+- **OpenAI `stream_options.include_usage`** — 流式收尾 chunk 现按 OpenAI 语义附带 `usage`（上游 totalUsage 优先，缺失回落本地估算）；未开启时行为不变。
+- **`.env` 转正** — 此前保存账号时会写出 `.env` 但应用从不读取（纯误导）。现在启动时自动加载（已存在的环境变量优先，docker/systemd 注入不受影响），与写入侧形成闭环：仪表盘添加账号重启即生效。
+
+### 清理（行为不变）
+- 删除从未生效的 `permissionMode` 配置项（wire 契约强制 auto-accept，配置了也被覆盖）；既有 config.json 里残留的该键会被静默忽略，部署无需改动。
+- 删除无调用方的 `estimateTokens`、未采用的 `sseLineIterator`、`StreamEncoderState.promptTokens/completionTokens`、`AccountInfo.lastUsedAt/totalRequests`、启动脚本里无消费者的 `COMMANDCODE_PROXY_DIR`；`version.ts` 复用 `utils/paths.ts`（消除第三份副本）。
+
+### 改进
+- **每请求读盘归零** — `loadConfig` 与 `getUsageHistory` 增加 mtime+size 缓存，文件未变时不再重复读盘+解析。
+- **优雅退出** — SIGINT/SIGTERM 先冲刷用量写队列再关闭服务，Ctrl+C 不丢最后一两条会话记录。
+- **管理面 Origin 校验抽纯函数**（`isSameOriginIfPresent`）+ `fastify.inject` 集成测试进 CI（此前只有手测）。
+- **每日预算告警** — `DAILY_BUDGET_USD` 设置后当日成本达阈值弹一次 toast；重启从历史回填当日金额，不误报。
+- **版本更新检查** — 启动与每 24h 查询 GitHub Releases（api.github.com，只读无凭据，失败静默），有新版时仪表盘头部显示徽章。
+- **用量导出 CSV** — 会话明细一键导出（UTF-8 BOM，Excel 直开）。
+- **上游并发上限** — `MAX_UPSTREAM_CONCURRENCY`（默认不限制，兼容既有部署），超限以新错误码 `GATEWAY_BUSY`(503) 快速失败。
+- **`GET /api/config`** — 只读运行配置视图（端口/绑定/上游参数/路径/限额，不含任何密钥）。
+
+### 测试
+- 新增 `tests/guard.test.ts`（6 项：Origin 纯函数 + 管理面异源 403/同源 200/无 Origin 放行）、`tests/dashboard-spa.test.ts`（3 项）、count_tokens 与 include_usage 集成测试。全量 **228 项通过**，`tsc --noEmit` 无错误。
+
+- 版本号 `4.10.0` → `4.11.0`。
+
 ## [4.10.0] - 2026-09-12
 
 ### 修复

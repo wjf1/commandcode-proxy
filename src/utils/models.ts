@@ -18,7 +18,7 @@ import { ModelItem, ModelPricing, ModelCaps, ModelDeal, TimeOfDayPricing } from 
 
 export interface UpstreamModel extends ModelItem {}
 
-const MODELS_FILE_PATH = process.env.COMMANDCODE_MODELS_CACHE_PATH
+export const MODELS_FILE_PATH = process.env.COMMANDCODE_MODELS_CACHE_PATH
   ? path.resolve(process.env.COMMANDCODE_MODELS_CACHE_PATH)
   : path.join(getProjectRootDir(), 'models.json');
 const PRICING_FILE_PATH = process.env.COMMANDCODE_PRICING_CACHE_PATH

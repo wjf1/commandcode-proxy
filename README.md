@@ -90,6 +90,9 @@
 - **崩溃保护** — 5 分钟内 3 次未捕获异常即主动退出，交给服务管理器重启
 - **打包与 CI** — TypeScript + esbuild + `pkg` 单文件 exe；GitHub Actions 全量回归（typecheck → build → 216 项测试）
 - **离线可用的仪表盘** — Tailwind / Font Awesome / Chart.js 全部本地化，不依赖公共 CDN
+- **Anthropic SDK 兼容** — `POST /v1/messages/count_tokens` 本地估算（CJK 感知，不发起上游请求）；OpenAI `stream_options.include_usage` 在收尾 chunk 附带 usage
+- **每日预算告警 + 更新检查** — `DAILY_BUDGET_USD` 当日花费超阈值弹 toast；启动时查询 GitHub Releases，仪表盘头部显示"新版本"徽章
+- **明细导出** — 用量页一键导出 CSV（含 BOM，Excel 直开）
 
 ---
 
@@ -133,6 +136,9 @@ curl http://127.0.0.1:9090/v1/messages \
 
 > 模型名以仪表盘"模型"页或 `GET /v1/models` 实时目录为准；免费/折扣模型标有 FREE / DEAL 标签。
 
+> [!IMPORTANT]
+> **不支持的字段**（接受但被忽略，不报错）：`stop` / `stop_sequences`、`response_format`、`top_k`、`parallel_tool_calls`、`logprobs`、`n`、`seed` 及频率/存在惩罚。依赖这些字段控制输出形态的客户端请注意；需要 stop 语义请在上游模型侧或客户端侧过滤。
+
 客户端配置：OpenAI 风格 base URL 设为 `http://127.0.0.1:9090/v1`，Anthropic 风格设为 `http://127.0.0.1:9090`，密钥随意（若设置了 `PROXY_API_KEY` 则须一致）。
 
 按套餐筛选可用模型（`plan` 可显式指定，省略则用当前账号套餐；不带 `available` 为完整目录）：
@@ -175,6 +181,7 @@ Anthropic 出口（`/v1/messages`）：
 | `PROVIDER_PROTOCOL_ERROR` | 502 | 上游返回体异常（缺 body 等） |
 | `CATALOG_UNAVAILABLE` | 503 | 模型目录不可用 |
 | `GATEWAY_PAUSED` | 503 | 引擎已在面板暂停 |
+| `GATEWAY_BUSY` | 503 | 达到 `MAX_UPSTREAM_CONCURRENCY` 上限（默认不限制） |
 | `BLOCKED_HOST` | 500 | 上游地址被 SSRF 防护拒绝 |
 | `INTERNAL_ERROR` | 500 | 网关内部异常 |
 
@@ -200,9 +207,11 @@ Anthropic 出口（`/v1/messages`）：
 | `MAX_BODY_MB` | `64` | 入站 JSON 请求体上限（MB）；视觉/多图 base64 负载超默认 1MB 会触发 413，范围 1..1024 |
 | `USAGE_HISTORY_MAX_MB` | `20` | 会话历史大小上限（MB）；超限保留较新的一半，防止无限增长拖慢聚合 |
 | `COMMANDCODE_LOG_PATH` | `<项目根>/logs/proxy.log` | 运行日志落盘路径（超 5MB 轮转 `.old`） |
+| `DAILY_BUDGET_USD` | 未设置（关） | 每日预算告警：当日累计成本（服务器本地日）达到阈值时弹一次 toast；进程重启会从历史回填当日已计费金额 |
+| `MAX_UPSTREAM_CONCURRENCY` | 不限制 | 上游并发上限；超限请求以 `GATEWAY_BUSY`(503) 快速失败，防失控客户端压起大量长流 |
 | `COMMANDCODE_NOTIFY` | 开 | 设 `0/false/off` 关闭桌面通知 |
 
-持久化配置存于可执行文件旁的 `config.json`。
+持久化配置存于可执行文件旁的 `config.json`。同目录的 `.env`（由仪表盘添加账号时自动维护）也会在启动时加载——**已存在的环境变量优先**，docker/systemd 注入不受影响。
 
 ## 🛠️ 开发
 <a id="development"></a>
@@ -315,6 +324,8 @@ Point any OpenAI-style client (Cursor, Continue, Aider, OpenWebUI, Hermes, your 
 - Crash protection: 3 uncaught exceptions within 5 minutes → intentional `exit(1)` for supervisor restart
 - Packaging: TypeScript + esbuild + single-file Windows exe via `pkg`; GitHub Actions CI (typecheck → build → 216 tests)
 - Offline-capable dashboard: tailwind / font-awesome / chart.js fully localized, no public CDN dependency
+- Anthropic SDK compatibility: `POST /v1/messages/count_tokens` (local CJK-aware estimate); OpenAI `stream_options.include_usage` on the final chunk
+- Daily budget alerts (`DAILY_BUDGET_USD`) and a GitHub Releases update badge; usage export to CSV
 
 ### Quick Start
 
@@ -333,6 +344,9 @@ On first launch the dashboard opens automatically. Log in via **Browser (OAuth)*
 ### Error contract
 
 Every failure returns a **stable code plus an actionable hint** — same envelope shapes as the 中文 section above; the full code/HTTP table lives [there too](#errors) (codes are English identifiers).
+
+> [!IMPORTANT]
+> **Unsupported fields** (accepted but ignored, no error): `stop` / `stop_sequences`, `response_format`, `top_k`, `parallel_tool_calls`, `logprobs`, `n`, `seed`, frequency/presence penalties.
 
 **Retry semantics**: `408/409/425/429/500/502/503/504` are retried with exponential backoff (capped by `upstream.maxRetries`); terminal billing/plan markers (`model_not_in_plan`, `premium_credits_exhausted`, `insufficient credits`) **fail fast and are never retried**, because retrying only burns credits. Exhausted retries preserve the real upstream status and code instead of being reported as a network failure. For streams (HTTP 200 already sent) the code is folded into content as `[Upstream Error: RATE_LIMIT: ...]`.
 

@@ -16,7 +16,7 @@ import { getProjectRootDir } from './paths.js';
 const MAX_LOGS = 500;
 const logBuffer: LogEntry[] = [];
 
-const LOG_FILE_PATH = process.env.COMMANDCODE_LOG_PATH
+export const LOG_FILE_PATH = process.env.COMMANDCODE_LOG_PATH
   ? path.resolve(process.env.COMMANDCODE_LOG_PATH)
   : path.join(getProjectRootDir(), 'logs', 'proxy.log');
 const LOG_FILE_MAX_BYTES = 5 * 1024 * 1024;

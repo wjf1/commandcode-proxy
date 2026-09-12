@@ -19,7 +19,6 @@ if (-not $node) { $node = (Get-Command node -ErrorAction SilentlyContinue).Sourc
 if (-not $node) { throw "node.exe not found. Install Node.js or add it to PATH." }
 
 $env:NO_OPEN_BROWSER = "1"
-$env:COMMANDCODE_PROXY_DIR = $dir
 if (-not (Test-Path "$dir\logs")) { New-Item -ItemType Directory -Path "$dir\logs" | Out-Null }
 Start-Process -FilePath $node -ArgumentList "dist/index.js" -WorkingDirectory $dir `
   -WindowStyle Hidden `

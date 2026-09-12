@@ -5,12 +5,25 @@
 // 长连接 socket 加固（客户端断开 → 取消上游）、会话记录持久化。
 // 收敛到一处，避免双份实现随时间漂移。
 // =============================================================================
-import { createInterface } from 'readline';
 import { FastifyRequest, FastifyReply } from 'fastify';
 import { CCEvent } from '../types/index.js';
 import { UsageAccumulator } from '../adapters/commandcode/usage.js';
 import { RequestContext } from '../utils/request-context.js';
 import { estimateCostUsd, recordCompletion } from '../utils/usage-store.js';
+
+/**
+ * 管理面防跨站驱动：浏览器发起的跨站写请求会带 Origin 头，其 host 必须与
+ * 请求的 host 一致；非浏览器客户端（curl/SDK）不带 Origin，直接放行。
+ * 纯函数便于单测锁定。
+ */
+export function isSameOriginIfPresent(origin: string | undefined, host: string | undefined): boolean {
+  if (!origin) return true;
+  try {
+    return new URL(origin).host === host;
+  } catch {
+    return false; // 非法 Origin 一律拒绝
+  }
+}
 
 export function writeSSEHeaders(reply: any): void {
   reply.raw.setHeader('Content-Type', 'text/event-stream');
@@ -31,11 +44,6 @@ export function parseEventLine(line: string): CCEvent | null {
   } catch {
     return null;
   }
-}
-
-/** 把一行上游 SSE 变成异步迭代器（非流式路径逐事件消费用）。 */
-export function sseLineIterator(stream: any): AsyncIterable<string> {
-  return createInterface({ input: stream, crlfDelay: Infinity });
 }
 
 /**

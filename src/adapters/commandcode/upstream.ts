@@ -20,16 +20,11 @@ export function stripBearerPrefix(token: string): string {
   return (token || '').replace(/^Bearer\s+/i, '').trim();
 }
 
-/** 粗略 token 估算：约 4 个字符 = 1 个 token。 */
-export function estimateTokens(bytes: number): number {
-  return Math.round(bytes / 4);
-}
-
 /**
  * CJK 感知的文本 token 估算。
- * `estimateTokens` 的 4 字符/token 对英文成立，但中文约 1-1.6 字符/token，
- * 按 4 字符折算会低估数倍。这里 CJK 字符按 1 字 1 token、其余按 4 字符
- * 1 token 估算。仅用于上游未回 usage 时的兜底口径，不参与计费。
+ * "4 字符 = 1 token" 对英文成立，但中文约 1-1.6 字符/token，按 4 字符折算会
+ * 低估数倍。这里 CJK 字符按 1 字 1 token、其余按 4 字符 1 token 估算。
+ * 仅用于上游未回 usage 时的兜底口径，不参与计费。
  */
 export function estimateTextTokens(text: string): number {
   if (!text) return 0;
@@ -90,6 +85,16 @@ export function buildHeaders(apiKey: string, ccVersion: string, body: CCRequestB
 
 const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
 
+// ─── 上游并发上限 ────────────────────────────────────────────────────────────
+// 防止失控客户端同时压起大量长流拖垮进程/额度。默认 0 = 不限制（兼容既有
+// 部署）；MAX_UPSTREAM_CONCURRENCY 设为正整数后，超限请求立即以
+// GATEWAY_BUSY(503) 快速失败，不排队。
+const MAX_UPSTREAM_CONCURRENCY = (() => {
+  const n = parseInt(process.env.MAX_UPSTREAM_CONCURRENCY || '', 10);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+})();
+let activeUpstreamRequests = 0;
+
 /**
  * 是否允许重试：状态码可重试，且错误文本未命中终止性（计费/套餐）标记
  * —— premium_credits_exhausted / model_not_in_plan / insufficient credits
@@ -137,9 +142,30 @@ export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<
   const headers = buildHeaders(opts.apiKey, config.ccVersion, body);
   const reqData = JSON.stringify(body);
 
+  if (MAX_UPSTREAM_CONCURRENCY > 0) {
+    if (activeUpstreamRequests >= MAX_UPSTREAM_CONCURRENCY) {
+      throw new UpstreamError(
+        `Upstream concurrency limit reached (${MAX_UPSTREAM_CONCURRENCY}); ` +
+        `raise MAX_UPSTREAM_CONCURRENCY or retry later`,
+        503,
+        false,
+        ErrorCode.GATEWAY_BUSY,
+      );
+    }
+    activeUpstreamRequests++;
+  }
+  let slotReleased = false;
+  const releaseSlot = () => {
+    if (slotReleased || MAX_UPSTREAM_CONCURRENCY === 0) return;
+    slotReleased = true;
+    activeUpstreamRequests--;
+  };
+
   const maxAttempts = Math.max(1, config.maxRetries + 1);
   let lastError: any;
 
+  // 循环内任何 throw 都先释放并发槽位；成功路径的释放挂在返回流的 close/error 上。
+  try {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const timeoutController = new AbortController();
     let idleTimer: NodeJS.Timeout | null = null;
@@ -213,9 +239,11 @@ export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<
       nodeStream.on('data', () => armIdleWatchdog());
       nodeStream.on('close', () => {
         if (idleTimer) clearTimeout(idleTimer);
+        releaseSlot();
       });
       nodeStream.on('error', () => {
         if (idleTimer) clearTimeout(idleTimer);
+        releaseSlot();
       });
 
       return nodeStream;
@@ -265,4 +293,8 @@ export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<
     );
   }
   throw new UpstreamError('Upstream failed', undefined, false, ErrorCode.NETWORK_ERROR);
+  } catch (err) {
+    releaseSlot();
+    throw err;
+  }
 }
