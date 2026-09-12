@@ -4,7 +4,6 @@
 
 [![version](https://img.shields.io/github/package-json/v/wjf1/commandcode-proxy?style=flat-square&color=6366f1&label=v4)](https://github.com/wjf1/commandcode-proxy/blob/main/package.json)
 [![CI](https://img.shields.io/github/actions/workflow/status/wjf1/commandcode-proxy/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/wjf1/commandcode-proxy/actions/workflows/ci.yml)
-[![tests](https://img.shields.io/badge/tests-216%20passing-34d399?style=flat-square)](https://github.com/wjf1/commandcode-proxy/actions/workflows/ci.yml)
 [![node](https://img.shields.io/badge/node-%E2%89%A518.17-339933?style=flat-square)](./package.json)
 [![license](https://img.shields.io/badge/license-MIT-94a3b8?style=flat-square)](./LICENSE)
 
@@ -88,7 +87,7 @@
 - **日志持久化** — 全量追加 `logs/proxy.log`（超 5MB 轮转 `.old`），控制台窗口关掉仍可事后排查；错误日志带 `Trace`/`Thread`，可对到用量记录
 - **用量统计缓存** — 45s TTL + 并发去重，仪表盘重复拉取从 ~2.9s 降到毫秒级
 - **崩溃保护** — 5 分钟内 3 次未捕获异常即主动退出，交给服务管理器重启
-- **打包与 CI** — TypeScript + esbuild + `pkg` 单文件 exe；GitHub Actions 全量回归（typecheck → build → 216 项测试）
+- **打包与 CI** — TypeScript + esbuild + `pkg` 单文件 exe；GitHub Actions 全量回归（typecheck → build → vitest）
 - **离线可用的仪表盘** — Tailwind / Font Awesome / Chart.js 全部本地化，不依赖公共 CDN
 - **Anthropic SDK 兼容** — `POST /v1/messages/count_tokens` 本地估算（CJK 感知，不发起上游请求）；OpenAI `stream_options.include_usage` 在收尾 chunk 附带 usage
 - **每日预算告警 + 更新检查** — `DAILY_BUDGET_USD` 当日花费超阈值弹 toast；启动时查询 GitHub Releases，仪表盘头部显示"新版本"徽章
@@ -322,7 +321,7 @@ Point any OpenAI-style client (Cursor, Continue, Aider, OpenWebUI, Hermes, your 
 - Log persistence to `logs/proxy.log` (5MB rotation); error logs carry `Trace`/`Thread` to correlate with usage records
 - Usage-stats cache (45s TTL + in-flight dedupe) — repeated dashboard fetches drop from ~2.9s to milliseconds
 - Crash protection: 3 uncaught exceptions within 5 minutes → intentional `exit(1)` for supervisor restart
-- Packaging: TypeScript + esbuild + single-file Windows exe via `pkg`; GitHub Actions CI (typecheck → build → 216 tests)
+- Packaging: TypeScript + esbuild + single-file Windows exe via `pkg`; GitHub Actions CI (typecheck → build → vitest)
 - Offline-capable dashboard: tailwind / font-awesome / chart.js fully localized, no public CDN dependency
 - Anthropic SDK compatibility: `POST /v1/messages/count_tokens` (local CJK-aware estimate); OpenAI `stream_options.include_usage` on the final chunk
 - Daily budget alerts (`DAILY_BUDGET_USD`) and a GitHub Releases update badge; usage export to CSV

@@ -28,6 +28,16 @@ describe('dashboard SPA (public/index.html)', () => {
     expect(missing).toEqual([]);
   });
 
+  it('every onclick handler references a function defined in the script', () => {
+    const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]).join('\n');
+    const onclicks = new Set(
+      [...html.matchAll(/onclick="([A-Za-z_$][\w$]*)\(/g)].map(m => m[1]),
+    );
+    expect(onclicks.size).toBeGreaterThan(0);
+    const missing = [...onclicks].filter(fn => !new RegExp('function\\s+' + fn + '\\b').test(script));
+    expect(missing).toEqual([]);
+  });
+
   it('does not reference external CDNs (assets are localized)', () => {
     expect(html).not.toMatch(/https?:\/\/cdn\.|https?:\/\/cdnjs\.cloudflare\.com|https?:\/\/cdn\.jsdelivr\.net/);
   });
