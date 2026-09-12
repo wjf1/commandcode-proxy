@@ -2,6 +2,46 @@
 
 所有主要版本更新都记录在此文件。
 
+## [4.10.0] - 2026-09-12
+
+### 修复
+- **燃烧速率预测 UI 从未显示** — `renderUsageForAccount` 引用 `window5hProjection` 元素，但 HTML 里从未定义它（`if (pNote)` 静默跳过），"约 X 分钟后撞上限额"的核心预警实际是死代码。已在 5 小时窗口卡片补回该元素。
+- **内联 thinking 标签剥离的定界符丢失** — 编码器用 `' thinking'` / `' response'`（空格前缀）做定界，系历史编辑事故中 `<think>` 类标签被剥掉的残留。后果：模型正常回复里任何含英文单词 "thinking" 的句子都会被误路由进 `reasoning_content`，而真正的 `<think>…</think>` 块反而不被处理。现按真实标签 `<think>`/`<thinking>`（含跨 delta 拆分）用状态机重写，并锁定"含 thinking 字样的普通英文不受影响"的回归测试。
+- **上游用量请求无超时** — `fetchJson`（whoami/credits/subscriptions/summary）此前为裸 fetch，上游挂起时登录、仪表盘聚合、5 分钟额度采样会无限等待。现统一 15s 超时（`AbortSignal.timeout`）。
+- **`npm test` 在干净克隆上必挂** — 集成测试 spawn `dist/index.js`，无 dist 时必然 "Proxy did not become ready in time"。现在 dist 缺失时整个集成套件自动跳过并提示先 `npm run build`。
+
+### 安全
+- **管理面纳入共享密钥鉴权** — `PROXY_API_KEY` 此前只保护 `/v1/*`，绑定 `0.0.0.0` 时局域网内任何人仍可直连 `/api/*` 增删账号、切换 Key、清空历史。现在 `/api/*` 与 `/v1/*` 共用同一把密钥（常量时间比较）；仪表盘首次收到 401 时弹出密钥输入框，提交后自动重试原请求，密钥仅存 sessionStorage（关标签页即清除）。并发 401 共享同一次输入，取消后 60 秒内不再打扰轮询。
+- **非回环绑定且未鉴权时的醒目警示** — `/api/status` 新增 `boundNonLoopback` 字段；概览页"安全"卡片在"非回环 + 无密钥"时变红色"未鉴权暴露！"并悬停给出修复路径；启动日志与控制台同步输出警告。
+- **管理接口防跨站驱动** — CORS 只能阻止"读响应"而非"发请求"。`/api/*` 的写操作现在校验 `Origin` 头与请求 host 一致（非浏览器客户端不带 Origin，不受影响）。
+- **`PROXY_API_KEY` 比较改为常量时间**（`crypto.timingSafeEqual`）。
+- **SSRF 网段覆盖补全** — 私有/保留地址判定补充 100.64.0.0/10（CGNAT）与 198.18.0.0/15。
+
+### 改进
+- **仪表盘静态资源本地化** — Tailwind / Font Awesome / Chart.js 从三个公共 CDN 改为随仓库 `public/vendor/` 分发（经 `/assets/vendor/*` 服务，含字体，路径穿越防护），离线或 CDN 不可达时界面不再掉样式、丢图表；`pkg` assets 同步纳入。
+- **`usage-history.jsonl` 大小轮转** — 默认 20MB（`USAGE_HISTORY_MAX_MB` 可调），超限保留较新一半；此前只追加不轮转，仪表盘每 30s 全量读取聚合会随文件增长持续变慢。
+- **日志持久化** — 全量日志追加到 `logs/proxy.log`（`COMMANDCODE_LOG_PATH` 可改，超 5MB 轮转 `.old`），控制台窗口关闭后仍可事后排查；路径解析收敛到 `utils/paths.ts`（logger 复用，避免循环导入）。
+- **错误可关联到用量记录** — 非流式 chat 请求现在预生成 `traceId`（响应 id、错误日志、usage 记录三者一致）；流式/致命错误日志与上游错误日志带上 `Trace`/`Thread`（threadId 即 x-session-id），一次失败可从报错串到归因明细。
+- **用量统计缓存** — 新增 `fetchLiveUsageStatsCached`（45s TTL + 并发去重），仪表盘 overview/aggregate 共用；实测切用量页的重复上游请求（每账号 4 个/轮）从每轮 2.9s 降到毫秒级命中。登录与额度轮换仍走未缓存的原始拉取，保证新鲜度。
+- **未捕获异常的退出策略** — 单次异常仍只记日志；但 5 分钟内累计 3 次（Exception/Rejection 合并计数）即主动 `exit(1)`，交给服务管理器/看门狗重启，避免带病进程挂着僵死的上游连接。
+- **仪表盘 SPA 迁出模板字符串** — 约 1000 行内嵌 HTML/JS 迁为静态文件 `public/index.html`，`GET /` 改为按请求读取（`dashboard.ts` 从 1400+ 行降到 404 行）；前端代码从此可独立编辑、可在浏览器 devtools 直接调试源文件；`pkg` assets 更新为 `public/**/*`。服务内容与迁出前逐字节一致（迁移即抓取运行时输出）。
+- **原生 alert/confirm 全部替换** — 新增与面板风格一致的轻量 toast（成功/失败/信息，4s 自动消退）与确认模态（Esc 取消、Enter 确认）：浏览器登录结果反馈、移除账号、清空会话历史三处流程；原生弹窗数量归零。
+- **界面交互** — "实时日志"标签页现在真的实时（激活时每 5s 轮询）；登录模态支持 Enter 提交 / Esc 关闭并自动聚焦；账号卡片按钮改为事件委托（去掉内联 onclick 拼 JS 字符串）；页面切入后台时暂停状态/用量轮询；补充 favicon。
+- **模型页人民币价格为折算参考** — 明示按 1 USD ≈ ¥6.72 折算（此前汇率硬编码无说明）。
+- **CJK 感知的 token 兜底估算** — 上游未回 usage 时，输入/输出量估算对中文文本从"4 字符=1 token"改为 CJK 字按 1 字 1 token 计，减少数倍低估。
+- **chat/messages 双出口助手收敛** — SSE 头、事件行解析、长连接加固、会话持久化收敛到 `src/routes/sse-common.ts`，消除双份实现。
+
+### 工程化
+- **新增 GitHub Actions CI**（`.github/workflows/ci.yml`）：push/PR 上自动执行 `npm ci → typecheck → build → vitest run`（先 build 是因为集成测试 spawn `dist/index.js`）。
+- **定价页解析契约锁定** — `parsePricingFromHtml` 导出并用合成 RSC fixture 锁定：多 chunk 拼接、静态价含缓存价、峰/谷分时价双保留（回归早期"峰时价被丢弃"）、`onGoPlan` 只看显式档位键不看 `all`、缺 id 行跳过、无 payload 返回空。官方页面改版时会在这里变红而不是静默失效。
+- **`resolveModelName` 表驱动测试**：精确 / 前缀剥离 / 后缀 / 展示名 / 部分包含 / 家族规则 / 未知透传 / 空输入共 10 组；为此新增 `setCachedModelsForTest` 测试挂钩。
+- **输出 token 兜底估算统一 CJK 感知** — `estimateTextTokens` 覆盖 adapter 编码器、chat/messages 非流式累计的全部输出路径（此前只换了输入侧）。
+
+### 测试
+- 新增：`<think>` 标签拆分（单 delta / 跨 delta）、普通英文含 "thinking" 不误判；定价页解析 5 项；模型解析 10 项；适配 `describe.skipIf` 跳过逻辑。新增 `tests/auth.test.ts`（6 项，`fastify.inject` 不监听端口）：密钥开启时 /v1 与 /api 双面 401/200（Bearer 与 x-api-key）、错误密钥拒绝、`/v1/messages` 返回 Anthropic 信封而其余返回 OpenAI 形态、非保护路径放行、未配置密钥时不注册钩子。全量 **216 项通过**（含 build 后 31 项集成），`tsc --noEmit` 无错误。
+
+- 版本号 `4.9.2` → `4.9.3`。
+
 ## [4.9.2] - 2026-09-12
 
 ### 修复

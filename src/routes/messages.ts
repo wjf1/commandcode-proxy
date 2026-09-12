@@ -13,79 +13,17 @@ import { FastifyInstance } from 'fastify';
 import { createInterface } from 'readline';
 import crypto from 'node:crypto';
 import { CommandCodeAdapter } from '../adapters/commandcode/adapter.js';
-import { sendToCC, isAbortError, estimateTokens } from '../adapters/commandcode/upstream.js';
-import { accumulateUsage, createUsageAccumulator, UsageAccumulator } from '../adapters/commandcode/usage.js';
-import { buildRequestContext, RequestContext } from '../utils/request-context.js';
+import { sendToCC, isAbortError, estimateTextTokens } from '../adapters/commandcode/upstream.js';
+import { accumulateUsage, createUsageAccumulator } from '../adapters/commandcode/usage.js';
+import { buildRequestContext } from '../utils/request-context.js';
+import { hardenConnectionForLongStream, persistCompletion, writeSSEHeaders, parseEventLine } from './sse-common.js';
 import { AnthropicRequest, CCEvent } from '../types/index.js';
 import { getActiveApiKey, getGatewayRunning, checkAndRotateAccountsOnQuota } from '../utils/config.js';
 import { logger } from '../utils/logger.js';
 import { ErrorCode, ProxyError, toProxyError } from '../utils/errors.js';
-import { recordCompletion, estimateCostUsd } from '../utils/usage-store.js';
-
-function writeSSEHeaders(reply: any): void {
-  reply.raw.setHeader('Content-Type', 'text/event-stream');
-  reply.raw.setHeader('Cache-Control', 'no-cache');
-  reply.raw.setHeader('Connection', 'keep-alive');
-  reply.raw.setHeader('X-Accel-Buffering', 'no');
-  reply.raw.flushHeaders?.();
-}
-
-function parseEventLine(line: string): CCEvent | null {
-  const trimmed = line.trim();
-  if (!trimmed) return null;
-  const jsonStr = trimmed.startsWith('data:') ? trimmed.slice(5).trim() : trimmed;
-  if (!jsonStr || jsonStr === '[DONE]') return null;
-  try {
-    return JSON.parse(jsonStr);
-  } catch {
-    return null;
-  }
-}
 
 function sse(event: string, data: unknown): string {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-}
-
-/**
- * 持久化一次会话记录到 usage-history.jsonl。
- * 成本优先取上游权威金额（上游已算好峰谷价与缓存折扣），缺失时才本地估算。
- */
-function persistCompletion(
-  model: string,
-  usage: UsageAccumulator,
-  context: RequestContext,
-  startTime: number,
-  status: 'COMPLETED' | 'FAILED',
-  traceId?: string
-): void {
-  const estimated = estimateCostUsd(model, usage.inputTokens || 0, usage.outputTokens || 0, {
-    cacheReadTokens: usage.cacheReadTokens,
-    cacheWriteTokens: usage.cacheWriteTokens,
-    at: new Date(startTime),
-  });
-  const hasUpstreamCost = usage.upstreamCostUsd !== undefined;
-  recordCompletion({
-    timestamp: new Date().toISOString(),
-    model,
-    inputTokens: usage.inputTokens || 0,
-    outputTokens: usage.outputTokens || 0,
-    cacheReadTokens: usage.cacheReadTokens || 0,
-    cacheWriteTokens: usage.cacheWriteTokens || 0,
-    timingMs: Date.now() - startTime,
-    costUsd: hasUpstreamCost ? usage.upstreamCostUsd! : estimated.costUsd,
-    costSource: hasUpstreamCost ? 'official' : 'estimated',
-    estimatedCostUsd: estimated.costUsd,
-    hasPricing: hasUpstreamCost || estimated.hasPricing,
-    status,
-    traceId,
-    mode: 'messages',
-    ...(context.sessionId ? { sessionId: context.sessionId } : {}),
-    ...(context.project ? { project: context.project } : {}),
-    ...(context.projectSource ? { projectSource: context.projectSource } : {}),
-    ...(context.sessionType ? { sessionType: context.sessionType } : {}),
-    ...(context.agent ? { agent: context.agent } : {}),
-    ...(context.timezone ? { timezone: context.timezone } : {}),
-  });
 }
 
 export async function messagesRoutes(fastify: FastifyInstance) {
@@ -109,25 +47,14 @@ export async function messagesRoutes(fastify: FastifyInstance) {
       return reply.status(err.status).send(err.anthropicPayload());
     }
 
-    req.raw.setTimeout(0);
-    if (req.raw.socket) {
-      req.raw.socket.setTimeout(0);
-      req.raw.socket.setKeepAlive(true, 10000);
-      req.raw.socket.setNoDelay(true);
-    }
-
     const abortController = new AbortController();
-    const onClientClose = () => {
-      if (!reply.raw.writableEnded) abortController.abort();
-    };
-    req.raw.on('aborted', onClientClose);
-    reply.raw.on('close', onClientClose);
+    hardenConnectionForLongStream(req, reply, abortController);
 
     const startTime = Date.now();
     const translated = adapter.translateAnthropicRequest(body);
     const modelName = translated.params.model;
     const msgId = `msg_${crypto.randomUUID().slice(0, 8)}`;
-    let inputTokens = estimateTokens(JSON.stringify(translated).length);
+    let inputTokens = estimateTextTokens(JSON.stringify(translated));
     const usageAcc = createUsageAccumulator();
     // 会话/项目等归因信息：会话 ID 来自客户端声明，项目为推断（见模块注释）。
     const requestContext = buildRequestContext(req.headers as any, body);
@@ -226,7 +153,7 @@ export async function messagesRoutes(fastify: FastifyInstance) {
             if (text) {
               closeThinkingBlock();
               openTextBlock();
-              outputTokens += Math.ceil(text.length / 4);
+              outputTokens += estimateTextTokens(text);
               reply.raw.write(
                 sse('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } })
               );
@@ -235,7 +162,7 @@ export async function messagesRoutes(fastify: FastifyInstance) {
             const text = event.text || event.data?.text;
             if (text) {
               openThinkingBlock();
-              outputTokens += Math.ceil(text.length / 4);
+              outputTokens += estimateTextTokens(text);
               reply.raw.write(
                 sse('content_block_delta', { type: 'content_block_delta', index: 1, delta: { type: 'thinking_delta', thinking: text } })
               );
@@ -315,7 +242,7 @@ export async function messagesRoutes(fastify: FastifyInstance) {
           logger.info(
             `Input Tokens ${inputTokens.toLocaleString('en-US')} | Output Tokens ${outputTokens.toLocaleString('en-US')} | Timing ${timing}s | Model ${modelName} | Status COMPLETED`
           );
-          persistCompletion(modelName, usageAcc, requestContext, startTime, 'COMPLETED', msgId);
+          persistCompletion(modelName, usageAcc, requestContext, startTime, 'COMPLETED', msgId, 'messages');
           reply.raw.end();
         });
 
@@ -326,7 +253,7 @@ export async function messagesRoutes(fastify: FastifyInstance) {
             return;
           }
           cleanupPings();
-          logger.error(`[MESSAGES] Upstream stream error: ${err.message}`);
+          logger.error(`[MESSAGES] Upstream stream error | Trace ${msgId} | ${err.message}`);
           closeThinkingBlock();
           closeTextBlock();
           const proxyErr = toProxyError(err, ErrorCode.PROVIDER_PROTOCOL_ERROR);
@@ -365,11 +292,11 @@ export async function messagesRoutes(fastify: FastifyInstance) {
         usageAcc.inputTokens = message.usage.input_tokens;
         usageAcc.outputTokens = message.usage.output_tokens;
       }
-      persistCompletion(modelName, usageAcc, requestContext, startTime, 'COMPLETED', msgId);
+      persistCompletion(modelName, usageAcc, requestContext, startTime, 'COMPLETED', msgId, 'messages');
       return reply.send(message);
     } catch (err: any) {
       if (isAbortError(err) || err?.isAbort) return reply.raw.end();
-      logger.error(`[MESSAGES] Request failed: ${err.message}`);
+      logger.error(`[MESSAGES] Request failed | Trace ${msgId} | ${err.message}`);
       const proxyErr = toProxyError(err, ErrorCode.INTERNAL_ERROR);
       return reply.status(proxyErr.status).send(proxyErr.anthropicPayload());
     }

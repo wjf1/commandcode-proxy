@@ -22,12 +22,30 @@ import { dashboardRoutes } from './routes/dashboard.js';
 import { recordQuotaSample, getQuotaProjection } from './utils/quota-tracker.js';
 import { notify, ensureAumidRegistered, isGlobalToastEnabled } from './utils/notifier.js';
 
+// 未捕获异常/拒绝：单次只记日志（代理要尽量活着）。
+// 但短时间连续出现说明进程已进入不可信状态（可能挂着僵死的上游连接、
+// 内部状态被写坏）——达到阈值即主动退出，交给服务管理器/看门狗重启。
+const CRASH_WINDOW_MS = 5 * 60_000;
+const CRASH_THRESHOLD = 3;
+let crashTimes: number[] = [];
+
+function noteUncaught(kind: string, detail: string): void {
+  const now = Date.now();
+  crashTimes = crashTimes.filter(t => now - t < CRASH_WINDOW_MS);
+  crashTimes.push(now);
+  logger.error(`[CRITICAL] Uncaught ${kind}: ${detail}`);
+  if (crashTimes.length >= CRASH_THRESHOLD) {
+    logger.error(`[CRITICAL] ${CRASH_THRESHOLD} uncaught ${kind} within 5 minutes; exiting for supervisor restart.`);
+    process.exit(1);
+  }
+}
+
 process.on('uncaughtException', err => {
-  logger.error(`[CRITICAL] Uncaught Exception: ${err.message}`);
+  noteUncaught('Exception', err.message);
 });
 
 process.on('unhandledRejection', (reason: any) => {
-  logger.error(`[CRITICAL] Unhandled Rejection: ${reason?.message || reason}`);
+  noteUncaught('Rejection', reason?.message || String(reason));
 });
 
 const config = loadConfig();
@@ -150,6 +168,15 @@ const start = async () => {
     console.log('=============================================================\n');
 
     logger.info(`[SERVER] CommandCode Proxy v4 running on ${dashboardUrl}`);
+
+    // 绑定到非回环地址 = API 与管理面对整个局域网可见。未设共享密钥时必须讲清楚后果。
+    if (!['127.0.0.1', 'localhost', '::1'].includes(config.host) && !process.env.PROXY_API_KEY) {
+      logger.warn(
+        '[SECURITY] 绑定在非回环地址且未设置 PROXY_API_KEY：局域网内任何人都可以调用 API ' +
+        '并管理本网关（增删账号、切换 Key、清空历史）。建议设置 PROXY_API_KEY，或改回 127.0.0.1。'
+      );
+      console.warn('\n⚠️  局域网暴露且未鉴权：请设置 PROXY_API_KEY（见 README）或改回 127.0.0.1。\n');
+    }
 
     if (process.env.NODE_ENV !== 'test' && !process.env.NO_OPEN_BROWSER) {
       openBrowser(dashboardUrl);

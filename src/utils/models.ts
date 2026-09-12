@@ -11,18 +11,12 @@
 import fs from 'fs';
 import path from 'path';
 import { loadConfig, assertSafeUpstreamUrl } from './config.js';
+import { getProjectRootDir } from './paths.js';
 import { logger } from './logger.js';
 import { buildAvailabilityMap } from './plans.js';
 import { ModelItem, ModelPricing, ModelCaps, ModelDeal, TimeOfDayPricing } from '../types/index.js';
 
 export interface UpstreamModel extends ModelItem {}
-
-function getProjectRootDir(): string {
-  if ((process as any).pkg || process.execPath.toLowerCase().includes('commandcode-proxy')) {
-    return path.dirname(process.execPath);
-  }
-  return process.cwd();
-}
 
 const MODELS_FILE_PATH = process.env.COMMANDCODE_MODELS_CACHE_PATH
   ? path.resolve(process.env.COMMANDCODE_MODELS_CACHE_PATH)
@@ -83,6 +77,11 @@ export function getCachedModels(): ModelItem[] {
   return cachedModels;
 }
 
+/** 仅供测试：替换内存模型缓存（resolveModelName 等纯内存逻辑借此获得确定输入）。 */
+export function setCachedModelsForTest(models: ModelItem[]): void {
+  cachedModels = models;
+}
+
 // ── 官方定价目录（commandcode.ai）────────────────────────────────────────────
 
 interface PricingCatalogEntry {
@@ -137,8 +136,8 @@ function normalizeId(s: string): string {
   return String(s || '').toLowerCase().trim();
 }
 
-/** 从嵌在定价页 HTML 的 Next.js RSC payload 中提取模型数组。 */
-function parsePricingFromHtml(html: string): PricingCatalogEntry[] {
+/** 从嵌在定价页 HTML 的 Next.js RSC payload 中提取模型数组。导出便于用 fixture 锁定解析契约。 */
+export function parsePricingFromHtml(html: string): PricingCatalogEntry[] {
   // App Router RSC 飞行数据通过 self.__next_f.push([1,"..."]) 分块注入，
   // 各块内是转义的 JS 字符串字面量；先解转义并按序拼接成完整 flight 文本。
   const chunks: string[] = [];

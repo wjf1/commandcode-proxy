@@ -25,6 +25,18 @@ export function estimateTokens(bytes: number): number {
   return Math.round(bytes / 4);
 }
 
+/**
+ * CJK 感知的文本 token 估算。
+ * `estimateTokens` 的 4 字符/token 对英文成立，但中文约 1-1.6 字符/token，
+ * 按 4 字符折算会低估数倍。这里 CJK 字符按 1 字 1 token、其余按 4 字符
+ * 1 token 估算。仅用于上游未回 usage 时的兜底口径，不参与计费。
+ */
+export function estimateTextTokens(text: string): number {
+  if (!text) return 0;
+  const cjk = (text.match(/[\u3400-\u9FFF\uF900-\uFAFF\u3040-\u30FF\uAC00-\uD7AF]/g) || []).length;
+  return cjk + Math.ceil((text.length - cjk) / 4);
+}
+
 /** 判断一个错误是否为"客户端/上游中止"类错误，用于决定是否放弃重试。 */
 export function isAbortError(err: any): boolean {
   if (!err) return false;
@@ -170,7 +182,7 @@ export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<
           parsedMsg = JSON.parse(errorText).message || JSON.parse(errorText)?.error?.message || '';
         } catch {}
         const displayMsg = parsedMsg || errorText.slice(0, 200);
-        logger.error(`[UPSTREAM] Model: ${body.params.model} | Error ${response.status}: ${displayMsg}`);
+        logger.error(`[UPSTREAM] Model: ${body.params.model} | Thread ${body.threadId} | Error ${response.status}: ${displayMsg}`);
 
         // 终止性计费/套餐错误：永不重试（原版 CLI 行为）。
         const retryable = isRetryableFailure(response.status, displayMsg);
@@ -229,7 +241,7 @@ export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<
       }
       if (attempt < maxAttempts) {
         const backoffMs = Math.min(8000, 500 * Math.pow(2, attempt - 1));
-        logger.warn(`[UPSTREAM] Network error (${err.message}), retry ${attempt}/${maxAttempts - 1} in ${backoffMs}ms`);
+        logger.warn(`[UPSTREAM] Thread ${body.threadId} | Network error (${err.message}), retry ${attempt}/${maxAttempts - 1} in ${backoffMs}ms`);
         await sleep(backoffMs);
         continue;
       }

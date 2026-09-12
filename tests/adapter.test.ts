@@ -245,16 +245,42 @@ describe('Stream encoding', () => {
     expect(out[3]).toContain('[DONE]');
   });
 
-  it('splits inline  thinking tags into reasoning_content', () => {
+  it('splits inline <think> tags into reasoning_content', () => {
     const state = adapter.createStreamEncoderState('m');
     const chunks = adapter.encodeOpenAIChunk(
-      { type: 'text-delta', text: ' thinkinghmm responsevisible' },
+      { type: 'text-delta', text: '<think>hmm</think>visible' },
       state
     );
     const joined = chunks.join('');
     expect(joined).toContain('reasoning_content');
     expect(joined).toContain('"content":"visible"');
-    expect(joined).not.toContain(' thinking');
+    expect(joined).not.toContain('<think>');
+  });
+
+  it('routes plain English containing the word "thinking" as normal content', () => {
+    const state = adapter.createStreamEncoderState('m');
+    const chunks = adapter.encodeOpenAIChunk(
+      { type: 'text-delta', text: 'I am thinking about the response format.' },
+      state
+    );
+    const joined = chunks.join('');
+    expect(joined).toContain('"content":"I am thinking');
+    expect(joined).not.toContain('reasoning_content');
+  });
+
+  it('handles <think> tags split across adjacent deltas', () => {
+    const state = adapter.createStreamEncoderState('m');
+    const out = [
+      ...adapter.encodeOpenAIChunk({ type: 'text-delta', text: '<think>par' }, state),
+      ...adapter.encodeOpenAIChunk({ type: 'text-delta', text: 'tial</think>ans' }, state),
+      ...adapter.encodeOpenAIChunk({ type: 'text-delta', text: 'wer' }, state),
+    ];
+    const joined = out.join('');
+    // 流式按 delta 分片输出，由客户端负责拼接。
+    expect(joined).toContain('"reasoning_content":"par"');
+    expect(joined).toContain('"reasoning_content":"tial"');
+    expect(joined).toContain('"content":"ans"');
+    expect(joined).toContain('"content":"wer"');
   });
 
   it('builds valid Anthropic non-streaming response with tool_use', () => {

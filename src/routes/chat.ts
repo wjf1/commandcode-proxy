@@ -12,26 +12,19 @@
 // =============================================================================
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { createInterface } from 'readline';
+import crypto from 'node:crypto';
 import { CommandCodeAdapter } from '../adapters/commandcode/adapter.js';
-import { sendToCC, isAbortError, estimateTokens } from '../adapters/commandcode/upstream.js';
-import { accumulateUsage, createUsageAccumulator, UsageAccumulator } from '../adapters/commandcode/usage.js';
-import { buildRequestContext, RequestContext } from '../utils/request-context.js';
+import { sendToCC, isAbortError, estimateTextTokens } from '../adapters/commandcode/upstream.js';
+import { accumulateUsage, createUsageAccumulator } from '../adapters/commandcode/usage.js';
+import { buildRequestContext } from '../utils/request-context.js';
+import { hardenConnectionForLongStream, persistCompletion, writeSSEHeaders, parseEventLine } from './sse-common.js';
 import { OpenAIChatRequest, CCEvent } from '../types/index.js';
 import { getActiveApiKey, getGatewayRunning, checkAndRotateAccountsOnQuota } from '../utils/config.js';
 import { logger } from '../utils/logger.js';
 import { ErrorCode, ProxyError, toProxyError } from '../utils/errors.js';
-import { recordCompletion, estimateCostUsd } from '../utils/usage-store.js';
 
 function fmtNum(n: number): string {
   return n.toLocaleString('en-US');
-}
-
-function writeSSEHeaders(reply: any): void {
-  reply.raw.setHeader('Content-Type', 'text/event-stream');
-  reply.raw.setHeader('Cache-Control', 'no-cache');
-  reply.raw.setHeader('Connection', 'keep-alive');
-  reply.raw.setHeader('X-Accel-Buffering', 'no');
-  reply.raw.flushHeaders?.();
 }
 
 function logCompletion(inputTokens: number, outputTokens: number, startTime: number, model: string): void {
@@ -39,84 +32,34 @@ function logCompletion(inputTokens: number, outputTokens: number, startTime: num
   logger.info(`Input Tokens ${fmtNum(inputTokens)} | Output Tokens ${fmtNum(outputTokens)} | Timing ${timing}s | Model ${model} | Status COMPLETED`);
 }
 
-/**
- * 持久化一次会话记录到 usage-history.jsonl。
- * 成本优先取上游权威金额（上游已算好峰谷价与缓存折扣），缺失时才本地估算。
- */
-function persistCompletion(
-  model: string,
-  usage: UsageAccumulator,
-  context: RequestContext,
-  startTime: number,
-  status: 'COMPLETED' | 'FAILED',
-  traceId?: string,
-  mode: 'chat' | 'messages' = 'chat'
-): void {
-  const estimated = estimateCostUsd(model, usage.inputTokens || 0, usage.outputTokens || 0, {
-    cacheReadTokens: usage.cacheReadTokens,
-    cacheWriteTokens: usage.cacheWriteTokens,
-    at: new Date(startTime),
-  });
-  const hasUpstreamCost = usage.upstreamCostUsd !== undefined;
-  recordCompletion({
-    timestamp: new Date().toISOString(),
-    model,
-    inputTokens: usage.inputTokens || 0,
-    outputTokens: usage.outputTokens || 0,
-    cacheReadTokens: usage.cacheReadTokens || 0,
-    cacheWriteTokens: usage.cacheWriteTokens || 0,
-    timingMs: Date.now() - startTime,
-    costUsd: hasUpstreamCost ? usage.upstreamCostUsd! : estimated.costUsd,
-    costSource: hasUpstreamCost ? 'official' : 'estimated',
-    estimatedCostUsd: estimated.costUsd,
-    hasPricing: hasUpstreamCost || estimated.hasPricing,
-    status,
-    traceId,
-    mode,
-    ...contextRecordFields(context),
-  });
-}
-
-/** 把请求上下文摊平成记录字段；不确定的项留空，不写占位值。 */
-function contextRecordFields(ctx: RequestContext) {
-  return {
-    ...(ctx.sessionId ? { sessionId: ctx.sessionId } : {}),
-    ...(ctx.project ? { project: ctx.project } : {}),
-    ...(ctx.projectSource ? { projectSource: ctx.projectSource } : {}),
-    ...(ctx.sessionType ? { sessionType: ctx.sessionType } : {}),
-    ...(ctx.agent ? { agent: ctx.agent } : {}),
-    ...(ctx.timezone ? { timezone: ctx.timezone } : {}),
-  };
-}
-
-/** 解析一行 SSE 为一个 CCEvent；空行或 [DONE] 返回 null。 */
-function parseEventLine(line: string): CCEvent | null {
-  const trimmed = line.trim();
-  if (!trimmed) return null;
-  const jsonStr = trimmed.startsWith('data:') ? trimmed.slice(5).trim() : trimmed;
-  if (!jsonStr || jsonStr === '[DONE]') return null;
-  try {
-    return JSON.parse(jsonStr);
-  } catch {
-    return null;
+/** 常量时间字符串比较，避免逐字节短路泄露密钥前缀。 */
+function safeEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a, 'utf8');
+  const bb = Buffer.from(b, 'utf8');
+  if (ab.length !== bb.length) {
+    crypto.timingSafeEqual(ab, ab); // 仍做一次等长比较，保持耗时与内容无关
+    return false;
   }
+  return crypto.timingSafeEqual(ab, bb);
 }
 
 /**
- * 可选的共享密钥鉴权。设置 PROXY_API_KEY 环境变量后，每个 /v1/* 调用都必须
- * 以 `Authorization: Bearer <key>` 或 `x-api-key` 携带它。未设置 = 开放本机访问
- * （默认回环绑定已保证安全）。
+ * 可选的共享密钥鉴权。设置 PROXY_API_KEY 环境变量后：
+ *  - `/v1/*`：API 调用方必须以 `Authorization: Bearer <key>` 或 `x-api-key` 携带它；
+ *  - `/api/*`：管理面同一把密钥（绑定 0.0.0.0 时防止局域网直连增删账号）。
+ * 未设置 = 开放本机访问（默认回环绑定已保证安全）。仪表盘 HTML 本身保持公开，
+ * 前端在 /api 401 时弹密钥输入框。
  */
 export function verifyProxyAuth(fastify: FastifyInstance): void {
   const requiredKey = process.env.PROXY_API_KEY?.trim();
   if (!requiredKey) return;
 
   fastify.addHook('onRequest', async (req: FastifyRequest, reply: FastifyReply) => {
-    if (!req.url.startsWith('/v1/')) return;
+    if (!req.url.startsWith('/v1/') && !req.url.startsWith('/api/')) return;
     const header = req.headers.authorization || '';
     const bearer = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
     const xKey = String(req.headers['x-api-key'] || '').trim();
-    if (bearer !== requiredKey && xKey !== requiredKey) {
+    if (!safeEqual(bearer, requiredKey) && !safeEqual(xKey, requiredKey)) {
       const err = new ProxyError(ErrorCode.PROXY_AUTH_REQUIRED, 'Invalid or missing PROXY_API_KEY');
       // /v1/messages 的调用方按 Anthropic 错误信封解析，其余按 OpenAI 形态。
       return req.url.startsWith('/v1/messages')
@@ -147,28 +90,18 @@ export async function chatRoutes(fastify: FastifyInstance) {
       return reply.status(err.status).send({ error: err.openAIPayload() });
     }
 
-    // 面向长会话（多分钟推理）的 socket 加固。
-    req.raw.setTimeout(0);
-    if (req.raw.socket) {
-      req.raw.socket.setTimeout(0);
-      req.raw.socket.setKeepAlive(true, 10000);
-      req.raw.socket.setNoDelay(true);
-    }
-
     const startTime = Date.now();
     const abortController = new AbortController();
 
-    // 仅当客户端在我们写完之前离开时才取消上游。
-    const onClientClose = () => {
-      if (!reply.raw.writableEnded) abortController.abort();
-    };
-    req.raw.on('aborted', onClientClose);
-    reply.raw.on('close', onClientClose);
+    // 面向长会话（多分钟推理）的 socket 加固；客户端断开则取消上游。
+    hardenConnectionForLongStream(req, reply, abortController);
 
     const translated = adapter.translateOpenAIRequest(body);
     const modelName = translated.params.model;
-    let inputTokens = estimateTokens(JSON.stringify(translated).length);
+    let inputTokens = estimateTextTokens(JSON.stringify(translated));
     const usageAcc = createUsageAccumulator();
+    // 非流式也预生成 traceId：响应 id、错误日志、用量记录三者对得上。
+    const traceId = `chatcmpl-${crypto.randomUUID().slice(0, 8)}`;
     // 会话/项目等归因信息：会话 ID 来自客户端声明，项目为推断（见模块注释）。
     const requestContext = buildRequestContext(req.headers as any, body);
 
@@ -248,7 +181,7 @@ export async function chatRoutes(fastify: FastifyInstance) {
             return;
           }
           cleanupPings();
-          logger.error(`[CHAT] Stream error | Model ${modelName} | ${err.message}`);
+          logger.error(`[CHAT] Stream error | Model ${modelName} | Trace ${state.id} | ${err.message}`);
           if (!state.sawFinish) {
             for (const c of adapter.encodeOpenAIChunk({ type: 'error', error: { message: err.message || 'Upstream stream error' } }, state)) {
               reply.raw.write(c);
@@ -284,12 +217,12 @@ export async function chatRoutes(fastify: FastifyInstance) {
         if (event.type === 'text-delta') {
           const txt = event.text || event.data?.text || '';
           fullText += txt;
-          outputTokens += Math.ceil(txt.length / 4);
+          outputTokens += estimateTextTokens(txt);
         }
         if (event.type === 'reasoning-delta') {
           const txt = event.text || event.data?.text || '';
           reasoningContent += txt;
-          outputTokens += Math.ceil(txt.length / 4);
+          outputTokens += estimateTextTokens(txt);
         }
         if (event.type === 'tool-call' || event.type === 'tool-call-delta') {
           const tcId = ((event.toolCallId || event.data?.toolCallId) as string) || 'call_1';
@@ -332,10 +265,10 @@ export async function chatRoutes(fastify: FastifyInstance) {
         usageAcc.inputTokens = inputTokens;
         usageAcc.outputTokens = outputTokens;
       }
-      persistCompletion(modelName, usageAcc, requestContext, startTime, 'COMPLETED', undefined, 'chat');
+      persistCompletion(modelName, usageAcc, requestContext, startTime, 'COMPLETED', traceId, 'chat');
 
       return reply.send({
-        id: `chatcmpl-${Math.random().toString(36).slice(2, 10)}`,
+        id: traceId,
         object: 'chat.completion',
         created: Math.floor(Date.now() / 1000),
         model: modelName,
@@ -348,7 +281,7 @@ export async function chatRoutes(fastify: FastifyInstance) {
       });
     } catch (err: any) {
       if (isAbortError(err) || err?.isAbort) return reply.raw.end();
-      logger.error(`[CHAT] Fatal request error: ${err.message}`);
+      logger.error(`[CHAT] Fatal request error | Trace ${traceId} | ${err.message}`);
       const proxyErr = toProxyError(err, ErrorCode.INTERNAL_ERROR);
       return reply.status(proxyErr.status).send({ error: proxyErr.openAIPayload() });
     }

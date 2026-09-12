@@ -1,5 +1,5 @@
 // =============================================================================
-// 管理仪表盘（SPA + /api/* 后端接口）
+// 管理仪表盘（/api/* 后端接口；SPA 本体在 public/index.html）
 // -----------------------------------------------------------------------------
 // - 提供中文管理界面：概览、账号与鉴权、用量与额度、模型、实时日志五个标签页
 // - /api/* 为管理员接口：状态、网关开关、日志、账号增删改、OAuth/手动登录、
@@ -9,8 +9,11 @@
 //     防止浏览器里的随机网页驱动管理操作
 //   * esc() 对所有动态渲染进 SPA 的 HTML 做转义，防止 XSS
 // =============================================================================
+import fs from 'fs';
+import path from 'path';
 import { FastifyInstance } from 'fastify';
 import { logger } from '../utils/logger.js';
+import { getProjectRootDir } from '../utils/config.js';
 import {
   loadConfig,
   getGatewayRunning,
@@ -20,7 +23,7 @@ import {
   logoutAccount,
   setActiveAccount,
   setRotationMode,
-  fetchLiveUsageStats,
+  fetchLiveUsageStatsCached,
   getActiveApiKey,
   defaultAccountName,
 } from '../utils/config.js';
@@ -50,6 +53,21 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
     if (req.url.startsWith('/v1/') || req.url === '/health') {
       reply.header('Access-Control-Allow-Origin', '*');
     }
+    // 防跨站驱动管理操作：CORS 只能阻止"读响应"，阻止不了"发请求"。
+    // 浏览器发起的跨站写请求会带 Origin 头，这里校验其 host 必须与请求的
+    // host 一致；非浏览器客户端（curl/SDK）不带 Origin，直接放行。
+    if (req.url.startsWith('/api/') && !['GET', 'OPTIONS', 'HEAD'].includes(req.method)) {
+      const origin = req.headers.origin;
+      if (origin) {
+        let sameHost = false;
+        try {
+          sameHost = new URL(origin).host === req.headers.host;
+        } catch { /* 非法 Origin 一律拒绝 */ }
+        if (!sameHost) {
+          return reply.status(403).send({ error: 'Cross-origin admin request rejected' });
+        }
+      }
+    }
     // 仪表盘 HTML 与管理 API 禁用缓存：升级后浏览器不会再用旧页面调新接口。
     if (req.url === '/' || req.url.startsWith('/api/') || req.url.startsWith('/?')) {
       reply.header('Cache-Control', 'no-cache');
@@ -62,6 +80,35 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
       .header('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-api-key, anthropic-version')
       .status(204)
       .send();
+  });
+
+  // ── 本地化静态资源（原 CDN：tailwind / font-awesome / chart.js）────────────
+  // 离线或 CDN 被墙时仪表盘不再掉样式、丢图表。文件随仓库 public/vendor/ 分发，
+  // pkg 打包时列入 assets。
+  const VENDOR_DIR = path.join(getProjectRootDir(), 'public', 'vendor');
+  const DASHBOARD_HTML_PATH = path.join(getProjectRootDir(), 'public', 'index.html');
+  const VENDOR_TYPES: Record<string, string> = {
+    '.js': 'application/javascript; charset=utf-8',
+    '.css': 'text/css; charset=utf-8',
+    '.woff2': 'font/woff2',
+    '.ttf': 'font/ttf',
+  };
+  fastify.get('/assets/vendor/*', async (req, reply) => {
+    const rel = decodeURIComponent(String((req.params as any)['*'] || ''));
+    if (!rel || rel.includes('..') || rel.includes('\\') || rel.startsWith('/')) {
+      return reply.status(404).send();
+    }
+    const file = path.join(VENDOR_DIR, ...rel.split('/'));
+    try {
+      const data = await fs.promises.readFile(file);
+      const ext = path.extname(file).toLowerCase();
+      return reply
+        .header('Content-Type', VENDOR_TYPES[ext] || 'application/octet-stream')
+        .header('Cache-Control', 'public, max-age=86400')
+        .send(data);
+    } catch {
+      return reply.status(404).send();
+    }
   });
 
   fastify.get('/api/status', async () => {
@@ -88,6 +135,8 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
       hasApiKey: !!getActiveApiKey(),
       modelsCount: getCachedModels().length,
       authRequired: !!process.env.PROXY_API_KEY,
+      // 绑定非回环地址 = API 与管理面对局域网可见；未设 PROXY_API_KEY 时前端要醒目警示
+      boundNonLoopback: !['127.0.0.1', 'localhost', '::1'].includes(config.host),
     };
   });
 
@@ -184,7 +233,7 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
 
     const results = await Promise.all(
       targetAccounts.map(async (acc: any) => {
-        const stats = await fetchLiveUsageStats(acc.apiKey, config.ccApiBase, config.ccVersion);
+        const stats = await fetchLiveUsageStatsCached(acc.apiKey, config.ccApiBase, config.ccVersion);
         const who = stats.whoami?.user;
         return {
           account: {
@@ -213,7 +262,7 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
     if (!acc || !acc.apiKey) {
       return { error: 'No active Command Code account' };
     }
-    const stats = await fetchLiveUsageStats(acc.apiKey, config.ccApiBase, config.ccVersion);
+    const stats = await fetchLiveUsageStatsCached(acc.apiKey, config.ccApiBase, config.ccVersion);
     const s = stats.summary || {};
     const credits = stats.credits?.credits || {};
     const wl = stats.credits?.windowLimits || {};
@@ -339,962 +388,17 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
 
   // ─── 仪表盘 SPA ────────────────────────────────────────────────────────────
 
+  // ── 仪表盘 SPA ────────────────────────────────────────────────────────────
+  // 页面本体是静态文件 public/index.html（v4.9.3 起从模板字符串迁出，可独立
+  // 编辑与测试）；pkg 打包时列入 assets。禁用缓存：升级后浏览器不会再用旧
+  // 页面调新接口。
   fastify.get('/', async (_req, reply) => {
-    reply.header('Content-Type', 'text/html');
-    return `<!DOCTYPE html>
-<html lang="zh-CN" class="dark">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CommandCode 代理控制器 v4</title>
-<script src="https://cdn.tailwindcss.com"></script>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-<style>body{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}.tab-btn.active{border-bottom:2px solid #6366f1;color:#818cf8;font-weight:600}.mfilter-chip{padding:5px 12px;border-radius:9999px;font-size:11px;font-weight:600;color:#94a3b8;background:#0f172a;border:1px solid #334155;cursor:pointer;transition:all .15s;white-space:nowrap}.mfilter-chip:hover{color:#e2e8f0;border-color:#475569}.mfilter-chip.on{color:#fff;background:linear-gradient(100deg,#6366f1,#8b5cf6);border-color:transparent;box-shadow:0 2px 10px rgba(99,102,241,.35)}mark{background:rgba(129,140,248,.35);color:#e0e7ff;border-radius:3px;padding:0 1px}</style>
-</head>
-<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col">
-
-<header class="border-b border-slate-800 bg-slate-900/80 backdrop-blur px-6 py-4 flex items-center justify-between sticky top-0 z-50">
-  <div class="flex items-center space-x-3">
-    <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-600 to-violet-500 flex items-center justify-center text-white shadow-lg shadow-indigo-500/20"><i class="fa-solid fa-bolt text-lg"></i></div>
-    <div>
-      <h1 class="font-bold text-lg leading-tight text-white flex items-center gap-2">CommandCode 代理 <span class="text-xs font-semibold px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">v4</span></h1>
-      <p class="text-xs text-slate-400">OpenAI Chat 与 Anthropic Messages 兼容网关</p>
-    </div>
-  </div>
-  <div class="flex items-center space-x-4">
-    <div class="flex items-center space-x-2 px-3 py-1.5 rounded-full bg-slate-800 border border-slate-700 text-xs">
-      <span id="statusDot" class="w-2.5 h-2.5 rounded-full bg-slate-500"></span>
-      <span id="statusText" class="font-medium text-slate-300">检测中...</span>
-    </div>
-    <button onclick="toggleEngine()" class="px-4 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white transition shadow-md shadow-emerald-600/20"><i class="fa-solid fa-power-off"></i> <span id="toggleBtnText">切换</span></button>
-  </div>
-</header>
-
-<nav class="border-b border-slate-800 bg-slate-900/40 px-6 flex space-x-8 text-sm text-slate-400">
-  <button onclick="switchTab('overview')" id="tab-overview" class="tab-btn active py-3 flex items-center gap-2"><i class="fa-solid fa-gauge-high"></i> 概览</button>
-  <button onclick="switchTab('accounts')" id="tab-accounts" class="tab-btn py-3 flex items-center gap-2"><i class="fa-solid fa-users-gear"></i> 账号与鉴权</button>
-  <button onclick="switchTab('usage')" id="tab-usage" class="tab-btn py-3 flex items-center gap-2"><i class="fa-solid fa-chart-pie"></i> 用量与额度</button>
-  <button onclick="switchTab('models')" id="tab-models" class="tab-btn py-3 flex items-center gap-2"><i class="fa-solid fa-cubes"></i> 模型</button>
-  <button onclick="switchTab('logs')" id="tab-logs" class="tab-btn py-3 flex items-center gap-2"><i class="fa-solid fa-terminal"></i> 实时日志</button>
-</nav>
-
-<main class="flex-1 p-6 max-w-7xl w-full mx-auto space-y-6">
-
-<section id="content-overview" class="space-y-6">
-  <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
-    <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl"><p class="text-xs text-slate-400 font-medium">网关服务</p><h3 id="statPort" class="text-xl font-bold text-white mt-1">Port :9090</h3><p id="statUptime" class="text-xs text-indigo-400 mt-2">运行时间：0s</p></div>
-    <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl"><p class="text-xs text-slate-400 font-medium">当前账号</p><h3 id="statAccount" class="text-xl font-bold text-white mt-1">None</h3><p id="statAccountsCount" class="text-xs text-slate-400 mt-2">0 个账号已注册</p></div>
-    <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl"><p class="text-xs text-slate-400 font-medium">安全</p><h3 id="statBind" class="text-xl font-bold text-emerald-400 mt-1">127.0.0.1</h3><p id="statAuth" class="text-xs text-slate-400 mt-2">API 鉴权：关闭</p></div>
-    <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl"><p class="text-xs text-slate-400 font-medium">可用模型</p><h3 id="statModels" class="text-xl font-bold text-white mt-1">0</h3><p class="text-xs text-emerald-400 mt-2"><i class="fa-solid fa-check"></i> 可用于对话</p></div>
-  </div>
-  <div class="bg-slate-900 border border-slate-800 rounded-xl p-6">
-    <h2 class="text-md font-semibold text-white mb-4 flex items-center gap-2"><i class="fa-solid fa-link text-indigo-400"></i> 已启用的 API 接口</h2>
-    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-      <div class="p-4 bg-slate-950/60 border border-slate-800 rounded-lg"><span class="text-xs font-bold px-2 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20">POST</span><span class="font-mono text-sm text-slate-200 ml-2">/v1/chat/completions</span><p class="text-xs text-slate-400 mt-2">OpenAI 对话补全 — 工具、视觉、推理</p></div>
-      <div class="p-4 bg-slate-950/60 border border-slate-800 rounded-lg"><span class="text-xs font-bold px-2 py-0.5 rounded bg-orange-500/10 text-orange-400 border border-orange-500/20">POST</span><span class="font-mono text-sm text-slate-200 ml-2">/v1/messages</span><p class="text-xs text-slate-400 mt-2">Anthropic Messages — 工具调用、思考块</p></div>
-      <div class="p-4 bg-slate-950/60 border border-slate-800 rounded-lg"><span class="text-xs font-bold px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">GET</span><span class="font-mono text-sm text-slate-200 ml-2">/v1/models</span><p class="text-xs text-slate-400 mt-2">上游实时模型目录</p></div>
-    </div>
-  </div>
-</section>
-
-<section id="content-accounts" class="space-y-6 hidden">
-  <div class="flex items-center justify-between">
-    <div>
-      <h2 class="text-lg font-bold text-white">多账号管理</h2>
-      <p class="text-xs text-slate-400">使用 Command Code CLI 浏览器授权登录，或直接粘贴 API Key</p>
-    </div>
-    <div class="flex space-x-3">
-      <button onclick="startBrowserLogin()" id="browserAuthBtn" class="px-4 py-2 bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white rounded-lg text-xs font-semibold flex items-center gap-2 shadow-lg shadow-indigo-600/20"><i class="fa-solid fa-globe"></i> 浏览器登录（OAuth）</button>
-      <button onclick="showLoginModal()" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold flex items-center gap-2 border border-slate-700"><i class="fa-solid fa-key"></i> 手动输入 Key</button>
-    </div>
-  </div>
-  <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl flex items-center justify-between">
-    <div>
-      <h3 class="text-sm font-semibold text-white">账号轮换策略</h3>
-      <p class="text-xs text-slate-400">自动额度模式每 30 分钟检查 5 小时额度窗口，使用率 ≥90% 时自动切换</p>
-    </div>
-    <select id="rotationSelect" onchange="changeRotationMode(this.value)" class="bg-slate-950 border border-slate-700 text-slate-200 text-xs rounded-lg px-3 py-2 outline-none font-semibold">
-      <option value="manual">手动选择</option>
-      <option value="auto-quota">自动额度保护（30 分钟检查）</option>
-    </select>
-  </div>
-  <div id="accountsGrid" class="grid grid-cols-1 md:grid-cols-2 gap-4"></div>
-</section>
-
-<section id="content-usage" class="space-y-6 hidden">
-  <div class="flex items-center justify-between">
-    <div>
-      <h2 class="text-lg font-bold text-white">实时用量与额度</h2>
-      <p class="text-xs text-slate-400">各账号的实时余额与额度窗口</p>
-    </div>
-    <select id="usageAccountSelect" onchange="renderUsageForAccount(this.value)" class="bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded-lg px-3 py-2 outline-none font-semibold"></select>
-  </div>
-  <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
-    <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl"><p class="text-xs text-slate-400 font-medium">月度额度</p><h3 id="creditMonthly" class="text-2xl font-extrabold text-emerald-400 mt-1">$0.00</h3></div>
-    <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl"><p class="text-xs text-slate-400 font-medium">已购买</p><h3 id="creditPurchased" class="text-2xl font-extrabold text-indigo-400 mt-1">$0.00</h3></div>
-    <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl"><p class="text-xs text-slate-400 font-medium">免费额度</p><h3 id="creditFree" class="text-2xl font-extrabold text-cyan-400 mt-1">$0.00</h3></div>
-    <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl"><p class="text-xs text-slate-400 font-medium">总消费</p><h3 id="creditTotalCost" class="text-2xl font-extrabold text-purple-400 mt-1">$0.00</h3></div>
-  </div>
-  <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
-    <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl"><p class="text-xs text-slate-400 font-medium">Total Tokens</p><h3 id="ovTotalTokens" class="text-2xl font-extrabold text-purple-400 mt-1">--</h3><p id="ovTokensDetail" class="text-[11px] text-slate-400 mt-2">输入 -- · 输出 --</p></div>
-    <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl"><p class="text-xs text-slate-400 font-medium">Total Runs</p><h3 id="ovTotalRuns" class="text-2xl font-extrabold text-amber-400 mt-1">--</h3><p id="ovRunsDetail" class="text-[11px] text-slate-400 mt-2">成功 -- · 失败 --</p></div>
-    <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl"><p class="text-xs text-slate-400 font-medium">成功率</p><h3 id="ovSuccessRate" class="text-2xl font-extrabold text-cyan-400 mt-1">--</h3><p id="ovPeriod" class="text-[11px] text-slate-400 mt-2">统计口径：--</p></div>
-    <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl"><p class="text-xs text-slate-400 font-medium">月度限额</p><h3 id="ovMonthly" class="text-2xl font-extrabold text-emerald-400 mt-1">--</h3><div class="w-full bg-slate-950 rounded-full h-1.5 overflow-hidden border border-slate-800 mt-2"><div id="ovMonthlyBar" class="h-1.5 rounded-full bg-emerald-500 transition-all duration-500" style="width:0%"></div></div><p id="ovMonthlyDetail" class="text-[11px] text-slate-400 mt-1.5">--</p></div>
-  </div>
-  <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-    <div class="bg-slate-900 border border-slate-800 p-6 rounded-xl space-y-3">
-      <div class="flex items-center justify-between"><h3 class="font-bold text-sm text-white"><i class="fa-solid fa-clock text-indigo-400"></i> 5 小时窗口</h3><span id="window5hText" class="text-xs font-semibold text-slate-300">$0.00 / $0.00</span></div>
-      <div class="w-full bg-slate-950 rounded-full h-2.5 overflow-hidden border border-slate-800"><div id="window5hBar" class="bg-indigo-500 h-2.5 rounded-full transition-all duration-500" style="width:0%"></div></div>
-      <p id="window5hReset" class="text-[11px] text-slate-400 text-right">重置时间：--</p>
-    </div>
-    <div class="bg-slate-900 border border-slate-800 p-6 rounded-xl space-y-3">
-      <div class="flex items-center justify-between"><h3 class="font-bold text-sm text-white"><i class="fa-solid fa-calendar-week text-violet-400"></i> 每周窗口</h3><span id="windowWeeklyText" class="text-xs font-semibold text-slate-300">$0.00 / $0.00</span></div>
-      <div class="w-full bg-slate-950 rounded-full h-2.5 overflow-hidden border border-slate-800"><div id="windowWeeklyBar" class="bg-violet-500 h-2.5 rounded-full transition-all duration-500" style="width:0%"></div></div>
-      <p id="windowWeeklyReset" class="text-[11px] text-slate-400 text-right">重置时间：--</p>
-    </div>
-    <div class="bg-slate-900 border border-slate-800 p-6 rounded-xl space-y-3">
-      <div class="flex items-center justify-between"><h3 class="font-bold text-sm text-white"><i class="fa-solid fa-calendar-days text-emerald-400"></i> 计费周期 <span id="cyclePlan" class="text-[11px] text-slate-400 font-normal"></span></h3><span id="cycleRenew" class="text-xs font-semibold text-slate-300">--</span></div>
-      <div class="flex items-baseline gap-2"><span id="cycleDays" class="text-2xl font-extrabold text-white">--</span><span class="text-xs text-slate-400">天后额度重置</span></div>
-      <div class="w-full bg-slate-950 rounded-full h-2.5 overflow-hidden border border-slate-800"><div id="cycleBar" class="bg-emerald-500 h-2.5 rounded-full transition-all duration-500" style="width:0%"></div></div>
-      <p id="cycleRange" class="text-[11px] text-slate-400 text-right">--</p>
-    </div>
-  </div>
-
-  <div class="bg-slate-900 border border-slate-800 rounded-xl p-6">
-    <div class="flex items-center justify-between">
-      <div>
-        <h2 class="text-md font-semibold text-white flex items-center gap-2"><i class="fa-solid fa-list-check text-indigo-400"></i> 会话明细</h2>
-        <p class="text-xs text-slate-400 mt-0.5">经过本网关的每次请求：token、耗时、成本、模型、状态（持久化到本地）</p>
-      </div>
-      <button onclick="clearUsageHistory()" class="px-3 py-1.5 bg-slate-800 hover:bg-rose-900/60 text-slate-300 hover:text-rose-200 text-xs rounded-lg flex items-center gap-1.5 border border-slate-700 transition"><i class="fa-solid fa-trash-can"></i> 清空历史</button>
-    </div>
-
-    <div id="billingWindow" class="mt-4 hidden"></div>
-
-    <div class="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-4 mt-4">
-      <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg"><p class="text-[11px] text-slate-400 font-medium">今日 Token</p><h3 id="usageTodayToken" class="text-lg font-bold text-white mt-1">--</h3><p id="usageTodayRuns" class="text-[11px] text-slate-400 mt-1">-- 次请求</p></div>
-      <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg"><p class="text-[11px] text-slate-400 font-medium">本周成本</p><h3 id="usageWeekCost" class="text-lg font-bold text-emerald-400 mt-1">--</h3><p id="usageWeekToken" class="text-[11px] text-slate-400 mt-1">--</p></div>
-      <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg"><p class="text-[11px] text-slate-400 font-medium">本月成本</p><h3 id="usageMonthCost" class="text-lg font-bold text-emerald-400 mt-1">--</h3><p id="usageMonthToken" class="text-[11px] text-slate-400 mt-1">--</p></div>
-      <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg" title="缓存命中的输入按缓存读单价计费（约为输入价的 1/50），此处为相比全价输入省下的金额"><p class="text-[11px] text-slate-400 font-medium">缓存节省 <i class="fa-solid fa-circle-info text-slate-600"></i></p><h3 id="usageSavings" class="text-lg font-bold text-sky-400 mt-1">--</h3><p id="usageSavingsNote" class="text-[11px] text-slate-400 mt-1">--</p></div>
-      <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg"><p class="text-[11px] text-slate-400 font-medium">累计</p><h3 id="usageTotalToken" class="text-lg font-bold text-white mt-1">--</h3><p id="usageTotalRuns" class="text-[11px] text-slate-400 mt-1">-- 次请求</p><p id="usageCacheHit" class="text-[11px] text-sky-400 mt-1">--</p><p id="usagePricingNote" class="text-[11px] text-amber-400 mt-1 hidden"><i class="fa-solid fa-triangle-exclamation"></i> 未同步定价</p></div>
-    </div>
-
-    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
-      <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg">
-        <h3 class="font-bold text-xs text-white mb-3"><i class="fa-solid fa-chart-line text-indigo-400"></i> 每日 Token 趋势</h3>
-        <div class="h-56"><canvas id="usageTrendChart"></canvas></div>
-      </div>
-      <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg">
-        <h3 class="font-bold text-xs text-white mb-3"><i class="fa-solid fa-chart-pie text-violet-400"></i> 模型分布</h3>
-        <div class="h-56"><canvas id="usageModelChart"></canvas></div>
-      </div>
-    </div>
-
-    <div class="mt-4 bg-slate-950/60 border border-slate-800 p-4 rounded-lg">
-      <div class="flex items-center justify-between flex-wrap gap-2">
-        <h3 class="font-bold text-xs text-white"><i class="fa-solid fa-gauge-high text-cyan-400"></i> 端到端性能</h3>
-        <span class="text-[11px] text-slate-500" title="耗时覆盖整个请求生命周期（上游排队、重试、网络往返），反映体感等待而非模型生成速度">口径：端到端，非模型生成速度</span>
-      </div>
-      <div class="overflow-x-auto mt-3">
-        <table class="w-full text-xs text-left">
-          <thead class="bg-slate-950/60 text-slate-400">
-            <tr>
-              <th class="px-2 py-2 font-medium">模型</th>
-              <th class="px-2 py-2 font-medium text-right">样本</th>
-              <th class="px-2 py-2 font-medium text-right">吞吐 P50</th>
-              <th class="px-2 py-2 font-medium text-right">吞吐 P95</th>
-              <th class="px-2 py-2 font-medium text-right">延迟 P50</th>
-              <th class="px-2 py-2 font-medium text-right">延迟 P95</th>
-            </tr>
-          </thead>
-          <tbody id="perfTableBody" class="divide-y divide-slate-800/60"></tbody>
-        </table>
-      </div>
-    </div>
-
-    <div class="mt-4 bg-slate-950/40 border border-slate-800 rounded-lg overflow-hidden">
-      <div class="flex items-center justify-between px-4 py-2.5 border-b border-slate-800">
-        <h3 class="font-bold text-xs text-white"><i class="fa-solid fa-table-list text-emerald-400"></i> 请求明细</h3>
-        <span id="usageRecentCount" class="text-[11px] text-slate-400"></span>
-      </div>
-      <div class="overflow-x-auto max-h-[360px] overflow-y-auto">
-        <table class="w-full text-xs text-left">
-          <thead class="bg-slate-950/60 text-slate-400 sticky top-0 z-10">
-            <tr>
-              <th class="px-3 py-2 font-medium">时间</th>
-              <th class="px-3 py-2 font-medium">模型</th>
-              <th class="px-3 py-2 font-medium text-right">输入</th>
-              <th class="px-3 py-2 font-medium text-right">缓存命中</th>
-              <th class="px-3 py-2 font-medium text-right">输出</th>
-              <th class="px-3 py-2 font-medium text-right" title="输出 token / 端到端耗时（含上游排队、重试与网络），不等于模型生成速度">吞吐 <i class="fa-solid fa-circle-info text-slate-600"></i></th>
-              <th class="px-3 py-2 font-medium text-right">耗时</th>
-              <th class="px-3 py-2 font-medium text-right">成本</th>
-              <th class="px-3 py-2 font-medium">状态</th>
-              <th class="px-3 py-2 font-medium">模式</th>
-            </tr>
-          </thead>
-          <tbody id="usageTableBody" class="divide-y divide-slate-800/60"></tbody>
-        </table>
-        <p id="usageEmpty" class="text-center text-slate-500 text-xs py-8 hidden">暂无会话记录，触发一次对话后在这里查看。</p>
-      </div>
-    </div>
-
-    <!-- 归因：项目（推断）与会话（客户端声明） -->
-    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
-      <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg">
-        <div class="flex items-center justify-between flex-wrap gap-2">
-          <h3 class="font-bold text-xs text-white flex items-center gap-2">
-            <i class="fa-solid fa-folder-tree text-amber-400"></i> 项目分布
-            <span class="px-1.5 py-0.5 rounded text-[10px] bg-amber-500/10 text-amber-400 border border-amber-500/20" title="项目无权威字段来源，由 system prompt 文本推断；上游不提供该维度">推断</span>
-          </h3>
-          <p id="projectCoverage" class="text-[11px] text-slate-500">--</p>
-        </div>
-        <p class="text-[11px] text-slate-500 mt-1">标签来源为 system prompt 中的工作目录字段（较可靠）；启发式来源按路径频次推测，可能不准。</p>
-        <div class="overflow-x-auto max-h-72 overflow-y-auto mt-3">
-          <table class="w-full text-xs text-left">
-            <thead class="bg-slate-950/60 text-slate-400 sticky top-0 z-10">
-              <tr>
-                <th class="px-2 py-2 font-medium">项目</th>
-                <th class="px-2 py-2 font-medium text-right">请求</th>
-                <th class="px-2 py-2 font-medium text-right">Token</th>
-                <th class="px-2 py-2 font-medium text-right">成本</th>
-              </tr>
-            </thead>
-            <tbody id="projectTableBody" class="divide-y divide-slate-800/60"></tbody>
-          </table>
-        </div>
-      </div>
-
-      <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg">
-        <div class="flex items-center justify-between flex-wrap gap-2">
-          <h3 class="font-bold text-xs text-white flex items-center gap-2">
-            <i class="fa-solid fa-comments text-indigo-400"></i> 会话排行
-            <span class="px-1.5 py-0.5 rounded text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" title="会话 ID 由客户端声明（x-session-id），属事实性标识">声明值</span>
-          </h3>
-          <p id="sessionCoverage" class="text-[11px] text-slate-500">--</p>
-        </div>
-        <p class="text-[11px] text-slate-500 mt-1">仅统计携带会话 ID 的请求；未携带的客户端归入下方「未识别」。</p>
-        <div class="overflow-x-auto max-h-72 overflow-y-auto mt-3">
-          <table class="w-full text-xs text-left">
-            <thead class="bg-slate-950/60 text-slate-400 sticky top-0 z-10">
-              <tr>
-                <th class="px-2 py-2 font-medium">会话</th>
-                <th class="px-2 py-2 font-medium">项目</th>
-                <th class="px-2 py-2 font-medium text-right">请求</th>
-                <th class="px-2 py-2 font-medium text-right">成本</th>
-              </tr>
-            </thead>
-            <tbody id="sessionTableBody" class="divide-y divide-slate-800/60"></tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-
-    <p class="text-[11px] text-slate-500 mt-2"><i class="fa-solid fa-circle-info"></i> 归因仅覆盖<b>经过本代理</b>的流量：上游 usage 汇总通常显著高于此处（直连 CLI 等不受代理记录）。</p>
-  </div>
-</section>
-
-<section id="content-models" class="space-y-4 hidden">
-  <div class="flex items-center justify-between gap-3 flex-wrap">
-    <div><h2 class="text-lg font-bold text-white">上游实时模型</h2><p class="text-xs text-slate-400">官方定价目录 · 价格单位：人民币（元）/ 每 1M tokens</p></div>
-    <button onclick="loadModels(true)" id="modelsRefreshBtn" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs rounded-lg flex items-center gap-1.5 shrink-0"><i class="fa-solid fa-rotate"></i> 获取最新模型</button>
-  </div>
-  <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-3 space-y-2.5">
-    <div class="flex items-center gap-2 flex-wrap justify-end">
-      <div class="relative flex-1 min-w-[220px] max-w-[340px] ml-auto">
-        <i class="fa-solid fa-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-xs pointer-events-none"></i>
-        <input id="modelSearch" type="search" placeholder="搜索模型名称 / ID / 提供商…" autocomplete="off"
-          class="w-full bg-slate-950 border border-slate-700 text-slate-200 text-xs rounded-lg pl-8 pr-8 py-2 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/40 placeholder:text-slate-600">
-        <button id="modelSearchClear" title="清空" class="hidden absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-200 text-xs px-1"><i class="fa-solid fa-xmark"></i></button>
-      </div>
-      <select id="modelSort" title="排序" class="bg-slate-950 border border-slate-700 text-slate-300 text-xs rounded-lg px-2.5 py-2 outline-none font-medium cursor-pointer">
-        <option value="default">默认顺序</option>
-        <option value="inAsc">输入价 ↑</option>
-        <option value="inDesc">输入价 ↓</option>
-        <option value="outAsc">输出价 ↑</option>
-        <option value="outDesc">输出价 ↓</option>
-        <option value="cacheReadAsc">缓存读 ↑</option>
-        <option value="cacheReadDesc">缓存读 ↓</option>
-        <option value="ctxDesc">上下文 ↓</option>
-      </select>
-    </div>
-    <div class="flex items-center gap-1.5 flex-wrap" id="modelTagRow">
-      <button class="mfilter-chip on" data-tag="all">全部</button>
-      <button class="mfilter-chip" data-tag="go">GO</button>
-      <button class="mfilter-chip" data-tag="free">FREE</button>
-      <button class="mfilter-chip" data-tag="deal">DEAL</button>
-      <button class="mfilter-chip" data-tag="vision">视觉</button>
-      <button class="mfilter-chip" data-tag="reason">推理</button>
-    </div>
-    <p id="modelsCount" class="text-[11px] text-slate-500 text-right"></p>
-  </div>
-  <div id="modelsList" class="grid grid-cols-1 md:grid-cols-3 gap-3"></div>
-</section>
-
-<section id="content-logs" class="space-y-4 hidden">
-  <div class="flex items-center justify-between">
-    <h2 class="text-lg font-bold text-white">网关事件控制台</h2>
-    <div class="flex items-center space-x-2">
-      <button onclick="clearLogs()" class="px-3 py-1.5 bg-slate-800 hover:bg-rose-900/60 text-slate-300 hover:text-rose-200 text-xs rounded-lg flex items-center gap-1.5 border border-slate-700 transition"><i class="fa-solid fa-trash-can"></i> 清空日志</button>
-      <button onclick="loadLogs()" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs rounded-lg flex items-center gap-1.5 border border-slate-700 transition"><i class="fa-solid fa-rotate"></i> 刷新日志</button>
-    </div>
-  </div>
-  <div class="bg-slate-950 border border-slate-800 rounded-xl p-4 font-mono text-xs text-slate-300 h-[500px] overflow-y-auto space-y-1" id="logsBox"><p class="text-slate-500">正在初始化日志控制台...</p></div>
-</section>
-
-</main>
-
-<div id="loginModal" class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center hidden">
-  <div class="bg-slate-900 border border-slate-800 rounded-xl p-6 max-w-md w-full shadow-2xl space-y-4">
-    <h3 class="text-base font-bold text-white flex items-center gap-2"><i class="fa-solid fa-key text-indigo-400"></i> 添加 Command Code API Key</h3>
-    <div class="space-y-3">
-      <div><label class="text-xs text-slate-300 block mb-1">账号昵称（可选）</label><input type="text" id="loginNickname" placeholder="例如：工作账号" class="w-full bg-slate-950 border border-slate-700 text-xs rounded-lg p-2.5 text-white outline-none focus:border-indigo-500"></div>
-      <div><label class="text-xs text-slate-300 block mb-1">Command Code API Key</label><input type="password" id="loginApiKey" placeholder="user_..." class="w-full bg-slate-950 border border-slate-700 text-xs rounded-lg p-2.5 text-white outline-none focus:border-indigo-500"></div>
-      <div id="loginError" class="text-xs text-rose-400 hidden"></div>
-    </div>
-    <div class="flex justify-end space-x-2 pt-2">
-      <button onclick="hideLoginModal()" class="px-4 py-2 bg-slate-800 text-slate-300 rounded-lg text-xs font-medium">取消</button>
-      <button onclick="submitLogin()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold">登录并保存</button>
-    </div>
-  </div>
-</div>
-
-<script>
-const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-let currentTab = 'overview';
-let selectedUsageAccountId = '';
-let globalUsageCache = [];
-
-function switchTab(tab) {
-  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-  document.querySelectorAll('main > section').forEach(s => s.classList.add('hidden'));
-  document.getElementById('tab-' + tab).classList.add('active');
-  document.getElementById('content-' + tab).classList.remove('hidden');
-  currentTab = tab;
-  if (tab === 'accounts') loadAccounts();
-  if (tab === 'usage') { loadUsageInit(); loadUsageHistory(); }
-  if (tab === 'models') loadModels(false);
-  if (tab === 'logs') loadLogs();
-}
-
-async function fetchStatus() {
-  try {
-    const data = await (await fetch('/api/status')).json();
-    const dot = document.getElementById('statusDot'), txt = document.getElementById('statusText'), btn = document.getElementById('toggleBtnText');
-    if (data.running) { dot.className='w-2.5 h-2.5 rounded-full bg-emerald-500'; txt.innerText='引擎运行中'; txt.className='font-medium text-emerald-400'; btn.innerText='停止引擎'; }
-    else { dot.className='w-2.5 h-2.5 rounded-full bg-rose-500'; txt.innerText='引擎已停止'; txt.className='font-medium text-rose-400'; btn.innerText='启动引擎'; }
-    document.getElementById('statPort').innerText = 'Port :' + data.port;
-    document.getElementById('statUptime').innerText = '运行时间：' + data.uptime;
-    document.getElementById('statAccount').innerText = data.activeAccountName || '无';
-    document.getElementById('statAccountsCount').innerText = '已注册 ' + data.accountsCount + ' 个账号';
-    document.getElementById('statBind').innerText = data.host === '0.0.0.0' ? '0.0.0.0（局域网！）' : data.host;
-    document.getElementById('statAuth').innerText = 'API 鉴权：' + (data.authRequired ? '开' : '关');
-    document.getElementById('statModels').innerText = data.modelsCount;
-    document.getElementById('rotationSelect').value = data.rotationMode;
-  } catch {}
-}
-
-async function toggleEngine() {
-  const data = await (await fetch('/api/status')).json();
-  await fetch('/api/gateway/toggle', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ running: !data.running }) });
-  fetchStatus();
-}
-
-async function startBrowserLogin() {
-  const btn = document.getElementById('browserAuthBtn');
-  const original = btn.innerHTML;
-  btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 正在等待浏览器授权...';
-  btn.disabled = true;
-  try {
-    const res = await fetch('/api/auth/browser-login', { method:'POST' });
-    const data = await res.json();
-    if (res.ok && data.status === 'success') { alert('登录成功：' + data.account.name); loadAccounts(); fetchStatus(); }
-    else alert('浏览器登录失败：' + (data.error || '未知错误'));
-  } catch (e) { alert('浏览器登录失败：' + e.message); }
-  finally { btn.innerHTML = original; btn.disabled = false; }
-}
-
-function showLoginModal(){ document.getElementById('loginModal').classList.remove('hidden'); }
-function hideLoginModal(){ document.getElementById('loginModal').classList.add('hidden'); }
-
-async function submitLogin() {
-  const apiKey = document.getElementById('loginApiKey').value.trim();
-  const name = document.getElementById('loginNickname').value.trim();
-  const errEl = document.getElementById('loginError');
-  if (!apiKey) { errEl.innerText='API Key 不能为空'; errEl.classList.remove('hidden'); return; }
-  const res = await fetch('/api/auth/manual-login', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ apiKey, name }) });
-  const data = await res.json();
-  if (res.ok && data.status === 'success') { hideLoginModal(); document.getElementById('loginApiKey').value=''; loadAccounts(); fetchStatus(); }
-  else { errEl.innerText = data.error || '登录失败'; errEl.classList.remove('hidden'); }
-}
-
-async function loadAccounts() {
-  const data = await (await fetch('/api/accounts')).json();
-  const grid = document.getElementById('accountsGrid');
-  grid.innerHTML = data.accounts.map(acc =>
-    '<div class="bg-slate-900 border ' + (acc.isActive ? 'border-indigo-500 shadow-lg shadow-indigo-500/10' : 'border-slate-800') + ' p-5 rounded-xl space-y-3">' +
-      '<div class="flex items-center justify-between">' +
-        '<div class="flex items-center space-x-3">' +
-          '<div class="w-8 h-8 rounded-lg bg-indigo-500/10 text-indigo-400 flex items-center justify-center font-bold text-xs">' + esc((acc.name||'?').charAt(0).toUpperCase()) + '</div>' +
-          '<div><h4 class="font-bold text-sm text-white flex items-center gap-2">' + esc(acc.name) +
-          (acc.isActive ? ' <span class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 font-semibold border border-emerald-500/20">当前</span>' : '') +
-          '</h4><p class="text-xs text-slate-400">' + esc(acc.userName ? '@'+acc.userName : (acc.email || 'API Key')) + '</p></div>' +
-        '</div>' +
-        '<div class="flex items-center space-x-2">' +
-          (!acc.isActive ? '<button onclick="setActiveAcc(\\'' + esc(acc.id) + '\\')" class="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-indigo-400 rounded-lg border border-slate-700">设为当前</button>' : '') +
-          '<button onclick="deleteAcc(\\'' + esc(acc.id) + '\\')" class="p-1.5 text-slate-500 hover:text-rose-400 rounded-lg hover:bg-rose-500/10 transition"><i class="fa-solid fa-trash-can text-xs"></i></button>' +
-        '</div>' +
-      '</div>' +
-      '<div class="pt-2 border-t border-slate-800/80 flex items-center justify-between text-xs text-slate-400">' +
-        '<span>Key：<code class="font-mono text-slate-300">' + esc(acc.apiKeyMasked) + '</code></span>' +
-        '<span>添加于：' + esc(new Date(acc.addedAt).toLocaleDateString()) + '</span>' +
-      '</div>' +
-    '</div>'
-  ).join('');
-}
-
-async function setActiveAcc(id){ await fetch('/api/accounts/active',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({accountId:id})}); loadAccounts(); fetchStatus(); }
-async function deleteAcc(id){ if(!confirm('确定移除该账号？'))return; await fetch('/api/accounts/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({accountId:id})}); loadAccounts(); fetchStatus(); }
-async function changeRotationMode(mode){ await fetch('/api/accounts/rotation',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rotationMode:mode})}); fetchStatus(); }
-
-async function loadUsageInit() {
-  loadUsageOverview();
-  const data = await (await fetch('/api/usage/aggregate')).json();
-  globalUsageCache = data.accountsUsage || [];
-  const select = document.getElementById('usageAccountSelect');
-  select.innerHTML = globalUsageCache.map(u => '<option value="' + esc(u.account.id) + '">' + esc(u.account.name) + ' (' + esc(u.account.apiKeyMasked) + ')' + (u.account.isActive?' [当前]':'') + '</option>').join('');
-  if (!selectedUsageAccountId && globalUsageCache.length > 0) selectedUsageAccountId = globalUsageCache[0].account.id;
-  select.value = selectedUsageAccountId;
-  renderUsageForAccount(selectedUsageAccountId);
-}
-
-// ─── 官方用量总览（Total Tokens / Total Runs / 成功率 / 月度限额）──────────────
-
-function ovFmtNum(n){ return Number(n || 0).toLocaleString('en-US'); }
-function ovFmtCost(v){ const c = Number(v || 0); return '$' + (c >= 1 ? c.toFixed(2) : c.toFixed(4).replace(/0+$/, '').replace(/\.$/, '')); }
-function ovFmtPct(p){ return (Math.round((Number(p) || 0) * 10) / 10) + '%'; }
-function ovFmtDate(ms){
-  const d = new Date(Number(ms));
-  if (!Number.isFinite(d.getTime())) return '--';
-  const p = n => String(n).padStart(2, '0');
-  return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
-}
-
-async function loadUsageOverview() {
-  const accEl = document.getElementById('ovPeriod');
-  try {
-    const d = await (await fetch('/api/usage/overview')).json();
-    if (d.error) { accEl.innerText = d.error; return; }
-    const s = d.summary || {};
-    document.getElementById('ovTotalTokens').innerText = ovFmtNum(s.totalTokens);
-    document.getElementById('ovTokensDetail').innerText = '输入 ' + ovFmtNum(s.totalTokensIn) + ' · 输出 ' + ovFmtNum(s.totalTokensOut);
-    document.getElementById('ovTotalRuns').innerText = ovFmtNum(s.totalRuns);
-    document.getElementById('ovRunsDetail').innerText = '成功 ' + ovFmtNum(s.completedCount) + ' · 失败 ' + ovFmtNum(s.failedCount);
-    document.getElementById('ovSuccessRate').innerText = s.successRate != null ? ovFmtPct(s.successRate) : '--';
-    accEl.innerText = s.periodBasis === 'last-30-days' ? '统计口径：近 30 天' : '统计口径：当前计费月';
-
-    const mo = (d.limits || {}).monthly;
-    if (mo && mo.cap > 0) {
-      document.getElementById('ovMonthly').innerText = ovFmtPct(mo.pct);
-      const bar = document.getElementById('ovMonthlyBar');
-      bar.style.width = Math.min(100, Math.max(0, mo.pct)) + '%';
-      bar.className = 'h-1.5 rounded-full transition-all duration-500 ' + (mo.pct >= 90 ? 'bg-rose-500' : mo.pct >= 70 ? 'bg-amber-500' : 'bg-emerald-500');
-      document.getElementById('ovMonthlyDetail').innerText = '已用 ' + ovFmtCost(mo.used) + ' / ' + ovFmtCost(mo.cap) + ' · 剩余 ' + ovFmtCost(mo.remaining);
-    } else {
-      document.getElementById('ovMonthly').innerText = '无限制';
-      document.getElementById('ovMonthlyDetail').innerText = '按量计费';
+    try {
+      const html = await fs.promises.readFile(DASHBOARD_HTML_PATH, 'utf-8');
+      return reply.header('Content-Type', 'text/html; charset=utf-8').header('Cache-Control', 'no-cache').send(html);
+    } catch (err: any) {
+      logger.error(`[DASHBOARD] Failed to load public/index.html: ${err.message}`);
+      return reply.status(500).send('Dashboard assets missing: public/index.html not found.');
     }
-
-    const pl = d.plan;
-    if (pl) {
-      document.getElementById('cyclePlan').innerText = pl.name ? '· ' + pl.name : '';
-      document.getElementById('cycleRenew').innerText = pl.cancelAtPeriodEnd ? '到期不续费' : '到期自动续费';
-      document.getElementById('cycleDays').innerText = (pl.daysLeft != null) ? pl.daysLeft : '--';
-      const cpct = Math.min(100, Math.max(0, Number(pl.cyclePct) || 0));
-      const cbar = document.getElementById('cycleBar');
-      cbar.style.width = cpct + '%';
-      cbar.className = 'h-2.5 rounded-full transition-all duration-500 ' + (cpct >= 90 ? 'bg-rose-500' : cpct >= 70 ? 'bg-amber-500' : 'bg-emerald-500');
-      document.getElementById('cycleRange').innerText = (pl.currentPeriodStart && pl.currentPeriodEnd)
-        ? ovFmtDate(pl.currentPeriodStart) + ' → ' + ovFmtDate(pl.currentPeriodEnd) + ' · 已过 ' + ovFmtPct(pl.cyclePct)
-        : '周期时间未知';
-    } else {
-      document.getElementById('cyclePlan').innerText = '';
-      document.getElementById('cycleRenew').innerText = '--';
-      document.getElementById('cycleDays').innerText = '--';
-      document.getElementById('cycleRange').innerText = '无法获取订阅信息';
-    }
-  } catch (e) { accEl.innerText = '总览加载失败'; }
-}
-
-function renderUsageForAccount(accId) {
-  selectedUsageAccountId = accId;
-  const t = globalUsageCache.find(u => u.account.id === accId) || globalUsageCache[0];
-  if (!t) return;
-  const credits = t.credits?.credits || {};
-  document.getElementById('creditMonthly').innerText = '$' + (credits.monthlyCredits||0).toFixed(2);
-  document.getElementById('creditPurchased').innerText = '$' + (credits.purchasedCredits||0).toFixed(2);
-  document.getElementById('creditFree').innerText = '$' + (credits.freeCredits||0).toFixed(2);
-  document.getElementById('creditTotalCost').innerText = '$' + (t.summary?.totalCost||0).toFixed(2);
-
-  const w5h = t.credits?.windowLimits?.fiveHour;
-  if (w5h) {
-    document.getElementById('window5hText').innerText = '$' + w5h.used.toFixed(2) + ' / $' + w5h.cap.toFixed(2);
-    const ratio = w5h.cap > 0 ? (w5h.used/w5h.cap)*100 : 0;
-    const bar = document.getElementById('window5hBar');
-    bar.style.width = Math.min(100,ratio)+'%';
-    bar.className = ratio>=90?'bg-rose-500 h-2.5 rounded-full':ratio>=70?'bg-amber-500 h-2.5 rounded-full':'bg-indigo-500 h-2.5 rounded-full';
-    const mins = w5h.resetAt ? Math.max(0,Math.ceil((w5h.resetAt-Date.now())/60000)) : 0;
-    document.getElementById('window5hReset').innerText = '重置时间：'+mins+' 分钟';
-    // 燃烧速率预测：由官方 used 的时间差分外推（本地历史只覆盖代理流量，
-    // 不能用来预测全账号额度）。
-    const proj = usageHistoryCache && usageHistoryCache.quotaProjection;
-    const pNote = document.getElementById('window5hProjection');
-    if (pNote) {
-      if (!proj || proj.samples < 2 || proj.burnPerHour == null) {
-        pNote.innerText = '速率预测：采样中（需 10 分钟以上数据）';
-      } else if (proj.burnPerHour <= 0) {
-        pNote.innerText = '速率预测：当前无消耗';
-      } else if (proj.willHitCapBeforeReset === true) {
-        pNote.className = 'text-[11px] text-rose-400 mt-1';
-        pNote.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> 按当前 $' + proj.burnPerHour.toFixed(2) + '/h，约 <b>' + fmtDur(proj.minutesToCap) + '</b>后撞上限额（早于重置）';
-      } else {
-        pNote.className = 'text-[11px] text-slate-400 mt-1';
-        pNote.innerText = '按当前 $' + proj.burnPerHour.toFixed(2) + '/h 约需 ' + fmtDur(proj.minutesToCap) + ' 用完 · 重置更早到来';
-      }
-    }
-  }
-  const wk = t.credits?.windowLimits?.weekly;
-  if (wk) {
-    document.getElementById('windowWeeklyText').innerText = '$' + wk.used.toFixed(2) + ' / $' + wk.cap.toFixed(2);
-    const ratio = wk.cap > 0 ? (wk.used/wk.cap)*100 : 0;
-    const bar = document.getElementById('windowWeeklyBar');
-    bar.style.width = Math.min(100,ratio)+'%';
-    bar.className = ratio>=90?'bg-rose-500 h-2.5 rounded-full':'bg-violet-500 h-2.5 rounded-full';
-    const hrs = wk.resetAt ? Math.max(0,Math.ceil((wk.resetAt-Date.now())/3600000)) : 0;
-    document.getElementById('windowWeeklyReset').innerText = '重置时间：'+hrs+' 小时';
-  }
-}
-
-function fmtPrice(v){ if(v===undefined||v===null) return '--'; if(v===0) return 'FREE'; var c=v*6.72; c=c>=100?Math.round(c):Math.round(c*100)/100; return '¥' + c; }
-function fmtCtx(v){ if(!v) return '--'; if(v>=1000000){ var x=(v/1000000); return (x%1===0?x:x.toFixed(1)) + 'M'; } if(v>=1000){ var k=v/1000; return (k%1===0?k:k.toFixed(1)) + 'K'; } return String(v); }
-// ─── 模型查询：搜索 + 标签 + 排序（纯前端过滤，不新增 API）────────────────────
-let allModelsCache = [];
-let modelTagFilter = 'all';
-let modelSortMode = 'default';
-let modelQueryTimer = null;
-function modelMatchesTag(m, tag) {
-  const caps = m.caps || {};
-  if (tag === 'go') return !!m.onGoPlan;
-  if (tag === 'free') return !!(m.deal && m.deal.free);
-  if (tag === 'deal') return !!(m.deal && m.deal.discountPercent);
-  if (tag === 'vision') return !!(caps.vision || m.supports_vision);
-  if (tag === 'reason') return !!caps.reasoning;
-  return true;
-}
-function modelMatchesQuery(m, q) {
-  if (!q) return true;
-  const hay = ((m.id || '') + ' ' + (m.name || '') + ' ' + (m.owned_by || '')).toLowerCase();
-  return q.split(/\s+/).filter(Boolean).every(kw => hay.includes(kw));
-}
-function sortModels(list) {
-  const price = (m, k) => { const v = m.pricing && m.pricing[k]; return (v === undefined || v === null) ? Infinity : v; };
-  const ctx = (m) => (m.context_window || m.context_length || 0);
-  const arr = list.slice();
-  if (modelSortMode === 'inAsc') arr.sort((a, b) => price(a, 'input') - price(b, 'input'));
-  else if (modelSortMode === 'inDesc') arr.sort((a, b) => { const pa = price(a, 'input'), pb = price(b, 'input'); return (pb === Infinity ? -1 : pb) - (pa === Infinity ? -1 : pa); });
-  else if (modelSortMode === 'outAsc') arr.sort((a, b) => price(a, 'output') - price(b, 'output'));
-  else if (modelSortMode === 'outDesc') arr.sort((a, b) => { const pa = price(a, 'output'), pb = price(b, 'output'); return (pb === Infinity ? -1 : pb) - (pa === Infinity ? -1 : pa); });
-  else if (modelSortMode === 'cacheReadAsc') arr.sort((a, b) => price(a, 'cacheRead') - price(b, 'cacheRead'));
-  else if (modelSortMode === 'cacheReadDesc') arr.sort((a, b) => { const pa = price(a, 'cacheRead'), pb = price(b, 'cacheRead'); return (pb === Infinity ? -1 : pb) - (pa === Infinity ? -1 : pa); });
-  else if (modelSortMode === 'ctxDesc') arr.sort((a, b) => ctx(b) - ctx(a));
-  return arr;
-}
-function highlightHit(text, q) {
-  const safe = esc(text);
-  const kw = (q || '').trim();
-  if (!kw) return safe;
-  const words = kw.split(/\s+/).filter(Boolean).map(w => w.replace(/[.*+?^\${}()|[\]\\]/g, '\\$&'));
-  if (!words.length) return safe;
-  try { return safe.replace(new RegExp('(' + words.join('|') + ')', 'gi'), '<mark>$1</mark>'); }
-  catch { return safe; }
-}
-function applyModelFilter() {
-  const input = document.getElementById('modelSearch');
-  const q = ((input && input.value) || '').trim().toLowerCase();
-  const clearBtn = document.getElementById('modelSearchClear');
-  if (clearBtn) clearBtn.classList.toggle('hidden', !q);
-  const filtered = sortModels(allModelsCache.filter(m => modelMatchesTag(m, modelTagFilter) && modelMatchesQuery(m, q)));
-  const meta = document.getElementById('modelsCount');
-  if (meta) meta.innerText = '共 ' + allModelsCache.length + ' 个 · 命中 ' + filtered.length + ' 个';
-  const c = document.getElementById('modelsList');
-  if (!filtered.length) {
-    c.innerHTML = '<div class="col-span-full text-center py-12 text-slate-500 text-xs"><i class="fa-solid fa-magnifying-glass text-2xl mb-3 block text-slate-600"></i>没有匹配的模型，换个关键词或标签试试</div>';
-    return;
-  }
-  c.innerHTML = filtered.map(m => {
-    const p = m.pricing || {};
-    const caps = m.caps || {};
-    let tags = '';
-    if (m.onGoPlan) tags += '<span class="text-[10px] px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30 font-semibold">GO</span>';
-    if (m.deal && m.deal.free) tags += '<span class="text-[10px] px-2 py-0.5 rounded bg-rose-500/15 text-rose-300 border border-rose-500/30 font-semibold">FREE</span>';
-    else if (m.deal && m.deal.discountPercent) tags += '<span class="text-[10px] px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 font-semibold">DEAL ' + m.deal.discountPercent + '%</span>';
-    if (!tags) tags = '<span class="text-[10px] px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-semibold">可用</span>';
-    const capsStr = '文字' + (caps.text ? '✓' : '✗') + ' · 视觉' + ((caps.vision || m.supports_vision) ? '✓' : '✗') + ' · 推理' + (caps.reasoning ? '✓' : '✗');
-    return '<div class="p-3 bg-slate-900 border border-slate-800 rounded-lg hover:border-indigo-500/40 transition">' +
-      '<div class="flex items-start justify-between gap-2">' +
-        '<div class="min-w-0"><p class="font-bold text-xs text-white break-all">' + highlightHit(m.id, q) + '</p>' +
-        '<p class="text-[11px] text-slate-400 mt-0.5">提供商：' + highlightHit(m.owned_by, q) + (m.name && m.name !== m.id ? ' · ' + highlightHit(m.name, q) : '') + '</p></div>' +
-        '<div class="flex gap-1 flex-wrap justify-end shrink-0">' + tags + '</div>' +
-      '</div>' +
-      '<div class="mt-2 grid grid-cols-2 gap-x-2 gap-y-1 text-[11px] text-slate-400">' +
-        '<span>上下文：<span class="text-slate-200">' + fmtCtx(m.context_window || m.context_length) + '</span></span>' +
-        '<span>输入：<span class="text-slate-200">' + fmtPrice(p.input) + '</span></span>' +
-        '<span>输出：<span class="text-slate-200">' + fmtPrice(p.output) + '</span></span>' +
-        '<span>缓存读：<span class="text-slate-200">' + fmtPrice(p.cacheRead) + '</span></span>' +
-        '<span>缓存写：<span class="text-slate-200">' + fmtPrice(p.cacheWrite) + '</span></span>' +
-        '<span class="text-slate-500">' + capsStr + '</span>' +
-      '</div>' +
-    '</div>';
-  }).join('');
-}
-function bindModelQueryOnce() {
-  const input = document.getElementById('modelSearch');
-  if (!input || input.dataset.bound) return;
-  input.dataset.bound = '1';
-  input.addEventListener('input', () => { clearTimeout(modelQueryTimer); modelQueryTimer = setTimeout(applyModelFilter, 150); });
-  input.addEventListener('keydown', (e) => { if (e.key === 'Escape') { input.value = ''; applyModelFilter(); } });
-  document.getElementById('modelSearchClear').onclick = () => { input.value = ''; input.focus(); applyModelFilter(); };
-  document.getElementById('modelSort').onchange = (e) => { modelSortMode = e.target.value; applyModelFilter(); };
-  document.querySelectorAll('#modelTagRow .mfilter-chip').forEach(btn => {
-    btn.onclick = () => {
-      modelTagFilter = btn.dataset.tag;
-      document.querySelectorAll('#modelTagRow .mfilter-chip').forEach(b => b.classList.toggle('on', b === btn));
-      applyModelFilter();
-    };
-  });
-}
-async function loadModels(force) {
-  const btn = document.getElementById('modelsRefreshBtn');
-  if (force) { await fetch('/v1/models/refresh', { method: 'POST' }).catch(() => {}); }
-  if (btn) { btn.disabled = true; btn.classList.add('opacity-60'); }
-  try {
-    const data = await (await fetch('/v1/models')).json();
-    allModelsCache = data.data || [];
-    bindModelQueryOnce();
-    applyModelFilter();
-  } finally {
-    if (btn) { btn.disabled = false; btn.classList.remove('opacity-60'); }
-  }
-}
-
-async function loadLogs() {
-  const data = await (await fetch('/api/logs')).json();
-  const box = document.getElementById('logsBox');
-  box.innerHTML = data.logs.map(l => {
-    const lc = l.level==='error'?'text-rose-400':l.level==='warn'?'text-amber-400':'text-slate-300';
-    return '<p class="'+lc+' font-mono text-[11px] py-0.5 break-all"><span class="text-slate-500">['+esc(l.timestamp)+']</span> '+esc(l.message)+'</p>';
-  }).join('');
-  box.scrollTop = box.scrollHeight;
-}
-
-async function clearLogs(){ await fetch('/api/logs/clear',{method:'POST'}); loadLogs(); }
-
-// ─── 会话明细 ────────────────────────────────────────────────────────────────
-let usageTrendChart = null;
-let usageModelChart = null;
-let usageHistoryCache = null;
-
-function fmtTokens(n){ if(!n) return '0'; if(n>=1000000){var x=n/1000000; return (x%1===0?x:x.toFixed(1))+'M';} if(n>=1000){var k=n/1000; return (k%1===0?k:k.toFixed(1))+'K';} return String(n); }
-function fmtTokensM(n){ if(!n) return '0'; var x=n/1000000; return (x>=100?Math.round(x):x>=10?x.toFixed(1):x.toFixed(2))+'M'; }
-function fmtUsd(v){ return '$' + (v||0).toFixed(4); }
-function fmtUsdShort(v){ var x=v||0; if(x>=1000) return '$'+(x/1000).toFixed(2)+'k'; if(x>=1) return '$'+x.toFixed(2); return '$'+x.toFixed(4); }
-function fmtMs(ms){ if(!ms) return '--'; if(ms>=60000){var m=Math.floor(ms/60000),s=(ms%60000)/1000; return m+'m '+s.toFixed(1)+'s';} if(ms>=1000) return (ms/1000).toFixed(1)+'s'; return Math.round(ms)+'ms'; }
-function fmtDur(mins){ if(mins==null) return '--'; if(mins>=1440) return Math.floor(mins/1440)+'天'; if(mins>=60) return Math.floor(mins/60)+'h '+String(mins%60).padStart(2,'0')+'m'; return mins+'m'; }
-// 服务端同名的展示函数在前端不可用，这里用等价实现：只取路径末段
-// （完整路径可能含用户名，默认不直接展示，悬停才看全路径）。
-function projectDisplayName(p){ if(!p) return '未识别'; var parts=String(p).split(/[\\/]/).filter(Boolean); return parts.length?parts[parts.length-1]:String(p); }
-// 端到端吞吐：口径与后端 throughputTokS 一致（含排队/重试/网络，非模型生成速度）。
-function fmtTokS(out, ms){ if(!out||out<=0||!ms||ms<=0) return '<span class="text-slate-600">—</span>'; var v=out/(ms/1000); return v.toFixed(1)+' t/s'; }
-function fmtTime(ts){ try { const d=new Date(ts); return d.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit'}); } catch { return ts; } }
-
-async function loadUsageHistory(){
-  usageHistoryCache = await (await fetch('/api/usage/history')).json();
-  const data = usageHistoryCache;
-  const s = data.total;
-
-  document.getElementById('usageTodayToken').innerText = fmtTokensM(data.today.input + data.today.output) + ' token';
-  document.getElementById('usageTodayRuns').innerText = data.today.runs + ' 次请求';
-  document.getElementById('usageWeekCost').innerText = fmtUsd(data.week.cost);
-  document.getElementById('usageWeekToken').innerText = fmtTokensM(data.week.input + data.week.output) + ' token · ' + data.week.runs + ' 次';
-  document.getElementById('usageMonthCost').innerText = fmtUsd(data.month.cost);
-  document.getElementById('usageMonthToken').innerText = fmtTokensM(data.month.input + data.month.output) + ' token · ' + data.month.runs + ' 次';
-  document.getElementById('usageTotalToken').innerText = fmtTokensM(s.inputTokens + s.outputTokens) + ' token';
-  document.getElementById('usageTotalRuns').innerText = s.runs + ' 次请求 · 失败 ' + s.failures;
-
-  // 缓存节省：命中缓存的输入按缓存读单价计费（约输入价的 1/50），
-  // 这里显示相比"全价输入"省下的金额 —— 解释账单为何远低于直觉值。
-  const savEl = document.getElementById('usageSavings');
-  const savNote = document.getElementById('usageSavingsNote');
-  if (savEl) {
-    const saved = s.savingsUsd || 0;
-    savEl.innerText = saved > 0 ? fmtUsdShort(saved) : '--';
-    if (saved > 0) {
-      const mult = s.savingsMultiple || 0;
-      savNote.innerText = mult > 0
-        ? '约为账面成本 ' + fmtUsdShort(s.costUsd || 0) + ' 的 ' + mult.toFixed(1) + ' 倍'
-        : '相比全价输入省下';
-    } else {
-      savNote.innerText = '暂无缓存命中记录';
-    }
-  }
-
-  // 缓存命中率：agent 场景常达 90%+，是成本远低于"输入×输入价"的主因。
-  const hitEl = document.getElementById('usageCacheHit');
-  if (hitEl) {
-    const rate = (s.cacheHitRate || 0) * 100;
-    hitEl.innerText = rate > 0
-      ? '缓存命中 ' + rate.toFixed(1) + '% · ' + fmtTokensM(s.cacheReadTokens || 0) + ' token'
-      : '缓存命中 --';
-  }
-
-  renderBillingWindow(data.billing);
-
-  const hasAnyPricing = (data.recent||[]).some(r => r.hasPricing);
-  document.getElementById('usagePricingNote').classList.toggle('hidden', hasAnyPricing);
-  document.getElementById('usageRecentCount').innerText = '最近 ' + (data.recent||[]).length + ' 条';
-
-  renderUsageTable(data.recent||[]);
-  renderUsageCharts(data);
-  renderAttribution(data);
-  renderModelPerf(data.byModelPerf||[]);
-}
-
-// 每模型端到端吞吐/延迟分布。空样本（无输出或失败的请求）不计入。
-function renderModelPerf(rows){
-  const body = document.getElementById('perfTableBody');
-  if (!body) return;
-  if (!rows.length) {
-    body.innerHTML = '<tr><td colspan="6" class="px-2 py-6 text-center text-slate-500">暂无性能数据</td></tr>';
-    return;
-  }
-  body.innerHTML = rows.slice(0, 20).map(r => {
-    const t = v => (v==null ? '<span class="text-slate-600">—</span>' : v.toFixed(1)+' t/s');
-    const l = v => (v==null ? '<span class="text-slate-600">—</span>' : (v>=1000 ? (v/1000).toFixed(1)+'s' : Math.round(v)+'ms'));
-    return '<tr class="hover:bg-slate-800/40 transition">' +
-      '<td class="px-2 py-2 font-mono text-slate-200 truncate max-w-[260px]" title="' + esc(r.model) + '">' + esc(r.model) + '</td>' +
-      '<td class="px-2 py-2 text-right text-slate-400">' + r.samples + '</td>' +
-      '<td class="px-2 py-2 text-right text-slate-300">' + t(r.tokSP50) + '</td>' +
-      '<td class="px-2 py-2 text-right text-slate-400">' + t(r.tokSP95) + '</td>' +
-      '<td class="px-2 py-2 text-right text-slate-300">' + l(r.latencyP50Ms) + '</td>' +
-      '<td class="px-2 py-2 text-right text-slate-400">' + l(r.latencyP95Ms) + '</td>' +
-    '</tr>';
-  }).join('');
-}
-
-// 项目（推断）与会话（声明）两个维度的呈现。
-// 关键：推断值必须与事实值在视觉上区分，不能让用户误以为是权威数据。
-function renderAttribution(data){
-  const a = data.attribution || {};
-  const projBody = document.getElementById('projectTableBody');
-  const sessBody = document.getElementById('sessionTableBody');
-
-  // ── 项目 ──
-  const projects = data.byProject || [];
-  const cov = document.getElementById('projectCoverage');
-  if (cov) {
-    const n = projects.filter(p => p.project).length;
-    cov.innerText = n + ' 个项目 · 已归因 ' + (a.projectsIdentified||0) + '/' + (a.totalRecords||0) + ' 条';
-  }
-  if (projBody) {
-    if (!projects.length) {
-      projBody.innerHTML = '<tr><td colspan="4" class="px-2 py-6 text-center text-slate-500">暂无数据</td></tr>';
-    } else {
-      projBody.innerHTML = projects.slice(0, 50).map(p => {
-        const name = p.project ? projectDisplayName(p.project) : '未识别';
-        // 置信度徽章：label = 较可靠；heuristic = 明确标记为推测
-        let badge = '';
-        if (p.projectSource === 'label') {
-          badge = '<span class="ml-1 px-1 py-0.5 rounded text-[9px] bg-sky-500/10 text-sky-400 border border-sky-500/20" title="来自 system prompt 的工作目录字段">标签</span>';
-        } else if (p.projectSource === 'heuristic') {
-          badge = '<span class="ml-1 px-1 py-0.5 rounded text-[9px] bg-amber-500/10 text-amber-400 border border-amber-500/20" title="按路径出现频次推测，不保证准确">推测</span>';
-        }
-        const title = p.project ? ' title="' + esc(p.project) + '"' : '';
-        const dim = p.project ? 'text-slate-200' : 'text-slate-500 italic';
-        return '<tr class="hover:bg-slate-800/40 transition">' +
-          '<td class="px-2 py-2 truncate max-w-[220px]"><span class="' + dim + '"' + title + '>' + esc(name) + '</span>' + badge + '</td>' +
-          '<td class="px-2 py-2 text-right text-slate-400">' + p.runs + (p.sessionCount ? ' <span class="text-slate-600">/' + p.sessionCount + '会话</span>' : '') + '</td>' +
-          '<td class="px-2 py-2 text-right text-slate-400">' + fmtTokensM((p.inputTokens||0)+(p.outputTokens||0)) + '</td>' +
-          '<td class="px-2 py-2 text-right text-emerald-400">' + fmtUsdShort(p.costUsd) + '</td>' +
-        '</tr>';
-      }).join('');
-    }
-  }
-
-  // ── 会话 ──
-  const sessions = data.bySession || [];
-  const scov = document.getElementById('sessionCoverage');
-  if (scov) {
-    scov.innerText = sessions.length + ' 个会话 · 已识别 ' + (a.sessionsIdentified||0) + '/' + (a.totalRecords||0) + ' 条';
-  }
-  if (sessBody) {
-    if (!sessions.length) {
-      sessBody.innerHTML = '<tr><td colspan="4" class="px-2 py-6 text-center text-slate-500">暂无携带会话 ID 的请求</td></tr>';
-    } else {
-      sessBody.innerHTML = sessions.slice(0, 50).map(s => {
-        const shortId = esc(String(s.sessionId).slice(0, 8));
-        const pname = s.project ? esc(projectDisplayName(s.project)) : '<span class="text-slate-600">—</span>';
-        const pTitle = s.project ? ' title="' + esc(s.project) + (s.projectSource === 'heuristic' ? '（推测）' : '') + '"' : '';
-        const typeBadge = s.sessionType && s.sessionType !== 'main'
-          ? '<span class="ml-1 px-1 py-0.5 rounded text-[9px] bg-violet-500/10 text-violet-400 border border-violet-500/20">' + esc(s.sessionType) + '</span>'
-          : '';
-        const span = fmtDur(Math.max(0, Math.round((new Date(s.lastAt) - new Date(s.firstAt)) / 60000)));
-        return '<tr class="hover:bg-slate-800/40 transition">' +
-          '<td class="px-2 py-2"><span class="font-mono text-slate-200" title="' + esc(s.sessionId) + '">' + shortId + '</span>' + typeBadge +
-            '<span class="block text-[10px] text-slate-500">' + (s.agent ? esc(s.agent) + ' · ' : '') + span + '</span></td>' +
-          '<td class="px-2 py-2 text-slate-400 truncate max-w-[120px]"><span' + pTitle + '>' + pname + '</span></td>' +
-          '<td class="px-2 py-2 text-right text-slate-400">' + s.runs + '</td>' +
-          '<td class="px-2 py-2 text-right text-emerald-400">' + fmtUsdShort(s.costUsd) + '</td>' +
-        '</tr>';
-      }).join('');
-    }
-  }
-}
-
-// 峰谷计费提示：官方对部分模型（deepseek 系列）设分时价，
-// 峰时为 UTC 周一至周五 01–04 与 06–10。此处提示当前档位与切换倒计时。
-function renderBillingWindow(billing){
-  const el = document.getElementById('billingWindow');
-  if (!el) return;
-  const w = billing && billing.window;
-  const models = (billing && billing.models) || [];
-  if (!w || !models.length) { el.classList.add('hidden'); el.innerHTML = ''; return; }
-  el.classList.remove('hidden');
-
-  const peak = !!w.isPeak;
-  const tone = peak
-    ? 'bg-amber-500/10 border-amber-500/30 text-amber-300'
-    : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300';
-  const icon = peak ? 'fa-solid fa-fire' : 'fa-solid fa-leaf';
-  const label = peak ? '峰时计费中' : '谷时计费中';
-
-  let when = '';
-  if (w.minutesUntilChange != null) {
-    when = ' · ' + fmtDur(w.minutesUntilChange) + '后转为' + (w.nextIsPeak ? '峰时' : '谷时');
-  }
-
-  // 各模型当前生效费率（只列有分时价的模型，通常 4 个）。
-  const rows = models.map(m => {
-    const a = m.activeRates || {};
-    return '<span class="inline-flex items-center gap-1.5 bg-slate-950/60 border border-slate-800 rounded px-2 py-1">' +
-      '<span class="text-slate-300 font-mono">' + esc(m.id) + '</span>' +
-      '<span class="text-slate-500">输入</span><span class="text-slate-200">' + fmtPrice(a.input) + '</span>' +
-      '<span class="text-slate-500">输出</span><span class="text-slate-200">' + fmtPrice(a.output) + '</span>' +
-      '<span class="text-slate-500">缓存读</span><span class="text-slate-200">' + fmtPrice(a.cacheRead) + '</span>' +
-    '</span>';
-  }).join('');
-
-  const windowsNote = w.windows ? '官方窗口：' + esc(w.windows) + ' UTC' + (w.peakHoursPerDay ? '（' + w.peakHoursPerDay + 'h/天）' : '') : '';
-
-  el.innerHTML =
-    '<div class="border ' + tone + ' rounded-lg p-3">' +
-      '<div class="flex items-center gap-2 flex-wrap">' +
-        '<span class="font-semibold text-xs"><i class="' + icon + '"></i> ' + label + '</span>' +
-        '<span class="text-xs opacity-90">' + when + '</span>' +
-        (windowsNote ? '<span class="text-[11px] opacity-70 ml-auto">' + windowsNote + '</span>' : '') +
-      '</div>' +
-      '<div class="flex gap-2 flex-wrap mt-2 text-[11px]">' + rows + '</div>' +
-    '</div>';
-}
-
-function renderUsageTable(recent){
-  const body = document.getElementById('usageTableBody');
-  const empty = document.getElementById('usageEmpty');
-  if (!recent.length) { body.innerHTML = ''; empty.classList.remove('hidden'); return; }
-  empty.classList.add('hidden');
-  body.innerHTML = recent.map(r => {
-    const badge = r.status === 'FAILED'
-      ? '<span class="px-2 py-0.5 rounded-full bg-rose-500/10 text-rose-400 border border-rose-500/20">失败</span>'
-      : '<span class="px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">完成</span>';
-    const pc = r.hasPricing ? '' : '<span class="text-amber-400" title="未同步官方定价">*</span>';
-    const mode = r.mode === 'messages' ? 'Messages' : 'Chat';
-    // 官方账单金额优先，本地估算加 "~" 前缀区分；悬停显示本地估算值便于对照。
-    const src = r.costSource === 'official' ? '' : '~';
-    const costTip = r.estimatedCostUsd != null && r.costSource === 'official'
-      ? ' title="官方账单；本地估算 $' + (r.estimatedCostUsd || 0).toFixed(6) + '"'
-      : (r.costSource === 'estimated' ? ' title="本地按官方定价估算（上游未返回账单金额）"' : '');
-    const cache = r.cacheReadTokens || 0;
-    const cacheCell = cache > 0
-      ? '<span class="text-sky-400" title="缓存命中 ' + cache.toLocaleString('en-US') + ' / 输入 ' + (r.inputTokens || 0).toLocaleString('en-US') + '">' +
-          fmtTokens(cache) + ' <span class="text-slate-500">(' + Math.round(cache / Math.max(1, r.inputTokens || 1) * 100) + '%)</span></span>'
-      : '<span class="text-slate-600">—</span>';
-    return '<tr class="hover:bg-slate-800/40 transition">' +
-      '<td class="px-4 py-2.5 whitespace-nowrap text-slate-300">' + esc(fmtTime(r.timestamp)) + '</td>' +
-      '<td class="px-4 py-2.5 text-slate-200 font-mono">' + esc(r.model) + '</td>' +
-      '<td class="px-4 py-2.5 text-right text-slate-300">' + fmtTokens(r.inputTokens) + '</td>' +
-      '<td class="px-4 py-2.5 text-right">' + cacheCell + '</td>' +
-      '<td class="px-4 py-2.5 text-right text-slate-300">' + fmtTokens(r.outputTokens) + '</td>' +
-      '<td class="px-4 py-2.5 text-right text-slate-400">' + fmtTokS(r.outputTokens, r.timingMs) + '</td>' +
-      '<td class="px-4 py-2.5 text-right text-slate-400">' + fmtMs(r.timingMs) + '</td>' +
-      '<td class="px-4 py-2.5 text-right text-emerald-400"' + costTip + '>' + src + fmtUsd(r.costUsd) + pc + '</td>' +
-      '<td class="px-4 py-2.5">' + badge + '</td>' +
-      '<td class="px-4 py-2.5 text-slate-400">' + mode + '</td>' +
-    '</tr>';
-  }).join('');
-}
-
-function renderUsageCharts(data){
-  // 每日趋势
-  const tctx = document.getElementById('usageTrendChart').getContext('2d');
-  if (usageTrendChart) usageTrendChart.destroy();
-  usageTrendChart = new Chart(tctx, {
-    type: 'line',
-    data: {
-      labels: data.byDay.map(d => d.date),
-      datasets: [
-        { label:'输入', data: data.byDay.map(d => d.inputTokens), borderColor:'#818cf8', backgroundColor:'rgba(129,140,248,.1)', fill:true, tension:.3, pointRadius:2 },
-        { label:'输出', data: data.byDay.map(d => d.outputTokens), borderColor:'#34d399', backgroundColor:'rgba(52,211,153,.1)', fill:true, tension:.3, pointRadius:2 }
-      ]
-    },
-    options: {
-      responsive:true, maintainAspectRatio:false, interaction:{mode:'index',intersect:false},
-      plugins:{ legend:{ labels:{ color:'#94a3b8', font:{size:11} } }, tooltip:{ backgroundColor:'#0f172a', borderColor:'#334155', borderWidth:1 } },
-      scales:{ x:{ ticks:{ color:'#64748b', font:{size:10} }, grid:{ color:'rgba(51,65,85,.3)' } }, y:{ ticks:{ color:'#64748b', font:{size:10} }, grid:{ color:'rgba(51,65,85,.3)' }, beginAtZero:true } }
-    }
-  });
-
-  // 模型分布
-  const mctx = document.getElementById('usageModelChart').getContext('2d');
-  if (usageModelChart) usageModelChart.destroy();
-  const palette = ['#818cf8','#34d399','#f59e0b','#f472b6','#38bdf8','#a78bfa','#fb923c'];
-  usageModelChart = new Chart(mctx, {
-    type: 'doughnut',
-    data: {
-      labels: data.byModel.map(m => m.model),
-      datasets: [{
-        data: data.byModel.map(m => m.runs),
-        backgroundColor: data.byModel.map((_,i) => palette[i % palette.length]),
-        borderColor:'#0f172a', borderWidth:2
-      }]
-    },
-    options: {
-      responsive:true, maintainAspectRatio:false, cutout:'55%',
-      plugins:{ legend:{ labels:{ color:'#94a3b8', font:{size:11} } }, tooltip:{ backgroundColor:'#0f172a', borderColor:'#334155', borderWidth:1, callbacks:{ label: c => ' ' + c.label + ' · ' + c.parsed + ' 次' } } }
-    }
-  });
-}
-
-async function clearUsageHistory(){
-  if(!confirm('确定清空全部会话历史？此操作不可撤销。')) return;
-  await fetch('/api/usage/clear',{method:'POST'});
-  loadUsageHistory();
-}
-
-fetchStatus();
-setInterval(fetchStatus, 5000);
-setInterval(() => { if(currentTab === 'usage') loadUsageHistory(); }, 30000);
-</script>
-</body>
-</html>`;
   });
 }

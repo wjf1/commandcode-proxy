@@ -250,12 +250,46 @@ export function estimateCostUsd(
 let writeQueue: Promise<void> = Promise.resolve();
 let lastFlush = 0;
 
-/** 追加一条记录到 JSONL（串行写，避免并发交错）。 */
+/**
+ * 历史文件大小上限（字节）。默认 20MB，可用环境变量 USAGE_HISTORY_MAX_MB 调整。
+ * 只追加不轮转的话，文件会随使用无限增长，而 /api/usage/history 每次都全量
+ * 读取 + 聚合，几十万行后仪表盘会明显变慢。
+ */
+const USAGE_MAX_BYTES = (() => {
+  const mb = parseInt(process.env.USAGE_HISTORY_MAX_MB || '', 10);
+  return Number.isFinite(mb) && mb > 0 ? mb * 1024 * 1024 : 20 * 1024 * 1024;
+})();
+
+/** 超限时保留文件后半（从中点后的第一条完整行起），整写替换。 */
+function rotateUsageFile(): void {
+  try {
+    if (!fs.existsSync(USAGE_FILE_PATH)) return;
+    const size = fs.statSync(USAGE_FILE_PATH).size;
+    if (size < USAGE_MAX_BYTES) return;
+    const raw = fs.readFileSync(USAGE_FILE_PATH, 'utf-8');
+    const nl = raw.indexOf('\n', Math.floor(raw.length / 2));
+    const kept = nl >= 0 ? raw.slice(nl + 1) : raw;
+    const tmp = `${USAGE_FILE_PATH}.tmp`;
+    fs.writeFileSync(tmp, kept, 'utf-8');
+    fs.renameSync(tmp, USAGE_FILE_PATH);
+    logger.info(`[USAGE] Rotated usage history: ${(size / 1048576).toFixed(1)}MB -> ${(kept.length / 1048576).toFixed(1)}MB`);
+  } catch (err: any) {
+    logger.warn(`[USAGE] History rotation failed: ${err.message}`);
+  }
+}
+
+let lastRotationCheck = 0;
+
+/** 追加一条记录到 JSONL（串行写，避免并发交错）；周期性检查是否需要轮转。 */
 export function recordCompletion(entry: UsageRecord): void {
   const line = JSON.stringify(entry);
+  const now = Date.now();
+  const shouldCheckRotation = now - lastRotationCheck > 60_000;
+  if (shouldCheckRotation) lastRotationCheck = now;
   // 串行化写入：避免并发请求同时写同一行而交错。
   writeQueue = writeQueue.then(() => {
     try {
+      if (shouldCheckRotation) rotateUsageFile();
       const dir = path.dirname(USAGE_FILE_PATH);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       fs.appendFileSync(USAGE_FILE_PATH, line + '\n', 'utf-8');

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { spawn, ChildProcess } from 'child_process';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import http from 'node:http';
 import { tmpdir } from 'node:os';
@@ -11,6 +11,11 @@ const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url),
 const MOCK_PORT = 9911;
 const PROXY_PORT = 9091;
 const PROXY_BASE = `http://127.0.0.1:${PROXY_PORT}`;
+
+// 集成测试启动的是编译产物 dist/index.js；干净克隆上没有 dist 会必然超时。
+// 此时跳过整个套件并提示先 `npm run build`，避免 `npm test` 一上来就红。
+const DIST_ENTRY = path.resolve(__dirname, '..', 'dist', 'index.js');
+const distReady = existsSync(DIST_ENTRY);
 
 let mockServer: http.Server;
 let proxyProcess: ChildProcess;
@@ -220,7 +225,7 @@ afterAll(async () => {
 
 // ─── OpenAI compatibility ─────────────────────────────────────────────────────
 
-describe('OpenAI /v1/chat/completions — real-client feel', () => {
+describe.skipIf(!distReady)('OpenAI /v1/chat/completions — real-client feel', () => {
   it('non-streaming: exact OpenAI response envelope with usage', async () => {
     const res = await fetch(`${PROXY_BASE}/v1/chat/completions`, {
       method: 'POST',
@@ -375,7 +380,7 @@ describe('OpenAI /v1/chat/completions — real-client feel', () => {
 
 // ─── Reasoning effort mapping ────────────────────────────────────────────────
 
-describe('Reasoning effort mapping (verified on the wire)', () => {
+describe.skipIf(!distReady)('Reasoning effort mapping (verified on the wire)', () => {
   async function captureEffort(model: string, effort?: string | number) {
     const before = capturedBodies.length;
     await fetch(`${PROXY_BASE}/v1/chat/completions`, {
@@ -421,7 +426,7 @@ describe('Reasoning effort mapping (verified on the wire)', () => {
 
 // ─── Anthropic compatibility ─────────────────────────────────────────────────
 
-describe('Anthropic /v1/messages — real-client feel', () => {
+describe.skipIf(!distReady)('Anthropic /v1/messages — real-client feel', () => {
   it('thinking budget_tokens maps to effort tiers on the wire', async () => {
     await fetch(`${PROXY_BASE}/v1/messages`, {
       method: 'POST',
@@ -545,7 +550,7 @@ describe('Anthropic /v1/messages — real-client feel', () => {
 // ─── Structured error contract ────────────────────────────────────────────────
 // 每个失败都必须带稳定错误码 + 可执行提示，且终止性计费/套餐错误绝不重试。
 
-describe('structured error contract', () => {
+describe.skipIf(!distReady)('structured error contract', () => {
   const ask = (text: string) => ({
     model: 'claude-sonnet-5',
     messages: [{ role: 'user', content: text }],
@@ -660,7 +665,7 @@ describe('structured error contract', () => {
 
 // ─── Version reporting ────────────────────────────────────────────────────────
 
-describe('version reporting', () => {
+describe.skipIf(!distReady)('version reporting', () => {
   it('/health reports the real package version instead of a hardcoded string', async () => {
     const data = await (await fetch(`${PROXY_BASE}/health`)).json();
     expect(data.status).toBe('ok');
@@ -676,7 +681,7 @@ describe('version reporting', () => {
 
 // ─── Subscription plan + billing cycle (/api/usage/overview) ──────────────────
 
-describe('plan & billing cycle', () => {
+describe.skipIf(!distReady)('plan & billing cycle', () => {
   it('exposes the subscription plan with its verified credit caps', async () => {
     const res = await fetch(`${PROXY_BASE}/api/usage/overview`);
     expect(res.status).toBe(200);
@@ -707,7 +712,7 @@ describe('plan & billing cycle', () => {
 
 // ─── Per-plan model availability (③) ──────────────────────────────────────────
 
-describe('per-plan model availability', () => {
+describe.skipIf(!distReady)('per-plan model availability', () => {
   beforeAll(async () => {
     // 显式同步一次目录 + 定价（含 availability），不依赖启动时的后台同步时序。
     const res = await fetch(`${PROXY_BASE}/v1/models/refresh`, { method: 'POST' });

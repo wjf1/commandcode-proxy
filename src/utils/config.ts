@@ -15,14 +15,13 @@ import { spawn } from 'child_process';
 import { GatewayConfig, GatewayConfigFile, AccountInfo } from '../types/index.js';
 import { logger } from './logger.js';
 import { notify } from './notifier.js';
+import { getProjectRootDir } from './paths.js';
 
-function getProjectRootDir(): string {
-  if ((process as any).pkg || process.execPath.toLowerCase().includes('commandcode-proxy')) {
-    return path.dirname(process.execPath);
-  }
-  return process.cwd();
-}
+// 路径解析收敛到 paths.ts（logger 也依赖它，避免循环导入）；此处保持再导出
+// 兼容既有 import（dashboard.ts 等）。
+export { getProjectRootDir };
 
+/** 项目根目录：pkg 打包产物取 exe 所在目录，源码运行取 cwd。 */
 export const CONFIG_FILE_PATH = process.env.COMMANDCODE_CONFIG_PATH
   ? path.resolve(process.env.COMMANDCODE_CONFIG_PATH)
   : path.join(getProjectRootDir(), 'config.json');
@@ -100,10 +99,12 @@ function isPrivateOrReserved(host: string): boolean {
   if (parts.length === 4 && parts.every(n => Number.isInteger(n) && n >= 0 && n <= 255)) {
     const [a, b] = parts;
     if (a === 10) return true;                        // 10.0.0.0/8
+    if (a === 100 && b >= 64 && b <= 127) return true; // 100.64.0.0/10 CGNAT
     if (a === 127) return true;                       // 127.0.0.0/8 回环
     if (a === 169 && b === 254) return true;          // 169.254.0.0/16 链路本地（含云元数据 169.254.169.254）
     if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
     if (a === 192 && b === 168) return true;          // 192.168.0.0/16
+    if (a === 198 && (b === 18 || b === 19)) return true; // 198.18.0.0/15 基准测试保留
     if (a === 0 || a >= 224) return true;             // 0.0.0.0/8、224/4(组播)、240/4(保留) 等
     return false;
   }
@@ -480,7 +481,7 @@ export async function checkAndRotateAccountsOnQuota(): Promise<boolean> {
 
 // ─── 上游用量统计（whoami / credits / subscriptions / usage summary）──────────
 
-async function fetchJson(url: string, headers: Record<string, string>): Promise<any | null> {
+async function fetchJson(url: string, headers: Record<string, string>, timeoutMs = 15_000): Promise<any | null> {
   let safeUrl: string;
   try {
     safeUrl = assertSafeUpstreamUrl(url).toString();
@@ -489,7 +490,7 @@ async function fetchJson(url: string, headers: Record<string, string>): Promise<
     return null;
   }
   try {
-    const res = await fetch(safeUrl, { headers });
+    const res = await fetch(safeUrl, { headers, signal: AbortSignal.timeout(timeoutMs) });
     if (res.ok) return await res.json();
   } catch (err: any) {
     logger.warn(`[USAGE] ${safeUrl} fetch error: ${err.message}`);
@@ -520,6 +521,40 @@ export async function fetchLiveUsageStats(apiKey: string, ccApiBase: string, ccV
   ]);
 
   return { whoami, credits, subscription, summary };
+}
+
+// ─── 用量统计缓存（45s TTL + 并发去重）───────────────────────────────────────
+// 仪表盘切一次用量页会对同一账号触发 overview + aggregate 两轮统计（每轮 4 个
+// 上游请求）；这些数据 45 秒内不会变化，缓存掉重复。登录、额度轮换等需要新鲜
+// 值的场景继续用未缓存的 fetchLiveUsageStats。
+
+const LIVE_STATS_TTL_MS = 45_000;
+const liveStatsCache = new Map<string, { at: number; data: any }>();
+const liveStatsInflight = new Map<string, Promise<any>>();
+
+export async function fetchLiveUsageStatsCached(apiKey: string, ccApiBase: string, ccVersion: string): Promise<any> {
+  const key = `${apiKey}|${ccApiBase}|${ccVersion}`;
+  const hit = liveStatsCache.get(key);
+  if (hit && Date.now() - hit.at < LIVE_STATS_TTL_MS) return hit.data;
+
+  const inflight = liveStatsInflight.get(key);
+  if (inflight) return inflight;
+
+  const p = fetchLiveUsageStats(apiKey, ccApiBase, ccVersion)
+    .then(data => {
+      liveStatsCache.set(key, { at: Date.now(), data });
+      return data;
+    })
+    .finally(() => {
+      liveStatsInflight.delete(key);
+      // 缓存条目有界：账号通常个位数，防御性丢弃最旧条目
+      if (liveStatsCache.size > 64) {
+        const oldest = [...liveStatsCache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+        if (oldest) liveStatsCache.delete(oldest[0]);
+      }
+    });
+  liveStatsInflight.set(key, p);
+  return p;
 }
 
 /**

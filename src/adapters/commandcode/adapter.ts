@@ -29,6 +29,7 @@ import {
 import { resolveModelName } from '../../utils/models.js';
 import { logger } from '../../utils/logger.js';
 import { parseUsd } from './usage.js';
+import { estimateTextTokens } from './upstream.js';
 
 // ─── 推理强度（reasoning effort）映射表（按 CLI wire 契约）───────────────────────
 // 不同模型支持不同的推理档位。请求方传入的 reasoning_effort 会被"向下就近对齐"
@@ -597,55 +598,58 @@ export class CommandCodeAdapter {
       const text = event.text || event.data?.text;
       if (text) {
         state.hasEmittedText = true;
-        state.outputTokens += Math.ceil(text.length / 4);
+        state.outputTokens += estimateTextTokens(text);
         chunks.push(this.openAIDelta(state, { reasoning_content: text } as any, null));
       }
       return chunks;
     }
 
     if (event.type === 'text-delta') {
-      let rawText = event.text || event.data?.text || '';
+      const rawText = event.text || event.data?.text || '';
       if (!rawText) return chunks;
-      state.outputTokens += Math.ceil(rawText.length / 4);
 
-      // Some models emit  thinking tags inline — split into reasoning_content.
-      if (rawText.includes(' thinking') || state.thinkingState === 'in_think') {
-        if (rawText.includes(' thinking') && rawText.includes(' response')) {
+      // 部分模型会在 text-delta 里内联 <think>…</think>（或 <thinking>）标签，
+      // 需要把标签内文本路由到 reasoning_content 而不是 content。标签可能被
+      // 拆在相邻 delta 里，因此用 thinkingState 跨事件记忆当前是否处于 think 块。
+      const OPEN_RE = /<(?:think|thinking)>/;
+      const CLOSE_RE = /<\/(?:think|thinking)>/;
+
+      let rest = rawText;
+      while (rest) {
+        if (state.thinkingState === 'in_think') {
+          const m = CLOSE_RE.exec(rest);
+          if (!m) {
+            state.hasEmittedText = true;
+            state.outputTokens += estimateTextTokens(rest);
+            chunks.push(this.openAIDelta(state, { reasoning_content: rest } as any, null));
+            break;
+          }
+          const thinkContent = rest.slice(0, m.index);
+          rest = rest.slice(m.index + m[0].length);
           state.thinkingState = 'done';
-          const parts = rawText.split(' response');
-          const thinkPart = parts[0];
-          rawText = parts[1] || '';
-          const thinkContent = thinkPart.split(' thinking')[1] || '';
           if (thinkContent) {
             state.hasEmittedText = true;
+            state.outputTokens += estimateTextTokens(thinkContent);
             chunks.push(this.openAIDelta(state, { reasoning_content: thinkContent } as any, null));
           }
-        } else if (rawText.includes(' thinking')) {
-          state.thinkingState = 'in_think';
-          const thinkContent = rawText.split(' thinking')[1] || '';
-          if (thinkContent) {
-            state.hasEmittedText = true;
-            chunks.push(this.openAIDelta(state, { reasoning_content: thinkContent } as any, null));
-          }
-          return chunks;
-        } else if (rawText.includes(' response')) {
-          state.thinkingState = 'done';
-          const parts = rawText.split(' response');
-          if (parts[0]) {
-            state.hasEmittedText = true;
-            chunks.push(this.openAIDelta(state, { reasoning_content: parts[0] } as any, null));
-          }
-          rawText = parts[1] || '';
-        } else if (state.thinkingState === 'in_think') {
-          state.hasEmittedText = true;
-          chunks.push(this.openAIDelta(state, { reasoning_content: rawText } as any, null));
-          return chunks;
+          continue;
         }
-      }
-
-      if (rawText) {
+        const m = OPEN_RE.exec(rest);
+        if (m) {
+          const before = rest.slice(0, m.index);
+          rest = rest.slice(m.index + m[0].length);
+          state.thinkingState = 'in_think';
+          if (before) {
+            state.hasEmittedText = true;
+            state.outputTokens += estimateTextTokens(before);
+            chunks.push(this.openAIDelta(state, { content: before }, null));
+          }
+          continue;
+        }
         state.hasEmittedText = true;
-        chunks.push(this.openAIDelta(state, { content: rawText }, null));
+        state.outputTokens += estimateTextTokens(rest);
+        chunks.push(this.openAIDelta(state, { content: rest }, null));
+        break;
       }
       return chunks;
     }
@@ -758,13 +762,13 @@ export class CommandCodeAdapter {
         const txt = event.text || event.data?.text;
         if (txt) {
           fullText += txt;
-          outputTokens += Math.ceil(txt.length / 4);
+          outputTokens += estimateTextTokens(txt);
         }
       } else if (event.type === 'reasoning-delta') {
         const txt = event.text || event.data?.text;
         if (txt) {
           reasoningText += txt;
-          outputTokens += Math.ceil(txt.length / 4);
+          outputTokens += estimateTextTokens(txt);
         }
       } else if (event.type === 'tool-call' || event.type === 'tool-call-delta') {
         const id = ((event.toolCallId || event.data?.toolCallId) as string) || `toolu_${crypto.randomUUID().slice(0, 8)}`;

@@ -148,7 +148,7 @@ Anthropic 出口（`/v1/messages`）：
 |---|---|---|
 | `PORT` | `9090` | 监听端口 |
 | `HOST` | `127.0.0.1` | 绑定地址（`0.0.0.0` 暴露到局域网） |
-| `PROXY_API_KEY` | 未设置 | 要求 `/v1/*` 携带该密钥（Bearer 或 `x-api-key`） |
+| `PROXY_API_KEY` | 未设置 | 要求 `/v1/*` **与管理面 `/api/*`** 携带该密钥（Bearer 或 `x-api-key`）；仪表盘首次访问会弹出密钥输入，本标签页内记住 |
 | `COMMANDCODE_API_KEY` | 取自 auth.json | 上游密钥兜底；无命名账号时账号名显示为 `CLI Key (尾4位 xxxx)` / `Env Key (尾4位 xxxx)`，启动后由 whoami 异步补全真实用户名 |
 | `COMMANDCODE_API_BASE` | `https://api.commandcode.ai` | 上游服务地址 |
 | `COMMANDCODE_UPSTREAM_ALLOWED_HOSTS` | 未设置 | 追加允许的上游 host（逗号分隔，供自建网关/镜像）；环回/私有/保留地址默认拒绝，仅在此显式加入才放行 |
@@ -156,6 +156,8 @@ Anthropic 出口（`/v1/messages`）：
 | `ROTATION_MODE` | `manual` | `auto-quota` 启用 30 分钟额度检查 |
 | `NO_OPEN_BROWSER` | 未设置 | 设为 `1` 跳过仪表盘自动打开 |
 | `MAX_BODY_MB` | `64` | 入站 JSON 请求体上限（MB）；视觉/多图 base64 负载超默认 1MB 会触发 413（`FST_ERR_CTP_BODY_TOO_LARGE`），范围 1..1024 |
+| `USAGE_HISTORY_MAX_MB` | `20` | 会话历史 `usage-history.jsonl` 的大小上限（MB）；超限时保留较新的一半，防止文件无限增长拖慢仪表盘聚合 |
+| `COMMANDCODE_LOG_PATH` | `<项目根>/logs/proxy.log` | 运行日志落盘路径（全量追加，超 5MB 轮转为 `.old`）；控制台窗口关掉后仍可事后排查 |
 
 持久化配置存于可执行文件旁的 `config.json`。
 
@@ -185,7 +187,11 @@ src/
 │   ├── chat.ts                   # POST /v1/chat/completions
 │   ├── messages.ts               # POST /v1/messages
 │   ├── models.ts                 # GET /v1/models、refresh
-│   └── dashboard.ts              # 中文 SPA + 管理 API
+│   ├── dashboard.ts              # 管理 API 与静态资源路由
+│   └── sse-common.ts             # 双出口共享：SSE 头/事件解析/持久化
+public/
+├── index.html                    # 仪表盘 SPA（中文界面）
+└── vendor/                       # 本地化的 tailwind / font-awesome / chart.js
 └── utils/
     ├── config.ts                 # 账号、OAuth 流程、额度轮换
     ├── models.ts                 # 目录同步 + 模糊模型名解析
@@ -315,7 +321,7 @@ Anthropic route (`/v1/messages`):
 |---|---|---|
 | `PORT` | `9090` | Listen port |
 | `HOST` | `127.0.0.1` | Bind address (`0.0.0.0` exposes to LAN) |
-| `PROXY_API_KEY` | unset | Require this key on `/v1/*` (Bearer or `x-api-key`) |
+| `PROXY_API_KEY` | unset | Require this key on `/v1/*` **and the admin surface `/api/*`** (Bearer or `x-api-key`); the dashboard prompts for it on first visit and remembers it per tab |
 | `COMMANDCODE_API_KEY` | from auth.json | Upstream key fallback; with no named account the name shows as `CLI Key (last4 xxxx)` / `Env Key (last4 xxxx)`, enriched from whoami after boot |
 | `COMMANDCODE_API_BASE` | `https://api.commandcode.ai` | Upstream base |
 | `COMMANDCODE_UPSTREAM_ALLOWED_HOSTS` | unset | Extra allowed upstream hosts (comma-separated, for self-hosted gateways/mirrors); loopback/private/reserved are rejected by default unless added here |
@@ -323,6 +329,8 @@ Anthropic route (`/v1/messages`):
 | `ROTATION_MODE` | `manual` | `auto-quota` enables 30-min quota checks |
 | `NO_OPEN_BROWSER` | unset | Set `1` to skip dashboard auto-open |
 | `MAX_BODY_MB` | `64` | Max inbound JSON body size (MB); vision/multi-image base64 payloads exceed the 1MB default (413, `FST_ERR_CTP_BODY_TOO_LARGE`). Range 1..1024 |
+| `USAGE_HISTORY_MAX_MB` | `20` | Size cap (MB) for `usage-history.jsonl`; when exceeded the newer half is kept so the dashboard aggregation stays fast |
+| `COMMANDCODE_LOG_PATH` | `<root>/logs/proxy.log` | Runtime log file (append-all, rotated to `.old` past 5MB) so incidents survive console-window closes |
 
 Persistent config lives in `config.json` next to the executable.
 
