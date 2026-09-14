@@ -5,8 +5,15 @@ updates:
     schedule:
       interval: weekly
     groups:
+      # typescript 单独成组：它的 major 升级会撞上 typescript-eslint 的 peer 上限
+      # （>=4.8.4 <6.1.0），与其它 dev 依赖捆在一起会让整组 npm ci 直接 ERESOLVE。
+      typescript:
+        patterns:
+          - typescript
       dev-deps:
         dependency-type: development
+        exclude-patterns:
+          - typescript
   - package-ecosystem: github-actions
     directory: /
     schedule:
