@@ -167,7 +167,7 @@ beforeAll(async () => {
           { type: 'start' },
           { type: 'reasoning-delta', text: 'Analyzing the problem step by step...' },
           { type: 'text-delta', text: 'The answer is 4.' },
-          { type: 'finish', finishReason: 'stop', data: { usage: { inputTokens: 10, outputTokens: 25 } } },
+          { type: 'finish', finishReason: 'stop', data: { usage: { inputTokens: 10, outputTokens: 25, inputTokenDetails: { cacheReadTokens: 8, noCacheTokens: 2 } } } },
         ]));
       } else {
         // Plain text scenario
@@ -261,7 +261,12 @@ describe.skipIf(!distReady)('OpenAI /v1/chat/completions — real-client feel', 
     expect(data.choices[0].message.content).toBe('Hello, world!');
     expect(data.choices[0].finish_reason).toBe('stop');
     // Usage must come from upstream finish event, not estimates
-    expect(data.usage).toEqual({ prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 });
+    expect(data.usage).toEqual({
+      prompt_tokens: 7,
+      completion_tokens: 3,
+      total_tokens: 10,
+      prompt_tokens_details: { cached_tokens: 0 },
+    });
   });
 
   it('stream_options.include_usage attaches usage to the final chunk', async () => {
@@ -560,6 +565,12 @@ describe.skipIf(!distReady)('Anthropic /v1/messages — real-client feel', () =>
     const msgDelta = events.find(e => e.type === 'message_delta');
     expect(msgDelta.data.delta.stop_reason).toBe('end_turn');
     expect(msgDelta.data.usage.output_tokens).toBe(25);
+    // 缓存命中量只有上游收尾的 finish 事件才知道，必须在收尾 delta 里补报，
+    // 否则客户端（如 ZCode）只能看到输入总量、看不到其中命中缓存的部分。
+    expect(msgDelta.data.usage.cache_read_input_tokens).toBe(8);
+    expect(msgDelta.data.usage.cache_creation_input_tokens).toBe(0);
+    // 输入量同理：message_start 里发的是本地估算，收尾 delta 必须给出上游真实值。
+    expect(msgDelta.data.usage.input_tokens).toBe(10);
   });
 
   it('tool round-trip: tool_use history converts correctly on the wire', async () => {
@@ -607,7 +618,12 @@ describe.skipIf(!distReady)('Anthropic /v1/messages — real-client feel', () =>
     expect(data.role).toBe('assistant');
     expect(data.id).toMatch(/^msg_/);
     expect(data.stop_reason).toBe('end_turn');
-    expect(data.usage).toEqual({ input_tokens: 10, output_tokens: 25 });
+    expect(data.usage).toEqual({
+      input_tokens: 10,
+      output_tokens: 25,
+      cache_read_input_tokens: 8,
+      cache_creation_input_tokens: 0,
+    });
     expect(data.content[0]).toEqual({ type: 'thinking', thinking: 'Analyzing the problem step by step...', signature: '' });
     expect(data.content[1]).toEqual({ type: 'text', text: 'The answer is 4.' });
   });

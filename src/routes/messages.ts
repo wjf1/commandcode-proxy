@@ -258,7 +258,16 @@ export async function messagesRoutes(fastify: FastifyInstance) {
             sse('message_delta', {
               type: 'message_delta',
               delta: { stop_reason: stopReason, stop_sequence: null },
-              usage: { output_tokens: outputTokens },
+              // 输入侧用量也只有上游收尾的 finish 事件才给得准：message_start 里
+              // 发出去的 input_tokens 是本地估算（缓存明细此刻尚不存在）。这里在
+              // 收尾 delta 补报真实值，口径与 message_start 一致 —— 均为含缓存的
+              // 输入总量，cache_read_* 是其中的子集，客户端不要重复相加。
+              usage: {
+                input_tokens: usageAcc.inputTokens,
+                output_tokens: outputTokens,
+                cache_read_input_tokens: usageAcc.cacheReadTokens || 0,
+                cache_creation_input_tokens: usageAcc.cacheWriteTokens || 0,
+              },
             })
           );
           reply.raw.write(sse('message_stop', { type: 'message_stop' }));

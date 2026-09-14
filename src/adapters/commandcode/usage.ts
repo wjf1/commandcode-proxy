@@ -50,7 +50,7 @@ export function parseUsd(value: unknown): number | undefined {
 }
 
 /** 从 usage 明细中拆出缓存读/写与非缓存输入量。 */
-function splitInput(usage: CCEventUsage): { cacheRead: number; cacheWrite: number; noCache: number } {
+export function splitInput(usage: CCEventUsage): { cacheRead: number; cacheWrite: number; noCache: number } {
   const details = usage.inputTokenDetails || {};
   const total = usage.inputTokens ?? 0;
   const cacheRead = details.cacheReadTokens ?? usage.cachedInputTokens ?? 0;

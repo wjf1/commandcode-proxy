@@ -286,6 +286,8 @@ export async function chatRoutes(fastify: FastifyInstance) {
           prompt_tokens: inputTokens,
           completion_tokens: outputTokens,
           total_tokens: inputTokens + outputTokens,
+          // 缓存命中明细按 OpenAI 语义放在 prompt_tokens_details，客户端据此算缓存折扣。
+          prompt_tokens_details: { cached_tokens: usageAcc.cacheReadTokens || 0 },
         },
       });
     } catch (err: any) {

@@ -2,6 +2,21 @@
 
 所有主要版本更新都记录在此文件。
 
+## [4.11.1] - 2026-09-14
+
+### 修复
+- **客户端看不到缓存命中，输入量还是估算值** — Anthropic 路由的流式响应里，`message_start` 在拿到上游 usage 之前就已发出（`input_tokens` 只能是本地估算），而真正的收尾 `message_delta` 只带了 `output_tokens`：上游在 `finish` 事件里给出的**缓存命中明细**（`usageAcc.cacheReadTokens`）与**真实输入量**被整个丢掉。后果是 Anthropic 兼容客户端（实测 ZCode）记录的 `input_tokens` 是估算值、`cache_read_input_tokens` 恒为 0，用量界面上完全看不到缓存命中——而代理自己其实拿到了准确值（缓存读占输入 99%）。现在收尾 delta 一并补报 `input_tokens` / `cache_read_input_tokens` / `cache_creation_input_tokens`；非流式 `buildAnthropicResponse` 同样补齐。
+- 同源的 OpenAI 路由缺字段：非流式响应与流式 `include_usage` 收尾 chunk 都没有缓存明细，现补 `prompt_tokens_details.cached_tokens`。
+
+### 兼容性
+- **`usage` 新增字段，纯增量，既有字段语义不变** — Anthropic 路由新增 `cache_read_input_tokens` / `cache_creation_input_tokens`（流式在收尾 `message_delta`，非流式在 `message.usage`）；OpenAI 路由新增 `prompt_tokens_details.cached_tokens`。`input_tokens` / `prompt_tokens` 仍是**含缓存读的输入总量**，缓存字段是其中的子集，客户端不要重复相加。
+
+### 清理（行为不变）
+- 缓存拆分逻辑收敛到 `usage.ts` 的 `splitInput` 并导出复用，删掉 adapter 内的重复实现（此前非流式路径压根没做这一步，正是上面那个 bug 的成因）；`StreamEncoderState` 补 `cacheWriteTokens`，与既有 `cacheReadTokens` / `noCacheTokens` 对齐。
+
+### 测试
+- 集成 mock 上游的 `__THINK__` 场景带上缓存明细，新增断言锁定：流式收尾 `message_delta` 必须报出真实 `input_tokens`（=10，而非估算）与 `cache_read_input_tokens`（=8）；两条非流式路由同样锁定。全量 **229 项通过**。
+
 ## [4.11.0] - 2026-09-12
 
 ### 修复

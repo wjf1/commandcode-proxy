@@ -357,6 +357,8 @@ export interface StreamEncoderState {
   outputTokens: number;
   /** 输入中命中缓存的 token 数（计费按 cacheRead 单价）。 */
   cacheReadTokens: number;
+  /** 写入缓存的输入 token 数（多数模型为 0）。 */
+  cacheWriteTokens: number;
   /** 输入中未命中缓存的 token 数。 */
   noCacheTokens: number;
   /** 上游 provider-metadata 给出的权威账单金额（USD）；缺省为 undefined。 */

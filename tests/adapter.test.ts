@@ -289,11 +289,17 @@ describe('Stream encoding', () => {
       { type: 'reasoning-delta', text: 'thinking...' },
       { type: 'text-delta', text: 'Let me check.' },
       { type: 'tool-call', toolCallId: 'tu_1', toolName: 'search', input: { q: 'x' } },
-      { type: 'finish', finishReason: 'tool-calls', data: { usage: { inputTokens: 10, outputTokens: 20 } } },
+      { type: 'finish', finishReason: 'tool-calls', data: { usage: { inputTokens: 10, outputTokens: 20, inputTokenDetails: { cacheReadTokens: 7, noCacheTokens: 3 } } } },
     ];
     const msg = adapter.buildAnthropicResponse(events, 'msg_x', 'claude-sonnet-5', 5);
     expect(msg.stop_reason).toBe('tool_use');
-    expect(msg.usage).toEqual({ input_tokens: 10, output_tokens: 20 });
+    // 缓存命中明细必须随 usage 透出，否则客户端无法区分"输入总量"与"其中命中缓存的部分"。
+    expect(msg.usage).toEqual({
+      input_tokens: 10,
+      output_tokens: 20,
+      cache_read_input_tokens: 7,
+      cache_creation_input_tokens: 0,
+    });
     expect(msg.content.some((b: any) => b.type === 'thinking')).toBe(true);
     expect(msg.content.some((b: any) => b.type === 'text')).toBe(true);
     expect(msg.content.some((b: any) => b.type === 'tool_use' && b.name === 'search')).toBe(true);

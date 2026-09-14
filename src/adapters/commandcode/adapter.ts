@@ -26,7 +26,7 @@ import {
   StreamEncoderState,
 } from '../../types/index.js';
 import { resolveModelName } from '../../utils/models.js';
-import { parseUsd } from './usage.js';
+import { parseUsd, splitInput } from './usage.js';
 import { estimateTextTokens } from './upstream.js';
 
 // ─── 推理强度（reasoning effort）映射表（按 CLI wire 契约）───────────────────────
@@ -554,6 +554,7 @@ export class CommandCodeAdapter {
       inputTokens: 0,
       outputTokens: 0,
       cacheReadTokens: 0,
+      cacheWriteTokens: 0,
       noCacheTokens: 0,
     };
   }
@@ -710,11 +711,10 @@ export class CommandCodeAdapter {
         if (usage.inputTokens != null) {
           state.inputTokens = usage.inputTokens;
           // 缓存命中量必须拆出来：单价仅为输入价的 1/50，混在 inputTokens 里会虚高成本。
-          const details = usage.inputTokenDetails || {};
-          const cacheRead = details.cacheReadTokens ?? usage.cachedInputTokens ?? 0;
-          const cacheWrite = details.cacheWriteTokens ?? 0;
+          const { cacheRead, cacheWrite, noCache } = splitInput(usage);
           state.cacheReadTokens = cacheRead;
-          state.noCacheTokens = details.noCacheTokens ?? Math.max(0, usage.inputTokens - cacheRead - cacheWrite);
+          state.cacheWriteTokens = cacheWrite;
+          state.noCacheTokens = noCache;
         }
         if (usage.outputTokens != null) state.outputTokens = usage.outputTokens;
       }
@@ -735,7 +735,13 @@ export class CommandCodeAdapter {
           created: state.created,
           model: state.model,
           choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
-          usage: { prompt_tokens: pt, completion_tokens: state.outputTokens, total_tokens: pt + state.outputTokens },
+          usage: {
+            prompt_tokens: pt,
+            completion_tokens: state.outputTokens,
+            total_tokens: pt + state.outputTokens,
+            // 缓存命中明细按 OpenAI 语义放在 prompt_tokens_details，客户端据此算缓存折扣。
+            prompt_tokens_details: { cached_tokens: state.cacheReadTokens || 0 },
+          },
         })}\n\n`);
       } else {
         chunks.push(this.openAIDelta(state, {}, finishReason));
@@ -770,6 +776,8 @@ export class CommandCodeAdapter {
     let reasoningText = '';
     const toolCalls: Array<{ type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }> = [];
     let outputTokens = 0;
+    let cacheReadTokens = 0;
+    let cacheWriteTokens = 0;
     let stopReason: string | null = null;
 
     for (const event of events) {
@@ -804,7 +812,12 @@ export class CommandCodeAdapter {
         // Original CLI: totalUsage at top level; rawFinishReason ?? finishReason.
         const usage = event.totalUsage ?? event.data?.usage;
         if (usage) {
-          if (usage.inputTokens != null) inputTokens = usage.inputTokens;
+          if (usage.inputTokens != null) {
+            inputTokens = usage.inputTokens;
+            const { cacheRead, cacheWrite } = splitInput(usage);
+            cacheReadTokens = cacheRead;
+            cacheWriteTokens = cacheWrite;
+          }
           if (usage.outputTokens != null) outputTokens = usage.outputTokens;
         }
         const rawFR = event.rawFinishReason || event.finishReason || event.data?.finishReason;
@@ -848,7 +861,12 @@ export class CommandCodeAdapter {
       model: modelName,
       stop_reason: stopReason || (toolCalls.length > 0 ? 'tool_use' : 'end_turn'),
       stop_sequence: null,
-      usage: { input_tokens: inputTokens, output_tokens: outputTokens },
+      usage: {
+        input_tokens: inputTokens,
+        output_tokens: outputTokens,
+        cache_read_input_tokens: cacheReadTokens,
+        cache_creation_input_tokens: cacheWriteTokens,
+      },
     };
   }
 }
