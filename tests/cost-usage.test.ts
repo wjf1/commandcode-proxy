@@ -11,7 +11,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { accumulateUsage, createUsageAccumulator, parseUsd } from '../src/adapters/commandcode/usage.js';
+import { accumulateUsage, createUsageAccumulator, parseUsd, toAnthropicUsage } from '../src/adapters/commandcode/usage.js';
 import { isPeakBillingTime } from '../src/utils/usage-store.js';
 
 // ─── 采集：缓存拆分与官方账单 ────────────────────────────────────────────────
@@ -65,6 +65,51 @@ describe('accumulateUsage — 缓存明细拆分', () => {
     accumulateUsage(acc, { type: 'start' });
     expect(acc.sawUsage).toBe(false);
     expect(acc.inputTokens).toBe(0);
+  });
+});
+
+describe('toAnthropicUsage — 上报给 Anthropic 客户端时的口径换算', () => {
+  const usageOf = (inputTokens: number, cacheRead: number, cacheWrite = 0) => ({
+    inputTokens,
+    outputTokens: 10,
+    inputTokenDetails: { cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite, noCacheTokens: inputTokens - cacheRead - cacheWrite },
+  });
+
+  it('input_tokens 只报未命中部分，容量由三字段相加还原（实测 ZCode 依赖此口径）', () => {
+    const acc = createUsageAccumulator();
+    accumulateUsage(acc, { type: 'finish', totalUsage: usageOf(87526, 87296) });
+    const u = toAnthropicUsage(acc);
+    // 上游给的是**含缓存**的 87526；Anthropic 语义下应报未命中的 230。
+    expect(u.input_tokens).toBe(230);
+    expect(u.cache_read_input_tokens).toBe(87296);
+    expect(u.cache_creation_input_tokens).toBe(0);
+    // 不变量：三者相加 == 上游输入总量。直通含缓存值会让按规范累加的客户端记成 174822（两倍）。
+    expect(u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens).toBe(87526);
+  });
+
+  it('缓存写入计入 cache_creation 并从 input_tokens 中扣除', () => {
+    const acc = createUsageAccumulator();
+    accumulateUsage(acc, { type: 'finish', totalUsage: usageOf(1000, 0, 800) });
+    const u = toAnthropicUsage(acc);
+    expect(u.input_tokens).toBe(200);
+    expect(u.cache_creation_input_tokens).toBe(800);
+    expect(u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens).toBe(1000);
+  });
+
+  it('无缓存命中时原样透传，不虚报也不扣减', () => {
+    const acc = createUsageAccumulator();
+    accumulateUsage(acc, { type: 'finish', totalUsage: { inputTokens: 500, outputTokens: 20 } });
+    expect(toAnthropicUsage(acc)).toEqual({
+      input_tokens: 500, cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
+    });
+  });
+
+  it('上游未回 usage 时回落值（本地估算）原样作为未命中输入，不被扣成负数', () => {
+    const acc = createUsageAccumulator();
+    acc.inputTokens = 1234;
+    expect(toAnthropicUsage(acc)).toEqual({
+      input_tokens: 1234, cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
+    });
   });
 });
 

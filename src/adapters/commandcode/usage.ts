@@ -9,6 +9,8 @@
 //   1. 拆分出 cacheReadTokens / noCacheTokens —— 缓存读单价是输入的 1/50，
 //      不拆分就会把 90%+ 的输入按全价计，导致成本虚高数倍；
 //   2. 抓取 gateway.cost —— 官方已算好峰谷价与折扣，直接采用最准。
+//   3. 换算成 Anthropic 规范的 usage —— 上游 inputTokens 含缓存，Anthropic 的
+//      input_tokens 不含，两者口径不同（见 toAnthropicUsage）。
 //
 // 采集是"就高优先"：有官方 cost 用官方，没有才本地估算（见 usage-store）。
 // =============================================================================
@@ -58,6 +60,34 @@ export function splitInput(usage: CCEventUsage): { cacheRead: number; cacheWrite
   const noCache =
     details.noCacheTokens ?? Math.max(0, total - cacheRead - cacheWrite);
   return { cacheRead, cacheWrite, noCache };
+}
+
+/**
+ * 采集器 → **Anthropic 规范**的 usage 字段。
+ *
+ * 两边的 input 口径不同，这是必须换算而非直接透传的地方：
+ *   - 上游 finish 事件的 `inputTokens` 是**含缓存命中**的输入总量（供应商按
+ *     「总量 - 缓存读」计费，其余按全价），缓存明细是它的**子集**；
+ *   - Anthropic 的 `input_tokens` **只算未命中缓存的输入**，总输入 =
+ *     input_tokens + cache_read_input_tokens + cache_creation_input_tokens。
+ *
+ * 直接把上游的含缓存值写进 `input_tokens`，按规范累加的客户端（实测 ZCode）会把
+ * cache_read 再加一遍：输入被记成两倍，缓存命中率随之从 ~99% 掉到 ~50%，且上下文
+ * 容量被误判为两倍（提前触发压缩）。所以这里只报未命中部分，总量由三个字段相加还原。
+ */
+export function toAnthropicUsage(acc: UsageAccumulator): {
+  input_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+} {
+  const cacheRead = acc.cacheReadTokens || 0;
+  const cacheWrite = acc.cacheWriteTokens || 0;
+  return {
+    // 上游未回 usage 时 acc.inputTokens 是本地估算、缓存明细为 0，此处原样返回。
+    input_tokens: Math.max(0, acc.inputTokens - cacheRead - cacheWrite),
+    cache_read_input_tokens: cacheRead,
+    cache_creation_input_tokens: cacheWrite,
+  };
 }
 
 /**

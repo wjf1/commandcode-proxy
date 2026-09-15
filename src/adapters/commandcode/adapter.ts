@@ -853,6 +853,11 @@ export class CommandCodeAdapter {
     content.push(...toolCalls);
     if (content.length === 0) content.push({ type: 'text', text: '' });
 
+    // Anthropic 的 input_tokens 不含缓存读写（总输入 = input_tokens + cache_read +
+    // cache_creation），而上游 finish 事件给的 inputTokens 是含缓存的输入总量 ——
+    // 直接透传会让按规范累加的客户端把缓存读再加一遍。详见 toAnthropicUsage。
+    const noCacheInput = Math.max(0, inputTokens - cacheReadTokens - cacheWriteTokens);
+
     return {
       id: msgId,
       type: 'message',
@@ -862,7 +867,7 @@ export class CommandCodeAdapter {
       stop_reason: stopReason || (toolCalls.length > 0 ? 'tool_use' : 'end_turn'),
       stop_sequence: null,
       usage: {
-        input_tokens: inputTokens,
+        input_tokens: noCacheInput,
         output_tokens: outputTokens,
         cache_read_input_tokens: cacheReadTokens,
         cache_creation_input_tokens: cacheWriteTokens,

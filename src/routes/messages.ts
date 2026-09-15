@@ -14,7 +14,7 @@ import { createInterface } from 'readline';
 import crypto from 'node:crypto';
 import { CommandCodeAdapter } from '../adapters/commandcode/adapter.js';
 import { sendToCC, isAbortError, estimateTextTokens } from '../adapters/commandcode/upstream.js';
-import { accumulateUsage, createUsageAccumulator } from '../adapters/commandcode/usage.js';
+import { accumulateUsage, createUsageAccumulator, toAnthropicUsage } from '../adapters/commandcode/usage.js';
 import { buildRequestContext, systemTextOf } from '../utils/request-context.js';
 import { hardenConnectionForLongStream, persistCompletion, writeSSEHeaders, parseEventLine } from './sse-common.js';
 import { AnthropicRequest, AnthropicContentBlock, CCEvent } from '../types/index.js';
@@ -115,6 +115,8 @@ export async function messagesRoutes(fastify: FastifyInstance) {
               model: modelName,
               stop_reason: null,
               stop_sequence: null,
+              // 此处缓存明细尚不可知（上游收尾才给），只是个占位估算，收尾
+              // message_delta 会用 toAnthropicUsage 的真实值覆盖掉。
               usage: { input_tokens: inputTokens, output_tokens: 0 },
             },
           })
@@ -258,15 +260,12 @@ export async function messagesRoutes(fastify: FastifyInstance) {
             sse('message_delta', {
               type: 'message_delta',
               delta: { stop_reason: stopReason, stop_sequence: null },
-              // 输入侧用量也只有上游收尾的 finish 事件才给得准：message_start 里
-              // 发出去的 input_tokens 是本地估算（缓存明细此刻尚不存在）。这里在
-              // 收尾 delta 补报真实值，口径与 message_start 一致 —— 均为含缓存的
-              // 输入总量，cache_read_* 是其中的子集，客户端不要重复相加。
+              // 输入侧用量只有上游收尾的 finish 事件才给得准（message_start 里发的
+              // 是本地估算）。这里按 Anthropic 规范补报：input_tokens 只算未命中缓存
+              // 的输入，缓存明细单列，三者相加才是输入总量 —— 详见 toAnthropicUsage。
               usage: {
-                input_tokens: usageAcc.inputTokens,
+                ...toAnthropicUsage(usageAcc),
                 output_tokens: outputTokens,
-                cache_read_input_tokens: usageAcc.cacheReadTokens || 0,
-                cache_creation_input_tokens: usageAcc.cacheWriteTokens || 0,
               },
             })
           );
@@ -318,8 +317,14 @@ export async function messagesRoutes(fastify: FastifyInstance) {
       }
 
       const message = adapter.buildAnthropicResponse(events, msgId, modelName, inputTokens);
+      // 日志与仪表盘保持同一口径：报输入**总量**（未命中 + 缓存读/写），而不是报文里
+      // 那个按 Anthropic 规范只算未命中部分的 input_tokens。
+      const logInputTokens =
+        message.usage.input_tokens +
+        message.usage.cache_read_input_tokens +
+        message.usage.cache_creation_input_tokens;
       logger.info(
-        `Input Tokens ${message.usage.input_tokens.toLocaleString('en-US')} | Output Tokens ${message.usage.output_tokens.toLocaleString('en-US')} | Timing ${((Date.now() - startTime) / 1000).toFixed(3)}s | Model ${modelName} | Status COMPLETED`
+        `Input Tokens ${logInputTokens.toLocaleString('en-US')} | Output Tokens ${message.usage.output_tokens.toLocaleString('en-US')} | Timing ${((Date.now() - startTime) / 1000).toFixed(3)}s | Model ${modelName} | Status COMPLETED`
       );
       if (!usageAcc.sawUsage) {
         usageAcc.inputTokens = message.usage.input_tokens;

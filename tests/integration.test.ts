@@ -569,8 +569,13 @@ describe.skipIf(!distReady)('Anthropic /v1/messages — real-client feel', () =>
     // 否则客户端（如 ZCode）只能看到输入总量、看不到其中命中缓存的部分。
     expect(msgDelta.data.usage.cache_read_input_tokens).toBe(8);
     expect(msgDelta.data.usage.cache_creation_input_tokens).toBe(0);
-    // 输入量同理：message_start 里发的是本地估算，收尾 delta 必须给出上游真实值。
-    expect(msgDelta.data.usage.input_tokens).toBe(10);
+    // input_tokens 必须是 Anthropic 语义的**未命中**部分（上游 inputTokens 含缓存，
+    // 直接透传会让按规范累加的客户端把缓存读再加一遍，输入记成两倍）。
+    expect(msgDelta.data.usage.input_tokens).toBe(2);
+    // 不变量：三个输入字段相加 == 上游报的输入总量。
+    const sum = msgDelta.data.usage.input_tokens + msgDelta.data.usage.cache_read_input_tokens +
+      msgDelta.data.usage.cache_creation_input_tokens;
+    expect(sum).toBe(10);
   });
 
   it('tool round-trip: tool_use history converts correctly on the wire', async () => {
@@ -619,7 +624,9 @@ describe.skipIf(!distReady)('Anthropic /v1/messages — real-client feel', () =>
     expect(data.id).toMatch(/^msg_/);
     expect(data.stop_reason).toBe('end_turn');
     expect(data.usage).toEqual({
-      input_tokens: 10,
+      // 上游 mock 报 inputTokens:10 / cacheReadTokens:8 → Anthropic 语义下未命中为 2，
+      // 总量由三字段相加还原（10）。
+      input_tokens: 2,
       output_tokens: 25,
       cache_read_input_tokens: 8,
       cache_creation_input_tokens: 0,

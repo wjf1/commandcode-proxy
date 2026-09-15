@@ -294,8 +294,10 @@ describe('Stream encoding', () => {
     const msg = adapter.buildAnthropicResponse(events, 'msg_x', 'claude-sonnet-5', 5);
     expect(msg.stop_reason).toBe('tool_use');
     // 缓存命中明细必须随 usage 透出，否则客户端无法区分"输入总量"与"其中命中缓存的部分"。
+    // input_tokens 按 Anthropic 语义只报**未命中**部分（上游 inputTokens 含缓存，
+    // 直通会让按规范累加的客户端把缓存读再加一遍），总量 = 三字段相加 = 10。
     expect(msg.usage).toEqual({
-      input_tokens: 10,
+      input_tokens: 3,
       output_tokens: 20,
       cache_read_input_tokens: 7,
       cache_creation_input_tokens: 0,

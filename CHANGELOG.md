@@ -2,6 +2,26 @@
 
 所有主要版本更新都记录在此文件。
 
+## [4.11.2] - 2026-09-15
+
+### 修复
+- **Anthropic 客户端把输入记成两倍，缓存命中率只剩 50%** — 4.11.1 让收尾 `message_delta` 补报缓存明细时，把上游 `finish` 事件里**含缓存命中**的 `inputTokens` 直接写进了 Anthropic 的 `input_tokens`，并在注释里声明"缓存字段是子集、客户端不要重复相加"。这违反了 Anthropic Messages 规范：那边的 `input_tokens` **只算未命中缓存的输入**，总输入 = `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`。按规范累加的客户端（实测 ZCode）于是把 `cache_read_input_tokens` 又加了一遍，输入被记成两倍——状态栏插件的缓存命中率随之从 ~99% 掉到 ~50%（`cache_read ÷ 被翻倍的 input`），上下文容量也被误判为两倍，会提前触发压缩。
+  - 定位依据（三方对齐，两处独立验证）：① ZCode `db.sqlite` 的 `model_usage.input_tokens` 恒等于代理 `usage-history.jsonl` 的 `inputTokens + cacheReadTokens`（实测 174822 = 87526 + 87296），而 `cache_read_input_tokens` 与代理一致，说明客户端确实在相加；② 上游权威账单能反推口径——deepseek 峰时价 $0.30/$1.20（谷时 $0.15/$0.60，恰为 2 倍），官方 `gateway.cost` 与「**只对 `输入总量 − 缓存读` 按全价计费**」的估算**逐位相等**（0.000694776），若上游 `inputTokens` 不含缓存则该金额会差约 19 倍；③ 代理 `raw_usage_json` 与 `usage-store` 的成本估算同样按含缓存口径，且与官方账单一致。
+  - 修复：新增 `toAnthropicUsage()`（`adapters/commandcode/usage.ts`）统一做口径换算 —— 只报未命中部分，缓存读写单列；流式 `message_delta` 与非流式 `buildAnthropicResponse` 共用同一实现，避免两处口径漂移（4.11.1 的 bug 正是"非流式路径没做拆分"的同源问题）。非流式日志改为打印**输入总量**（三字段相加），与仪表盘口径保持一致。
+  - **OpenAI 路由不动**：那边 `prompt_tokens` 含 `prompt_tokens_details.cached_tokens` 本就是 OpenAI 规范（子集语义），两出口各按本家规范是**正确的不对称**。
+  - 影响：报文里 `input_tokens` 的数值会变小（等于原来的值减去缓存读），总量由三字段相加还原、**语义总量不变**；Anthropic 客户端记录的输入量与缓存命中率随之恢复正确。
+- **上游输入量在流式日志里被丢弃** — 非流式路径此前用 `message.usage.input_tokens` 打日志，该字段在本版本起只表示未命中部分，故显式改为三字段相加的总量，避免运维侧日志突然"变小"。
+
+### 兼容性
+- **Anthropic 路由 `input_tokens` 语义变更（向规范收敛）** — 由「含缓存读的输入总量」改为「未命中缓存的输入」。按 Anthropic 规范累加的客户端（ZCode、Anthropic SDK 生态）会因此得到正确总量；把 `input_tokens` 当总量直接使用的非规范客户端会看到该字段变小，需改为三字段相加。README 双语文档与特性条目已同步更正。
+- OpenAI 路由契约不变（`prompt_tokens` 含缓存读，`cached_tokens` 为子集）。
+
+### 测试
+- 新增 `tests/cost-usage.test.ts` 的 `toAnthropicUsage` 4 项：实测数值换算（87526/87296 → 未命中 230）、缓存写入扣除、无缓存时不虚报不扣减、无上游 usage 时回落值不被扣成负数；其中锁定**不变量 `input_tokens + cache_read + cache_creation == 上游输入总量`**。
+- 同步更新 3 处既有断言（`integration.test.ts` 流式与非流式、`adapter.test.ts` 单元）为 Anthropic 语义，并补不变量断言。全量 **233 项通过**（较 4.11.1 的 229 项 +4），`tsc --noEmit` 与 `eslint` 无错误。
+
+- 版本号 `4.11.1` → `4.11.2`。
+
 ## [4.11.1] - 2026-09-14
 
 ### 修复
