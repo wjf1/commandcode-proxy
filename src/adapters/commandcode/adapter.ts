@@ -29,6 +29,17 @@ import { resolveModelName } from '../../utils/models.js';
 import { parseUsd, splitInput } from './usage.js';
 import { estimateTextTokens } from './upstream.js';
 
+// ─── max_tokens 钳制（按 CLI wire 契约）────────────────────────────────────────
+// CC wire 的 schema 校验对 params.max_tokens 有全局硬上限 200000（上游 zod 报
+// "Too big: expected number to be <=200000"）。宿主（如 ZCode）可能按模型上下文
+// 窗口推导 max_tokens 而超过该值，导致整轮请求 400。这里统一向下钳制，而不是
+// 让请求打到上游被拒。
+const CC_WIRE_MAX_TOKENS_CAP = 200000;
+
+function clampMaxTokens(v: number): number {
+  return Math.max(1, Math.min(v, CC_WIRE_MAX_TOKENS_CAP));
+}
+
 // ─── 推理强度（reasoning effort）映射表（按 CLI wire 契约）───────────────────────
 // 不同模型支持不同的推理档位。请求方传入的 reasoning_effort 会被"向下就近对齐"
 // 到该模型实际支持的档位，避免上游 400。档位从弱到强：
@@ -362,7 +373,7 @@ export class CommandCodeAdapter {
         ...(convertedTools && convertedTools.length > 0 ? { tools: convertedTools } : {}),
         ...(req.tool_choice ? { tool_choice: CommandCodeAdapter.convertToolChoice(req.tool_choice) } : {}),
         stream: true,
-        max_tokens: req.max_completion_tokens ?? req.max_tokens ?? 64000,
+        max_tokens: clampMaxTokens(req.max_completion_tokens ?? req.max_tokens ?? 64000),
         ...(req.temperature != null ? { temperature: req.temperature } : {}),
         ...(req.top_p != null ? { top_p: req.top_p } : {}),
         ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),

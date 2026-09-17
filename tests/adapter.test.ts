@@ -23,6 +23,38 @@ describe('OpenAI → CC translation', () => {
     expect(wire.params.stream).toBe(true);
   });
 
+  it('clamps max_tokens above the CC wire cap (200000) instead of letting upstream 400', () => {
+    const req: OpenAIChatRequest = {
+      model: 'deepseek/deepseek-v4.1-flash',
+      messages: [{ role: 'user', content: 'hi' }],
+      max_tokens: 250000,
+    };
+    const wire = adapter.translateOpenAIRequest(req);
+    expect(wire.params.max_tokens).toBe(200000);
+  });
+
+  it('passes max_tokens at or below the cap through unchanged', () => {
+    for (const v of [64000, 200000]) {
+      const req: OpenAIChatRequest = {
+        model: 'deepseek/deepseek-v4.1-flash',
+        messages: [{ role: 'user', content: 'hi' }],
+        max_tokens: v,
+      };
+      const wire = adapter.translateOpenAIRequest(req);
+      expect(wire.params.max_tokens).toBe(v);
+    }
+  });
+
+  it('clamps max_tokens on the Anthropic messages path too', () => {
+    const req: AnthropicRequest = {
+      model: 'deepseek/deepseek-v4.1-flash',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] } as any],
+      max_tokens: 1000000,
+    };
+    const wire = adapter.translateAnthropicRequest(req);
+    expect(wire.params.max_tokens).toBe(200000);
+  });
+
   it('converts assistant tool_calls and tool results into CC parts', () => {
     const req: OpenAIChatRequest = {
       model: 'gpt-5.6-sol',

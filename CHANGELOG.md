@@ -2,6 +2,17 @@
 
 所有主要版本更新都记录在此文件。
 
+## [4.12.1] - 2026-09-17
+
+### 修复
+- **`max_tokens` 超过 CC wire 硬上限 200000 时整轮请求被上游 400 拒绝** — CC wire 的 schema 校验对 `params.max_tokens` 有全局硬上限 200000（上游报 `Validation error: Too big: expected number to be <=200000 at "params.max_tokens"`，`provider_code=UNSUPPORTED_OPTION`、`retryable=false`）。宿主（实测 ZCode）会按模型上下文窗口推导 `max_tokens`（如 `deepseek/deepseek-v4.1-flash` 的 1M 窗口），一旦超过 200000，请求在翻译层原样透传、打到上游即被拒，该轮执行直接失败且不可重试。
+  - 修复：`adapters/commandcode/adapter.ts` 新增 `clampMaxTokens()`，在 `translateOpenAIRequest()` 组装 wire `params.max_tokens` 处统一向下钳制到 200000（Anthropic Messages 路径复用同一通路，一并覆盖）。实测边界：200000 通过、250000 复现 400。
+  - 影响：超限请求不再整轮失败，输出预算被钳到上游允许的最大值；未超限请求行为不变。
+- 版本号 `4.12.0` → `4.12.1`。
+
+### 测试
+- 新增 3 项回归测试（超限钳制、边界内透传、Anthropic 路径同样钳制），全量 **236 项通过**，`tsc --noEmit` 无错误。
+
 ## [4.12.0] - 2026-09-16
 
 ### 改进
