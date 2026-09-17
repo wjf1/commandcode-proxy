@@ -40,4 +40,15 @@ describe('dashboard SPA (public/index.html)', () => {
   it('does not reference external CDNs (assets are localized)', () => {
     expect(html).not.toMatch(/https?:\/\/cdn\.|https?:\/\/cdnjs\.cloudflare\.com|https?:\/\/cdn\.jsdelivr\.net/);
   });
+
+  // 模型卡片必须能把 GO 与 GOAT 两个档位分开标注：只看 onGoPlan 会让
+  // GOAT-only 的模型（如 gpt-5.6-sol）显示成没有档位区别的「可用」。
+  it('renders both GO and GOAT plan badges from the per-plan availability map', () => {
+    expect(html).toMatch(/data-tag="goat"/);
+    expect(html).toMatch(/isPlanOn\(m, 'individual-go'\)/);
+    expect(html).toMatch(/isPlanOn\(m, 'individual-goat'\)/);
+    expect(html).toMatch(/planPill\('individual-go'/);
+    expect(html).toMatch(/planPill\('individual-goat'/);
+    expect(html).not.toMatch(/if \(m\.onGoPlan\) tags \+=/);
+  });
 });

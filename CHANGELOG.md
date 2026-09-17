@@ -2,6 +2,22 @@
 
 所有主要版本更新都记录在此文件。
 
+## [4.13.0] - 2026-09-18
+
+### 改进
+- **模型卡片现在把 Go 与 GOAT 两个档位分开标注** — 此前卡片头部只判断压扁后的 `onGoPlan`（即 `availability['individual-go']`），GOAT 独有的模型因此完全没有档位标识：`gpt-5.6-sol`、`xai/grok-4.6`、`google/gemini-3.7-flash`、`google/gemini-3.8-flash`、`meta/muse-spark-1.2`、`meta/muse-spark-1.3` 这 6 个模型在 Go 档不可用、只在 GOAT 可用，却和其它模型一样只显示一枚中性的「可用」，无法区分。
+  - 每张卡片底部新增固定的「档位」行：`GO`（靛蓝）与 `GOAT`（金色 + 皇冠）两枚药丸**始终占位**，可用为实心强调色 + ✓、不可用为灰底 + ✗。固定占位让卡片等高、整列纵向对齐，扫一眼即可比较两个档位，而不是"只在可用时才冒出一枚标签"。
+  - 判定改为读上游完整的 `availability` 映射（前端新增 `isPlanOn(m, key)`），仅在 `availability` 整体缺失时才回退到旧的 `onGoPlan`；档位键与显示名的映射（`PLAN_LABELS`）与 `src/utils/plans.ts` 的 `PLAN_TIERS` 保持一致。
+  - GO / GOAT 都不含的 19 个模型（含 claude-sonnet-5、claude-opus-5 等）不再显示笼统的「可用」，改标中性徽章「更高档位」，悬停可见其实际可用档位清单（如 `Pro · Pro (v1) · Provider · Max · Ultra · Team Pro`）。
+  - 筛选条新增 `GOAT` 标签（与原 `GO` 并列），两者均走 `isPlanOn`；结果计数扩为「共 N 个 · 命中 M 个 · Go 档可用 X 个 · GOAT 档可用 Y 个」，并在筛选条下补一行图例说明药丸读法。
+  - 可读性：不可用药丸文字用 `slate-400`（卡片底色上对比度约 5.3:1），而非更暗的 `slate-500`（约 3.2:1）——10px 字号下后者偏暗。
+- 版本号 `4.12.1` → `4.13.0`。README 中英双语「模型目录 / Dashboard」小节同步更新，`docs/screenshots/dashboard-models.png` 按新界面重拍（1440×900@2x）。
+
+### 测试
+- 新增 `dashboard-spa.test.ts` 一项回归：断言 `GOAT` 筛选标签、`isPlanOn(m, 'individual-goat')` 与两枚 `planPill` 均已接入，且旧的 `if (m.onGoPlan) tags +=` 渲染路径已移除。
+- 全量 **237 项通过**，`tsc --noEmit` 无错误。
+- 实机验证（Chromium，1440×900）：79 张卡片全部渲染出 2 枚档位药丸；`gpt-5.6-luna` = GO ✓/GOAT ✓、`gpt-5.6-sol` = GO ✗/GOAT ✓、`claude-sonnet-5` = 双 ✗ + 「更高档位」徽章；`GO` 筛选命中 54、`GOAT` 筛选命中 60，与目录数据一致；图例行不换行、与计数不重叠，药丸文字无溢出。
+
 ## [4.12.1] - 2026-09-17
 
 ### 修复

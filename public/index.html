@@ -317,12 +317,23 @@
     <div class="flex items-center gap-1.5 flex-wrap" id="modelTagRow">
       <button class="mfilter-chip on" data-tag="all">全部</button>
       <button class="mfilter-chip" data-tag="go">GO</button>
+      <button class="mfilter-chip" data-tag="goat">GOAT</button>
       <button class="mfilter-chip" data-tag="free">FREE</button>
       <button class="mfilter-chip" data-tag="deal">DEAL</button>
       <button class="mfilter-chip" data-tag="vision">视觉</button>
       <button class="mfilter-chip" data-tag="reason">推理</button>
     </div>
-    <p id="modelsCount" class="text-[11px] text-slate-500 text-right"></p>
+    <div class="flex items-end justify-between gap-x-4 gap-y-1 flex-wrap">
+      <p class="text-[11px] text-slate-500 leading-relaxed">
+        每张卡片底部「档位」行标注该模型在两个套餐下的可用性：
+        <span class="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border font-semibold bg-indigo-500/15 text-indigo-300 border-indigo-500/40">GO<i class="fa-solid fa-check text-[9px] opacity-80"></i></span>
+        / <span class="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border font-semibold bg-amber-500/15 text-amber-300 border-amber-500/40"><i class="fa-solid fa-crown text-[9px]"></i>GOAT<i class="fa-solid fa-check text-[9px] opacity-80"></i></span>
+        为可用，
+        <span class="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border font-semibold bg-slate-800/40 text-slate-400 border-slate-700/70">GO<i class="fa-solid fa-xmark text-[9px] opacity-80"></i></span>
+        为不可用。
+      </p>
+      <p id="modelsCount" class="text-[11px] text-slate-500 text-right"></p>
+    </div>
   </div>
   <div id="modelsList" class="grid grid-cols-1 md:grid-cols-3 gap-3"></div>
 </section>
@@ -635,9 +646,43 @@ let allModelsCache = [];
 let modelTagFilter = 'all';
 let modelSortMode = 'default';
 let modelQueryTimer = null;
+// 档位键名与显示名，需与 src/utils/plans.ts 的 PLAN_TIERS 保持一致。
+const PLAN_LABELS = {
+  'individual-free': 'Free', 'individual-go': 'Go', 'individual-goat': 'GOAT',
+  'individual-pro': 'Pro', 'individual-pro-v1': 'Pro (v1)', 'individual-provider': 'Provider',
+  'individual-max': 'Max', 'individual-ultra': 'Ultra', 'teams-pro': 'Team Pro',
+};
+// 判定「档位可用」只看该档位自己的布尔值；availability 缺失时退回旧的 onGoPlan。
+function isPlanOn(m, key) {
+  const a = m && m.availability;
+  if (a && Object.keys(a).length) return a[key] === true;
+  return key === 'individual-go' ? !!m.onGoPlan : false;
+}
+function higherPlanNames(avail) {
+  return ['individual-pro', 'individual-pro-v1', 'individual-provider', 'individual-max', 'individual-ultra', 'teams-pro']
+    .filter(k => avail[k] === true).map(k => PLAN_LABELS[k] || k);
+}
+const BADGE_TONES = {
+  rose: 'bg-rose-500/15 text-rose-300 border-rose-500/30',
+  amber: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
+  slate: 'bg-slate-500/15 text-slate-300 border-slate-500/30',
+};
+function badge(text, tone, title) {
+  return '<span class="text-[10px] px-2 py-0.5 rounded border font-semibold ' + BADGE_TONES[tone] + '"' +
+    (title ? ' title="' + esc(title) + '"' : '') + '>' + text + '</span>';
+}
+// 档位药丸：可用=实心强调色，不可用=灰底。两枚固定占位，卡片高度一致，
+// 整列纵向对齐后即可一眼比较 GO / GOAT 的差别。
+function planPill(key, label, on, onTone) {
+  const cls = on ? onTone : 'bg-slate-800/40 text-slate-400 border-slate-700/70';
+  return '<span class="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border font-semibold ' + cls +
+    '" title="' + (PLAN_LABELS[key] || key) + ' 档位：' + (on ? '可用' : '不可用') + '">' +
+    label + '<i class="fa-solid ' + (on ? 'fa-check' : 'fa-xmark') + ' text-[9px] opacity-80"></i></span>';
+}
 function modelMatchesTag(m, tag) {
   const caps = m.caps || {};
-  if (tag === 'go') return !!m.onGoPlan;
+  if (tag === 'go') return isPlanOn(m, 'individual-go');
+  if (tag === 'goat') return isPlanOn(m, 'individual-goat');
   if (tag === 'free') return !!(m.deal && m.deal.free);
   if (tag === 'deal') return !!(m.deal && m.deal.discountPercent);
   if (tag === 'vision') return !!(caps.vision || m.supports_vision);
@@ -678,7 +723,12 @@ function applyModelFilter() {
   if (clearBtn) clearBtn.classList.toggle('hidden', !q);
   const filtered = sortModels(allModelsCache.filter(m => modelMatchesTag(m, modelTagFilter) && modelMatchesQuery(m, q)));
   const meta = document.getElementById('modelsCount');
-  if (meta) meta.innerText = '共 ' + allModelsCache.length + ' 个 · 命中 ' + filtered.length + ' 个';
+  if (meta) {
+    const goCount = allModelsCache.filter(m => isPlanOn(m, 'individual-go')).length;
+    const goatCount = allModelsCache.filter(m => isPlanOn(m, 'individual-goat')).length;
+    meta.innerText = '共 ' + allModelsCache.length + ' 个 · 命中 ' + filtered.length +
+      ' 个 · Go 档可用 ' + goCount + ' 个 · GOAT 档可用 ' + goatCount + ' 个';
+  }
   const c = document.getElementById('modelsList');
   if (!filtered.length) {
     c.innerHTML = '<div class="col-span-full text-center py-12 text-slate-500 text-xs"><i class="fa-solid fa-magnifying-glass text-2xl mb-3 block text-slate-600"></i>没有匹配的模型，换个关键词或标签试试</div>';
@@ -687,11 +737,17 @@ function applyModelFilter() {
   c.innerHTML = filtered.map(m => {
     const p = m.pricing || {};
     const caps = m.caps || {};
+    const avail = m.availability || {};
+    const goOn = isPlanOn(m, 'individual-go');
+    const goatOn = isPlanOn(m, 'individual-goat');
+    const higher = higherPlanNames(avail);
     let tags = '';
-    if (m.onGoPlan) tags += '<span class="text-[10px] px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30 font-semibold">GO</span>';
-    if (m.deal && m.deal.free) tags += '<span class="text-[10px] px-2 py-0.5 rounded bg-rose-500/15 text-rose-300 border border-rose-500/30 font-semibold">FREE</span>';
-    else if (m.deal && m.deal.discountPercent) tags += '<span class="text-[10px] px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 font-semibold">DEAL ' + m.deal.discountPercent + '%</span>';
-    if (!tags) tags = '<span class="text-[10px] px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-semibold">可用</span>';
+    if (m.deal && m.deal.free) tags += badge('FREE', 'rose');
+    else if (m.deal && m.deal.discountPercent) tags += badge('DEAL ' + m.deal.discountPercent + '%', 'amber');
+    // GO/GOAT 都不可用时，用一枚中性徽章说明它属于更高的付费档位，避免误读成"不可调用"。
+    if (!goOn && !goatOn && higher.length) {
+      tags += badge('更高档位', 'slate', '仅在这些档位可用：' + higher.join(' · '));
+    }
     const capsStr = '文字' + (caps.text ? '✓' : '✗') + ' · 视觉' + ((caps.vision || m.supports_vision) ? '✓' : '✗') + ' · 推理' + (caps.reasoning ? '✓' : '✗');
     return '<div class="p-3 bg-slate-900 border border-slate-800 rounded-lg hover:border-indigo-500/40 transition">' +
       '<div class="flex items-start justify-between gap-2">' +
@@ -706,6 +762,11 @@ function applyModelFilter() {
         '<span>缓存读：<span class="text-slate-200">' + fmtPrice(p.cacheRead) + '</span></span>' +
         '<span>缓存写：<span class="text-slate-200">' + fmtPrice(p.cacheWrite) + '</span></span>' +
         '<span class="text-slate-500">' + capsStr + '</span>' +
+      '</div>' +
+      '<div class="mt-2 pt-2 border-t border-slate-800/70 flex items-center gap-1.5">' +
+        '<span class="text-[10px] text-slate-500">档位</span>' +
+        planPill('individual-go', 'GO', goOn, 'bg-indigo-500/15 text-indigo-300 border-indigo-500/40') +
+        planPill('individual-goat', goatOn ? '<i class="fa-solid fa-crown text-[9px]"></i>GOAT' : 'GOAT', goatOn, 'bg-amber-500/15 text-amber-300 border-amber-500/40') +
       '</div>' +
     '</div>';
   }).join('');

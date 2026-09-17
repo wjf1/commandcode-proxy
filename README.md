@@ -48,7 +48,7 @@
 | ![控制台总览](./docs/screenshots/dashboard-overview.png) | ![模型目录](./docs/screenshots/dashboard-models.png) | ![账号与鉴权](./docs/screenshots/dashboard-accounts.png) |
 
 - **总览** — 一屏掌握运行状态：引擎启停、端口、运行时长、当前账号、绑定地址、鉴权开关、账号数与可用模型数；顶部一键切换引擎。
-- **模型目录** — 官方定价目录（上下文 / 输入 / 输出 / 缓存读 / 缓存写 / 能力 / Deal）实时刷新；支持关键词搜索、GO / FREE / DEAL / 视觉 / 推理标签筛选与多列排序。
+- **模型目录** — 官方定价目录（上下文 / 输入 / 输出 / 缓存读 / 缓存写 / 能力 / Deal）实时刷新；支持关键词搜索、GOAT / GO / FREE / DEAL / 视觉 / 推理标签筛选与多列排序；每张卡片底部的「档位」行固定标注该模型在 **Go** 与 **GOAT** 两个套餐下是否可用（GO 靛蓝、GOAT 金色带皇冠；不可用为灰底 ✗），两个档位都不含的模型另标「更高档位」并附可用档位清单。
 - **账号** — 浏览器 OAuth 登录或粘贴 Key；多账号管理与 5 小时额度轮换（≥90% 自动切换）；密钥一律**脱敏显示**。
 
 ---
@@ -310,6 +310,7 @@ Point any OpenAI-style client (Cursor, Continue, Aider, OpenWebUI, Hermes, your 
 
 **Dashboard & usage insight**
 
+- **Per-plan availability on every model card** — the badge row reads the upstream `availability` map instead of a single flattened Go flag, so each card states whether that model is usable on **Go** and on **GOAT** (GO indigo, GOAT gold with a crown; unavailable is a grey ✗). Models on neither plan are tagged *higher tiers* with the list of plans that do include them, and the filter row plus the result counter give Go/GOAT totals
 - Per-request session detail (tokens, cache hits, latency, cost, model, status) with daily trend, model doughnut and today/week/month cards; persisted to `~/.commandcode/usage-history.jsonl` (rotated at 20MB)
 - **Cost reconciled with the official bill** — prefers the authoritative `provider-metadata` amount (peak/off-peak and cache discounts included); local fallback prices cache read/write separately by time-of-day; estimates carry a `~` prefix
 - **Cache savings visualization** — how much cache hits saved versus full input price, and the multiple relative to billed cost
