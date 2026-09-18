@@ -460,7 +460,7 @@ export function percentile(sorted: number[], p: number): number | null {
   return sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo);
 }
 
-interface ModelPerf {
+export interface ModelPerf {
   /** 延迟样本数：COMPLETED 且有耗时的请求（含输出过短的）。 */
   samples: number;
   /** 吞吐样本数：在 samples 基础上再要求输出达到 MIN_THROUGHPUT_OUTPUT_TOKENS。 */
@@ -472,6 +472,23 @@ interface ModelPerf {
   /** 端到端耗时（毫秒）P50 / P95。 */
   latencyP50Ms: number | null;
   latencyP95Ms: number | null;
+}
+
+/**
+ * 性能表排序：先按**吞吐样本数**降序，再按延迟样本数降序。
+ *
+ * 为什么不按延迟样本排：这张表的主列是吞吐，用延迟样本决定座次会让算不出速率的行
+ * （输出全都过短）混在中部占位，而面板只渲染前 20 行——它们会把真正有吞吐数据的行
+ * 挤出可视区。这样排序后，有速率的行在前、`—` 行沉底，两种信息都还在。
+ *
+ * 注意排序只影响座次，**不做任何过滤**：算不出速率的行仍然保留，因为它携带了真实的
+ * 延迟测量与「这个模型被调用过」这个事实，删掉会让性能表和用量表对不上账。
+ */
+export function compareModelPerf(
+  a: Pick<ModelPerf, 'samples' | 'throughputSamples'>,
+  b: Pick<ModelPerf, 'samples' | 'throughputSamples'>
+): number {
+  return b.throughputSamples - a.throughputSamples || b.samples - a.samples;
 }
 
 /**
@@ -732,7 +749,7 @@ export function getUsageStats() {
       }, {})
     )
       .map(([model, rs]) => ({ model, ...perfOf(rs) }))
-      .sort((a, b) => b.samples - a.samples),
+      .sort(compareModelPerf),
     // 会话维度（客户端声明的事实性标识）。
     bySession: Array.from(bySession.values())
       .map(s => ({ ...s, models: Array.from(s.models) }))

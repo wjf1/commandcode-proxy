@@ -15,7 +15,7 @@ import {
   quotaSampleCount,
   QuotaSample,
 } from '../src/utils/quota-tracker.js';
-import { throughputTokS, percentile, perfOf, UsageRecord, MIN_THROUGHPUT_OUTPUT_TOKENS } from '../src/utils/usage-store.js';
+import { throughputTokS, percentile, perfOf, compareModelPerf, UsageRecord, MIN_THROUGHPUT_OUTPUT_TOKENS } from '../src/utils/usage-store.js';
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -119,6 +119,30 @@ describe('perfOf — 短输出不进吞吐统计', () => {
     expect(p.throughputSamples).toBe(0);
     expect(p.tokSP50).toBeNull();
     expect(p.latencyP50Ms).toBeNull();
+  });
+});
+
+describe('compareModelPerf — 座次，不是过滤', () => {
+  const m = (model, throughputSamples, samples) => ({ model, throughputSamples, samples });
+
+  it('有吞吐数据的行排在算不出速率的行之前，哪怕后者延迟样本更多', () => {
+    const rows = [
+      m('只有延迟', 0, 505), // 输出全都过短：算不出速率，但被调用过 505 次
+      m('有吞吐', 3, 3),
+    ];
+    rows.sort(compareModelPerf);
+    expect(rows.map(r => r.model)).toEqual(['有吞吐', '只有延迟']);
+  });
+
+  it('吞吐样本相同时按延迟样本降序', () => {
+    const rows = [m('a', 2, 2), m('b', 2, 90), m('c', 2, 40)];
+    rows.sort(compareModelPerf);
+    expect(rows.map(r => r.model)).toEqual(['b', 'c', 'a']);
+  });
+
+  it('排序后行数不变——算不出速率的行只是沉底，不被删掉', () => {
+    const rows = [m('x', 0, 1), m('y', 10, 10), m('z', 0, 40)];
+    expect(rows.slice().sort(compareModelPerf)).toHaveLength(3);
   });
 });
 

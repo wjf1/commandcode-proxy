@@ -78,7 +78,7 @@
 - **成本口径对齐官方账单** — 优先采用上游 `provider-metadata` 的权威金额（已含峰谷价、缓存折扣）；缺失时本地按**缓存读/写分项 + 峰谷分时**估算；估算值带 `~` 前缀可对照
 - **缓存节省可视化** — 显示缓存命中相比全价输入**省下的金额**及相对账面成本的倍数，直接回答"为何账单远低于直觉"；按每条记录自身时刻的费率计算
 - **峰谷计费提示** — 当前峰/谷档位、切换倒计时与受影响模型的生效费率；切换点按官方边界（UTC 01/04/06/10，周一至周五）计算，跨周末也正确
-- **端到端性能 + 额度燃烧预测** — 每模型吞吐/延迟 P50/P95（口径明确标注端到端）；对官方窗口用量做时间差分，外推"多少分钟后撞限、是否早于重置"（刻意不用本地历史——只覆盖代理流量约 18%，会严重高估剩余时间）。吞吐只统计输出 **≥32 token** 的请求（可用 `PERF_MIN_OUTPUT_TOKENS` 调整，设 0 关闭）：输出过短时 `输出token / 耗时` 的分母趋零，19ms / 3 token 能算出 187 t/s，这类比值没有信息量却会把 P50/P95 整体带飞——它们仍计入延迟统计，只是不算速率
+- **端到端性能 + 额度燃烧预测** — 每模型吞吐/延迟 P50/P95（口径明确标注端到端）；对官方窗口用量做时间差分，外推"多少分钟后撞限、是否早于重置"（刻意不用本地历史——只覆盖代理流量约 18%，会严重高估剩余时间）。吞吐只统计输出 **≥32 token** 的请求（可用 `PERF_MIN_OUTPUT_TOKENS` 调整，设 0 关闭）：输出过短时 `输出token / 耗时` 的分母趋零，19ms / 3 token 能算出 187 t/s，这类比值没有信息量却会把 P50/P95 整体带飞——它们仍计入延迟统计，只是不算速率。表内按吞吐样本数排序，速率算不出来的行沉到末尾但**不隐藏**（延迟仍属实测）
 - **会话与项目归因** — 会话 ID 取客户端声明的 `x-session-id`（**事实性标识**）；项目只能**推断**（system prompt 文本），逐条标注置信度（`label` 高置信 / `heuristic` 推测），未识别项单列而非猜测；日期分组按客户端时区
 - **官方用量总览 + 计费周期** — Total Tokens / Total Runs / 成功率 / 月度限额对齐官方 usage 页数据源；套餐名、额度上限、`currentPeriodStart/End`、周期进度（订阅额度到期不结转，一眼可见还剩几天）
 
@@ -328,7 +328,7 @@ Point any OpenAI-style client (Cursor, Continue, Aider, OpenWebUI, Hermes, your 
 - **Cost reconciled with the official bill** — prefers the authoritative `provider-metadata` amount (peak/off-peak and cache discounts included); local fallback prices cache read/write separately by time-of-day; estimates carry a `~` prefix
 - **Cache savings visualization** — how much cache hits saved versus full input price, and the multiple relative to billed cost
 - **Peak/off-peak indicator** — current tier, countdown to switch, active rates; switch points follow official boundaries (UTC 01/04/06/10, Mon–Fri), weekends handled correctly
-- **End-to-end perf + quota burn-rate projection** — per-model throughput/latency P50/P95 (explicitly end-to-end, not model generation speed); official window usage differenced over time to project minutes-to-cap vs reset. Throughput counts only responses with **≥32 output tokens** (tune via `PERF_MIN_OUTPUT_TOKENS`, set 0 to disable): when output is tiny the divisor collapses and 19ms / 3 tokens reports 187 t/s — a meaningless ratio that nonetheless drags P50/P95 with it. Those requests still count toward latency, just not toward rate
+- **End-to-end perf + quota burn-rate projection** — per-model throughput/latency P50/P95 (explicitly end-to-end, not model generation speed); official window usage differenced over time to project minutes-to-cap vs reset. Throughput counts only responses with **≥32 output tokens** (tune via `PERF_MIN_OUTPUT_TOKENS`, set 0 to disable): when output is tiny the divisor collapses and 19ms / 3 tokens reports 187 t/s — a meaningless ratio that nonetheless drags P50/P95 with it. Those requests still count toward latency, just not toward rate. Rows are ordered by throughput sample count, so models with no computable rate sink to the bottom but are **not hidden** — their latency readings are still measurements
 - **Session & project attribution** — session IDs are client-declared (factual); projects are inference-only, labelled per row (`label` high-confidence / `heuristic`), unattributed traffic listed separately; day grouping follows client timezone
 - **Official usage overview + billing cycle** — Total Tokens / Runs / success rate / monthly limit aligned with the official usage page; plan name, caps, `currentPeriodStart/End`, cycle progress
 
