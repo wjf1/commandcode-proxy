@@ -14,6 +14,8 @@ logs/
 *.bak
 *.py
 *.mjs
+# 例外：本工具的判定谓词被 tests/purge-test-usage.test.ts 引用，必须入库。
+!purge-test-usage.mjs
 *.png
 !docs/screenshots/
 !docs/screenshots/*.png

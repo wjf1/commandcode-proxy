@@ -51,4 +51,11 @@ describe('dashboard SPA (public/index.html)', () => {
     expect(html).toMatch(/planPill\('individual-goat'/);
     expect(html).not.toMatch(/if \(m\.onGoPlan\) tags \+=/);
   });
+
+  // 性能面板必须按「吞吐样本」渲染，而不是笼统的 samples：输出过短的响应会让
+  // tok/s 的分母趋零（19ms / 3 token ≈ 187 t/s），据此算出的 P50/P95 是假的。
+  it('perf table renders the throughput sample count and gates short outputs', () => {
+    expect(html).toMatch(/r\.throughputSamples/);
+    expect(html).toMatch(/仅计输出 ≥32 token/);
+  });
 });

@@ -2,6 +2,31 @@
 
 所有主要版本更新都记录在此文件。
 
+## [4.14.0] - 2026-09-18
+
+### 修复
+- **集成测试不再往生产用量库写记录** — `tests/integration.test.ts` 用 `{...process.env}` 拉起真实 proxy 进程，却只把 `COMMANDCODE_CONFIG_PATH` / `COMMANDCODE_MODELS_CACHE_PATH` / `COMMANDCODE_PRICING_CACHE_PATH` 隔离到临时目录，**漏了 `USAGE_HISTORY_PATH`**。`usage-store.ts` 的兜底值于是落到 `~/.commandcode/usage-history.jsonl` —— 而那份文件正是计费与性能面板的数据源。后果是套件对本机 mock 上游发出的每次调用（3 / 17 / 25 token、本机回环所以只要十几毫秒）都被当成真实流量记入生产库。已在 spawn env 中补上 `USAGE_HISTORY_PATH`，并加注释说明为何不能漏（同仓库 `attribution.test.ts` 一直是对的，集成测试漏了）。
+  - 实测验证：修复后跑完整套件（33 项集成用例、全部打向 mock 上游），生产用量库新增的短耗时无上下文记录数为 **0**；测试记录落在 `%TEMP%\ccproxy-it-*\usage.jsonl`。
+- **性能面板的吞吐 P50/P95 不再被极短响应带飞** — 面板此前把「样本 = 所有有输出的 COMPLETED 请求」直接喂给 `输出token / 耗时`。分母趋零时这个除法失去意义：19ms / 3 token ≈ 187 t/s、12ms / 25 token ≈ 2083 t/s，于是 `claude-sonnet-5` 那行显示 P50 **187.5 t/s**、P95 **2083 t/s**，看起来像在吹牛（该模型当时 505 条样本全部是被上一条 bug 写进来的 mock 残留，无一条真实流量）。
+  - `perfOf()` 新增吞吐闸门：输出不足 `MIN_THROUGHPUT_OUTPUT_TOKENS`（默认 **32**，可用环境变量 `PERF_MIN_OUTPUT_TOKENS` 覆盖，设 0 关闭）的记录**只进延迟统计、不进吞吐分布**。延迟照旧统计——那确实是一次真实等待，只是不适合用来算速率。
+  - `byModelPerf` 新增 `throughputSamples` 字段：`samples` 改为延迟样本数（COMPLETED 且有耗时），`throughputSamples` 是再过闸门的吞吐样本数，两个口径不再混为一谈。
+  - 面板「样本」列显示延迟样本数并带筛选图标提示，悬停显示「吞吐样本 N（仅计输出 ≥32 token）· 延迟样本 M」；后端未升级时自动回退到旧展示，不会把每行都标成被筛选。
+  - 实测对比（清理前的备份数据）：`claude-sonnet-5` P50 吞吐 `187.5` → `—`、`claude-opus-4-8` `200.0` → `—`、`gemini-3.6-flash` `176.5` → `—`；真实流量行基本不动（`deepseek-v4-flash-vision-exp` 72.4 → 72.4、`deepseek-v4.1-flash` 83.3 → 83.8）。
+- `package-lock.json` 的 `version` 字段补齐：4.13.0 发版时只改了 `package.json`，lockfile 停在 4.12.1。
+- 版本号 `4.13.0` → `4.14.0`。
+
+### 新增
+- **`purge-test-usage.mjs`：清理用量历史中的测试残留（一次性维护工具）** — 上一条 bug 已经写进生产库的脏数据需要清掉。判定谓词刻意保守（**宁可漏删不可误删**），要求同时满足：`status === 'COMPLETED'`、无 `sessionId` / `project` / `agent` / `sessionType`、`timingMs < 300`（跨公网调用实测下界 2245ms，<300ms 只可能来自本机 mock 上游）、且该模型从无带上下文的真实流量。任何一条不满足即保留。
+  - 默认 dry-run，须显式 `--apply` 才写盘；写盘前完整备份原文件，被删除的记录单独留档为 `*.removed-<时间戳>`（审计用）。
+  - 并发写保护：先向日志追加哨兵行 → 读回确认哨兵就是最后一行 → 写临时文件 → 校验文件尺寸未变 → 原子 rename，任一环节发现期间有新写入就整体重试（最多 6 次），避免和正在写日志的本机 proxy 抢文件导致丢记录。
+  - 本次实跑：2445 条 → 1847 条，移除 **598 条**（`claude-sonnet-5` 505、`deepseek/deepseek-v4-pro` 40、`google/gemini-3.6-flash` 40、`claude-opus-4-8` 13），全部为本机 mock 上游产物，涉及成本仅 $0.114。真实流量的模型一条未动。
+
+### 测试
+- `perf-quota.test.ts` 新增 4 项：短输出样本被闸门挡在吞吐之外但仍计入延迟、mock 残留样本（3/25 token + 十几毫秒）不再拉飞 P50/P95、阈值可显式传入且边界值（恰好等于阈值）计入、非 COMPLETED 记录两个口径都不计。
+- 新增 `purge-test-usage.test.ts`（5 项）锁定清理工具的判定谓词——这个谓词决定「哪些记录可以从生产库删掉」，误判即数据丢失：带任何真实上下文的一律不动、耗时达跨公网量级的一律不动、有真实流量的模型整体豁免、非 COMPLETED / 缺耗时的不动。
+- `dashboard-spa.test.ts` 新增 1 项：面板必须按 `r.throughputSamples` 渲染并标注「仅计输出 ≥32 token」。
+- 全量 **247 项通过**（原 237 项 + 10），`tsc --noEmit` 与 `eslint .` 均无错误。
+
 ## [4.13.0] - 2026-09-18
 
 ### 改进

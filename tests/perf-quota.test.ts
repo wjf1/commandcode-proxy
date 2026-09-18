@@ -15,7 +15,7 @@ import {
   quotaSampleCount,
   QuotaSample,
 } from '../src/utils/quota-tracker.js';
-import { throughputTokS, percentile } from '../src/utils/usage-store.js';
+import { throughputTokS, percentile, perfOf, UsageRecord, MIN_THROUGHPUT_OUTPUT_TOKENS } from '../src/utils/usage-store.js';
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -46,6 +46,79 @@ describe('percentile — 线性插值', () => {
     const a = Array.from({ length: 100 }, (_, i) => i + 1);
     expect(percentile(a, 0.5)).toBeCloseTo(50.5, 6);
     expect(percentile(a, 0.95)).toBeCloseTo(95.05, 6);
+  });
+});
+
+// ─── perfOf：吞吐闸门 ───────────────────────────────────────────────────────
+//
+// 背景（真实事故）：集成套件未隔离 USAGE_HISTORY_PATH，把 mock 上游返回的
+// 3 / 25 token 响应写进了生产用量库。这些记录耗时只有十几毫秒（本机 mock），
+// 于是 25/0.012 ≈ 2083 t/s、3/0.016 ≈ 187 t/s —— 面板上 claude-sonnet-5 的
+// P50 吞吐因此显示 187.5 t/s、P95 显示 2083 t/s，看起来像在吹牛。
+// 闸门设计：输出过短的记录只进延迟统计，不进吞吐统计。
+
+const rec = (o: Partial<UsageRecord>): UsageRecord => ({
+  timestamp: '2026-09-11T02:00:00.000Z',
+  model: 'm',
+  inputTokens: 100,
+  outputTokens: 500,
+  timingMs: 5000,
+  costUsd: 0,
+  hasPricing: true,
+  status: 'COMPLETED',
+  mode: 'chat',
+  ...o,
+});
+
+describe('perfOf — 短输出不进吞吐统计', () => {
+  it('默认阈值下，19ms / 3 token 的样本被闸门挡在吞吐之外，但仍计入延迟', () => {
+    const p = perfOf([rec({ outputTokens: 3, timingMs: 19 })]);
+    expect(MIN_THROUGHPUT_OUTPUT_TOKENS).toBe(32);
+    expect(p.throughputSamples).toBe(0);
+    expect(p.tokSP50).toBeNull();
+    expect(p.tokSP95).toBeNull();
+    // 延迟照旧 —— 这确实是一次真实等待
+    expect(p.latencyP50Ms).toBe(19);
+    expect(p.samples).toBe(1);
+  });
+
+  it('mock 残留样本（3/25 token + 十几毫秒）不会拉飞 P50/P95', () => {
+    const mockNoise = [
+      rec({ outputTokens: 3, timingMs: 16 }),
+      rec({ outputTokens: 3, timingMs: 19 }),
+      rec({ outputTokens: 25, timingMs: 12 }),
+      rec({ outputTokens: 17, timingMs: 19 }),
+    ];
+    const realTraffic = [
+      rec({ outputTokens: 600, timingMs: 9000 }),
+      rec({ outputTokens: 900, timingMs: 11000 }),
+    ];
+    const p = perfOf([...mockNoise, ...realTraffic]);
+    expect(p.throughputSamples).toBe(2);
+    expect(p.samples).toBe(6);
+    // 只剩真实流量：(66.7 + 81.8)/2 → P50 落在 70 上下，而不是 187 或 2083
+    expect(p.tokSP50!).toBeLessThan(100);
+    expect(p.tokSP95!).toBeLessThan(100);
+  });
+
+  it('阈值可显式传入（0 = 关闭闸门，恢复原口径）', () => {
+    const rs = [rec({ outputTokens: 25, timingMs: 12 })];
+    expect(perfOf(rs, 0).throughputSamples).toBe(1);
+    expect(perfOf(rs, 0).tokSP50).toBeCloseTo(2083.3, 1);
+    expect(perfOf(rs, 32).throughputSamples).toBe(0);
+    // 边界：恰好等于阈值时计入
+    expect(perfOf([rec({ outputTokens: 32, timingMs: 1000 })], 32).throughputSamples).toBe(1);
+  });
+
+  it('非 COMPLETED 的记录两个口径都不计', () => {
+    const p = perfOf([
+      rec({ outputTokens: 500, status: 'FAILED' }),
+      rec({ outputTokens: 500, timingMs: 0 }),
+    ]);
+    expect(p.samples).toBe(0);
+    expect(p.throughputSamples).toBe(0);
+    expect(p.tokSP50).toBeNull();
+    expect(p.latencyP50Ms).toBeNull();
   });
 });
 

@@ -188,14 +188,14 @@
     <div class="mt-4 bg-slate-950/60 border border-slate-800 p-4 rounded-lg">
       <div class="flex items-center justify-between flex-wrap gap-2">
         <h3 class="font-bold text-xs text-white"><i class="fa-solid fa-gauge-high text-cyan-400"></i> 端到端性能</h3>
-        <span class="text-[11px] text-slate-500" title="耗时覆盖整个请求生命周期（上游排队、重试、网络往返），反映体感等待而非模型生成速度">口径：端到端，非模型生成速度</span>
+        <span class="text-[11px] text-slate-500" title="耗时覆盖整个请求生命周期（上游排队、重试、网络往返），反映体感等待而非模型生成速度；输出不足 32 token 的响应不进吞吐统计">口径：端到端，非模型生成速度</span>
       </div>
       <div class="overflow-x-auto mt-3">
         <table class="w-full text-xs text-left">
           <thead class="bg-slate-950/60 text-slate-400">
             <tr>
               <th class="px-2 py-2 font-medium">模型</th>
-              <th class="px-2 py-2 font-medium text-right">样本</th>
+              <th class="px-2 py-2 font-medium text-right" title="已完成的请求数；带筛选图标的行表示其输出都过短，不参与吞吐统计">样本</th>
               <th class="px-2 py-2 font-medium text-right">吞吐 P50</th>
               <th class="px-2 py-2 font-medium text-right">吞吐 P95</th>
               <th class="px-2 py-2 font-medium text-right">延迟 P50</th>
@@ -883,7 +883,10 @@ async function loadUsageHistory(){
   renderModelPerf(data.byModelPerf||[]);
 }
 
-// 每模型端到端吞吐/延迟分布。空样本（无输出或失败的请求）不计入。
+// 每模型端到端吞吐/延迟分布。失败的请求不计入。
+// 吞吐与延迟的样本口径不同：输出过短（<32 token）的响应会让 tok/s 的分母趋零，
+// 得出几千 t/s 的无意义比值，因此只进延迟统计、不进吞吐统计。「样本」列显示延迟
+// 样本数，悬停可看到吞吐样本数。
 function renderModelPerf(rows){
   const body = document.getElementById('perfTableBody');
   if (!body) return;
@@ -894,9 +897,18 @@ function renderModelPerf(rows){
   body.innerHTML = rows.slice(0, 20).map(r => {
     const t = v => (v==null ? '<span class="text-slate-600">—</span>' : v.toFixed(1)+' t/s');
     const l = v => (v==null ? '<span class="text-slate-600">—</span>' : (v>=1000 ? (v/1000).toFixed(1)+'s' : Math.round(v)+'ms'));
+    // 旧后端（尚未重启、payload 里还没有 throughputSamples）时回退到 samples，
+    // 保持「闸门关闭」的旧观感，而不是把每一行都标成被筛选。
+    const hasGate = r.throughputSamples != null;
+    const ts = hasGate ? r.throughputSamples : r.samples;
+    const gated = hasGate && r.throughputSamples === 0;
+    const tip = hasGate
+      ? '吞吐样本 ' + ts + '（仅计输出 ≥32 token）· 延迟样本 ' + r.samples
+      : '延迟样本 ' + r.samples;
     return '<tr class="hover:bg-slate-800/40 transition">' +
       '<td class="px-2 py-2 font-mono text-slate-200 truncate max-w-[260px]" title="' + esc(r.model) + '">' + esc(r.model) + '</td>' +
-      '<td class="px-2 py-2 text-right text-slate-400">' + r.samples + '</td>' +
+      '<td class="px-2 py-2 text-right ' + (gated ? 'text-slate-600' : 'text-slate-400') + '" title="' + esc(tip) + '">' + r.samples +
+        (gated ? ' <i class="fa-solid fa-filter text-[9px]"></i>' : '') + '</td>' +
       '<td class="px-2 py-2 text-right text-slate-300">' + t(r.tokSP50) + '</td>' +
       '<td class="px-2 py-2 text-right text-slate-400">' + t(r.tokSP95) + '</td>' +
       '<td class="px-2 py-2 text-right text-slate-300">' + l(r.latencyP50Ms) + '</td>' +

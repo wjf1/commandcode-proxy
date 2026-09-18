@@ -78,7 +78,7 @@
 - **成本口径对齐官方账单** — 优先采用上游 `provider-metadata` 的权威金额（已含峰谷价、缓存折扣）；缺失时本地按**缓存读/写分项 + 峰谷分时**估算；估算值带 `~` 前缀可对照
 - **缓存节省可视化** — 显示缓存命中相比全价输入**省下的金额**及相对账面成本的倍数，直接回答"为何账单远低于直觉"；按每条记录自身时刻的费率计算
 - **峰谷计费提示** — 当前峰/谷档位、切换倒计时与受影响模型的生效费率；切换点按官方边界（UTC 01/04/06/10，周一至周五）计算，跨周末也正确
-- **端到端性能 + 额度燃烧预测** — 每模型吞吐/延迟 P50/P95（口径明确标注端到端）；对官方窗口用量做时间差分，外推"多少分钟后撞限、是否早于重置"（刻意不用本地历史——只覆盖代理流量约 18%，会严重高估剩余时间）
+- **端到端性能 + 额度燃烧预测** — 每模型吞吐/延迟 P50/P95（口径明确标注端到端）；对官方窗口用量做时间差分，外推"多少分钟后撞限、是否早于重置"（刻意不用本地历史——只覆盖代理流量约 18%，会严重高估剩余时间）。吞吐只统计输出 **≥32 token** 的请求（可用 `PERF_MIN_OUTPUT_TOKENS` 调整，设 0 关闭）：输出过短时 `输出token / 耗时` 的分母趋零，19ms / 3 token 能算出 187 t/s，这类比值没有信息量却会把 P50/P95 整体带飞——它们仍计入延迟统计，只是不算速率
 - **会话与项目归因** — 会话 ID 取客户端声明的 `x-session-id`（**事实性标识**）；项目只能**推断**（system prompt 文本），逐条标注置信度（`label` 高置信 / `heuristic` 推测），未识别项单列而非猜测；日期分组按客户端时区
 - **官方用量总览 + 计费周期** — Total Tokens / Total Runs / 成功率 / 月度限额对齐官方 usage 页数据源；套餐名、额度上限、`currentPeriodStart/End`、周期进度（订阅额度到期不结转，一眼可见还剩几天）
 
@@ -206,6 +206,8 @@ Anthropic 出口（`/v1/messages`）：
 | `NO_OPEN_BROWSER` | 未设置 | 设为 `1` 跳过仪表盘自动打开 |
 | `MAX_BODY_MB` | `64` | 入站 JSON 请求体上限（MB）；视觉/多图 base64 负载超默认 1MB 会触发 413，范围 1..1024 |
 | `USAGE_HISTORY_MAX_MB` | `20` | 会话历史大小上限（MB）；超限保留较新的一半，防止无限增长拖慢聚合 |
+| `PERF_MIN_OUTPUT_TOKENS` | `32` | 性能面板的吞吐闸门：输出不足该值（token）的请求只计入延迟、不计入吞吐（分母趋零会让 tok/s 失真）；设 `0` 关闭 |
+| `USAGE_HISTORY_PATH` | `~/.commandcode/usage-history.jsonl` | 用量历史文件路径。测试与多实例部署必须覆盖它，否则会写进生产库 |
 | `COMMANDCODE_LOG_PATH` | `<项目根>/logs/proxy.log` | 运行日志落盘路径（超 5MB 轮转 `.old`） |
 | `DAILY_BUDGET_USD` | 未设置（关） | 每日预算告警：当日累计成本（服务器本地日）达到阈值时弹一次 toast；进程重启会从历史回填当日已计费金额 |
 | `MAX_UPSTREAM_CONCURRENCY` | 不限制 | 上游并发上限；超限请求以 `GATEWAY_BUSY`(503) 快速失败，防失控客户端压起大量长流 |
@@ -223,7 +225,18 @@ npm run build:exe    # esbuild 打包
 npm run build:win    # Windows exe
 ```
 
-集成测试会拉起一个 mock CommandCode 上游，端到端验证流式 chunk 形状、工具调用往返、推理档位 snap 与 Anthropic 块生命周期。agent 驱动的自测方案见 [HERMES_TEST_PROMPT.md](./HERMES_TEST_PROMPT.md)。
+集成测试会拉起一个 mock CommandCode 上游，端到端验证流式 chunk 形状、工具调用往返、推理档位 snap 与 Anthropic 块生命周期。**该进程的 `USAGE_HISTORY_PATH` 必须隔离到临时目录**（`tests/integration.test.ts` 已如此设置）——用量历史是计费与性能面板的数据源，把 mock 流量写进去会凭空造出 2000+ t/s 的假性能数据。若历史上已混入，用下节工具清理。
+
+### 维护工具：清理用量历史中的测试残留
+
+```bash
+node purge-test-usage.mjs            # 预演，只报告会删除哪些记录
+node purge-test-usage.mjs --apply    # 实际清理
+```
+
+判定谓词刻意保守（宁可漏删不可误删）——必须同时满足：已完成、无任何会话/项目/agent 上下文、耗时 <300ms（跨公网调用实测下界 2245ms，本机 mock 才可能这么快）、且该模型从无带上下文的真实流量。写盘前完整备份，被删记录单独留档，并带并发写保护（避免与本机正在写日志的 proxy 抢文件）。`USAGE_HISTORY_PATH` 可指向其它文件。
+
+agent 驱动的自测方案见 [HERMES_TEST_PROMPT.md](./HERMES_TEST_PROMPT.md)。
 
 ## 🏗 架构
 <a id="architecture"></a>
@@ -315,7 +328,7 @@ Point any OpenAI-style client (Cursor, Continue, Aider, OpenWebUI, Hermes, your 
 - **Cost reconciled with the official bill** — prefers the authoritative `provider-metadata` amount (peak/off-peak and cache discounts included); local fallback prices cache read/write separately by time-of-day; estimates carry a `~` prefix
 - **Cache savings visualization** — how much cache hits saved versus full input price, and the multiple relative to billed cost
 - **Peak/off-peak indicator** — current tier, countdown to switch, active rates; switch points follow official boundaries (UTC 01/04/06/10, Mon–Fri), weekends handled correctly
-- **End-to-end perf + quota burn-rate projection** — per-model throughput/latency P50/P95 (explicitly end-to-end, not model generation speed); official window usage differenced over time to project minutes-to-cap vs reset
+- **End-to-end perf + quota burn-rate projection** — per-model throughput/latency P50/P95 (explicitly end-to-end, not model generation speed); official window usage differenced over time to project minutes-to-cap vs reset. Throughput counts only responses with **≥32 output tokens** (tune via `PERF_MIN_OUTPUT_TOKENS`, set 0 to disable): when output is tiny the divisor collapses and 19ms / 3 tokens reports 187 t/s — a meaningless ratio that nonetheless drags P50/P95 with it. Those requests still count toward latency, just not toward rate
 - **Session & project attribution** — session IDs are client-declared (factual); projects are inference-only, labelled per row (`label` high-confidence / `heuristic`), unattributed traffic listed separately; day grouping follows client timezone
 - **Official usage overview + billing cycle** — Total Tokens / Runs / success rate / monthly limit aligned with the official usage page; plan name, caps, `currentPeriodStart/End`, cycle progress
 
@@ -359,6 +372,8 @@ npm run typecheck    # tsc --noEmit
 npm test             # vitest — unit + integration (mock upstream)
 npm run build:win    # Windows exe
 ```
+
+Two environment variables govern the performance panel. `PERF_MIN_OUTPUT_TOKENS` (default `32`) is the throughput gate: responses shorter than this count toward latency but not toward throughput, because a near-zero divisor makes `outputTokens / elapsed` meaningless — 19ms / 3 tokens reports 187 t/s and drags the P50/P95 with it. Set it to `0` to disable. `USAGE_HISTORY_PATH` (default `~/.commandcode/usage-history.jsonl`) must be overridden by tests and multi-instance deployments; that file is the billing and performance data source, so test traffic written into it fabricates performance numbers. If it has already been polluted, run `node purge-test-usage.mjs` (dry-run) and then `--apply` — it backs up first, archives the removed rows, and uses a deliberately conservative predicate that requires a completed request with no session/project/agent context, under 300ms, on a model that has never carried real traffic.
 
 ### Disclaimer & License
 

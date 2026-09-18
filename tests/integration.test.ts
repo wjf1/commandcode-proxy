@@ -205,6 +205,13 @@ beforeAll(async () => {
       COMMANDCODE_MODELS_CACHE_PATH: path.join(stateDir, 'models.json'),
       COMMANDCODE_PRICING_CACHE_PATH: path.join(stateDir, 'pricing.json'),
       COMMANDCODE_PRICING_URL: `http://127.0.0.1:${MOCK_PORT}/pricing-fake`,
+      // 用量历史同样必须隔离。少了这一行，本套件对 mock 上游发起的每次调用都会
+      // 追加进 ~/.commandcode/usage-history.jsonl —— 那里的记录是**计费与性能面板
+      // 的数据源**，而套件用的模型（claude-sonnet-5 等）里并没有真实 agent 流量，
+      // 于是面板上这些模型的样本 100% 是 3/25 token 的 mock 响应，端到端延迟被
+      // 压到 19ms，吞吐算出 2000+ t/s 的假高值（历史事故：claude-sonnet-5 505/505
+      // 条、claude-opus-4-8 13/13 条均为测试残留）。
+      USAGE_HISTORY_PATH: path.join(stateDir, 'usage.jsonl'),
       NO_OPEN_BROWSER: '1',
     },
     stdio: 'ignore',

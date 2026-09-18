@@ -461,7 +461,10 @@ export function percentile(sorted: number[], p: number): number | null {
 }
 
 interface ModelPerf {
+  /** 延迟样本数：COMPLETED 且有耗时的请求（含输出过短的）。 */
   samples: number;
+  /** 吞吐样本数：在 samples 基础上再要求输出达到 MIN_THROUGHPUT_OUTPUT_TOKENS。 */
+  throughputSamples: number;
   /** 端到端吞吐 tok/s：均值与中位数。 */
   tokSAvg: number | null;
   tokSP50: number | null;
@@ -471,21 +474,41 @@ interface ModelPerf {
   latencyP95Ms: number | null;
 }
 
-/** 由一批记录算吞吐/延迟分布（只计 COMPLETED 且有输出的请求）。 */
-function perfOf(records: UsageRecord[]): ModelPerf {
+/**
+ * 计入吞吐统计的最小输出长度（token）。
+ *
+ * 极短响应（例如只回一个 tool_call 的 3 token）除以毫秒级耗时必然得出几千 t/s
+ * 的比值 —— 分母趋零时这个除法失去意义，却会把该模型的 P50/P95 整体带飞，
+ * 让面板看起来像在吹牛。低于该阈值的记录**仍计入延迟统计**（那确实是一次真实
+ * 等待），只是不进吞吐分布。设 0 可关闭闸门，或用 PERF_MIN_OUTPUT_TOKENS 覆盖。
+ */
+export const MIN_THROUGHPUT_OUTPUT_TOKENS = (() => {
+  const raw = process.env.PERF_MIN_OUTPUT_TOKENS;
+  if (raw === undefined || raw.trim() === '') return 32;
+  const v = Number.parseInt(raw, 10);
+  return Number.isFinite(v) && v >= 0 ? v : 32;
+})();
+
+/** 由一批记录算吞吐/延迟分布（只计 COMPLETED 的请求）。 */
+export function perfOf(
+  records: UsageRecord[],
+  minOutputTokens: number = MIN_THROUGHPUT_OUTPUT_TOKENS
+): ModelPerf {
   const tok: number[] = [];
   const lat: number[] = [];
   for (const r of records) {
     if (r.status !== 'COMPLETED') continue;
+    if (Number.isFinite(r.timingMs) && r.timingMs > 0) lat.push(r.timingMs);
+    if (r.outputTokens < minOutputTokens) continue;
     const t = throughputTokS(r.outputTokens, r.timingMs);
     if (t !== null) tok.push(t);
-    if (Number.isFinite(r.timingMs) && r.timingMs > 0) lat.push(r.timingMs);
   }
   tok.sort((a, b) => a - b);
   lat.sort((a, b) => a - b);
   const avg = tok.length ? tok.reduce((s, x) => s + x, 0) / tok.length : null;
   return {
-    samples: tok.length,
+    samples: lat.length,
+    throughputSamples: tok.length,
     tokSAvg: avg === null ? null : Math.round(avg * 10) / 10,
     tokSP50: percentile(tok, 0.5) === null ? null : Math.round(percentile(tok, 0.5)! * 10) / 10,
     tokSP95: percentile(tok, 0.95) === null ? null : Math.round(percentile(tok, 0.95)! * 10) / 10,
