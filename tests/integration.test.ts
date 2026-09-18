@@ -32,6 +32,25 @@ const distReady = existsSync(DIST_ENTRY);
 let mockServer: http.Server;
 let proxyProcess: ChildProcess;
 const capturedBodies: any[] = [];
+/** 按场景计数上游被调用了几次，用于断言「重试了 / 没重试」。 */
+const flakyAttempts = new Map<string, number>();
+
+/** 统计某个 sentinel 场景下上游实际收到几次 generate 请求。 */
+function attemptsFor(sentinel: string): number {
+  return capturedBodies.filter(b =>
+    JSON.stringify(b.params?.messages?.map((m: any) => m.content)).includes(sentinel),
+  ).length;
+}
+
+/** 等待直到上游对该 sentinel 的调用次数达到期望（重试带退避，需要等）。 */
+async function waitForAttempts(sentinel: string, expected: number, timeoutMs = 8000): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const n = attemptsFor(sentinel);
+    if (n >= expected || Date.now() > deadline) return n;
+    await new Promise(r => setTimeout(r, 50));
+  }
+}
 
 /** Build an SSE response body from CC events. */
 function sse(events: any[]): string {
@@ -196,13 +215,43 @@ beforeAll(async () => {
       }
 
       if (userText.includes('__ERROR_EVENT__')) {
-        // 上游用 error **事件**报告失败（真实案例："This model is not available in your
-        // region"、"No available providers match the 'only' filter"）。HTTP 仍是 200，
+        // 确定性不可用（区域限制）：不该被重试——重试只会白耗额度。HTTP 仍是 200，
         // 因此这类失败过去被记成 COMPLETED + 0 输出，在用量历史里看不出来。
         res.end(sse([
           { type: 'start' },
           { type: 'error', error: 'This model is not available in your region' },
           { type: 'finish', finishReason: 'stop', data: { usage: { inputTokens: 7, outputTokens: 0 } } },
+        ]));
+      } else if (userText.includes('__TRANSIENT_ERROR__')) {
+        // 瞬时性失败（网关请求失败）：会被有界重试，但本分支每次都失败 → 重试耗尽后
+        // 按既有逻辑并入流。
+        res.end(sse([
+          { type: 'start' },
+          { type: 'error', error: 'Invalid error response format: Gateway request failed' },
+          { type: 'finish', finishReason: 'stop', data: { usage: { inputTokens: 7, outputTokens: 0 } } },
+        ]));
+      } else if (userText.includes('__FLAKY_GATEWAY__')) {
+        // 第一次上游以 200 + error 事件报错，第二次正常 —— 用来证明重试真的救回了请求。
+        const n = (flakyAttempts.get('gateway') || 0) + 1;
+        flakyAttempts.set('gateway', n);
+        res.end(
+          n === 1
+            ? sse([
+                { type: 'start' },
+                { type: 'error', error: 'Invalid error response format: Gateway request failed' },
+              ])
+            : sse([
+                { type: 'start' },
+                { type: 'text-delta', text: 'recovered after retry' },
+                { type: 'finish', finishReason: 'stop', data: { usage: { inputTokens: 11, outputTokens: 77 } } },
+              ]),
+        );
+      } else if (userText.includes('__LATE_ERROR__')) {
+        // 先出内容再报错：此时已经转发过内容，不能重试（会重复），按既有逻辑并入流。
+        res.end(sse([
+          { type: 'start' },
+          { type: 'text-delta', text: 'partial answer' },
+          { type: 'error', error: 'Invalid error response format: Gateway request failed' },
         ]));
       } else if (userText.includes('__TOOLSTREAM__')) {
         // Tool-calling scenario: model decides to call a tool
@@ -808,6 +857,69 @@ describe.skipIf(!distReady)('structured error contract', () => {
     const rec = rs.slice(before).find(r => r.mode === 'messages');
     expect(rec?.status).toBe('FAILED');
     expect(rec?.errorCode).toBe('PROVIDER_PROTOCOL_ERROR');
+  });
+
+  // ── 200 流内 error 事件的有界重试 ──────────────────────────────────────────
+  //
+  // 真实案例：请求带着 29 万 token 上下文打到上游，网关转发 provider 时失败，回了一句
+  // "Invalid error response format: Gateway request failed"。旧行为是直接把它当成模型的
+  // 回答返回（界面里那一轮 16 分钟的工作就以这段文本收场）。这条链路完全没有重试——
+  // HTTP 层的重试只覆盖非 2xx，够不到 200 流里的事件。
+
+  it('retries a transient error event on the first event and recovers', async () => {
+    const before = readUsageRecords().length;
+    const beforeAttempts = attemptsFor('__FLAKY_GATEWAY__');
+    const res = await postChat(ask('__FLAKY_GATEWAY__'));
+    expect(res.status).toBe(200);
+
+    // 关键断言：客户端拿到的是真实内容，而不是 "[Upstream Error: ...]" 这段冒充回答的文本
+    const data = await res.json();
+    expect(data.choices[0].message.content).toBe('recovered after retry');
+    expect(JSON.stringify(data)).not.toContain('Upstream Error');
+
+    // 上游被调用了两次（第一次的 start + error 事件被丢弃重试）
+    await waitForAttempts('__FLAKY_GATEWAY__', beforeAttempts + 2);
+    expect(attemptsFor('__FLAKY_GATEWAY__') - beforeAttempts).toBe(2);
+
+    const rs = await waitForUsage(r => r.length > before);
+    expect(rs.slice(before).find(r => r.status === 'COMPLETED')).toBeDefined();
+  });
+
+  it('does not retry a deterministic unavailability error event', async () => {
+    // 区域限制是确定性的：重试只会白耗额度（大上下文下每次都是真金白银）。
+    const beforeAttempts = attemptsFor('__ERROR_EVENT__');
+    const res = await postChat(ask('__ERROR_EVENT__'));
+    expect(res.status).toBe(200);
+    await new Promise(r => setTimeout(r, 1500)); // 留出可能的重试窗口
+    expect(attemptsFor('__ERROR_EVENT__') - beforeAttempts).toBe(1);
+  });
+
+  it('bounds the retries of a persistently transient error event', async () => {
+    const before = readUsageRecords().length;
+    const beforeAttempts = attemptsFor('__TRANSIENT_ERROR__');
+    const res = await postChat(ask('__TRANSIENT_ERROR__'));
+    expect(res.status).toBe(200); // 重试耗尽后仍按既有逻辑并入流，不改对客户端的契约
+
+    // maxRetries 默认 2 → 最多 3 次尝试
+    await waitForAttempts('__TRANSIENT_ERROR__', beforeAttempts + 3);
+    await new Promise(r => setTimeout(r, 1500));
+    expect(attemptsFor('__TRANSIENT_ERROR__') - beforeAttempts).toBe(3);
+
+    const rs = await waitForUsage(r => r.length > before);
+    expect(rs.slice(before).find(r => r.status === 'FAILED')?.errorCode).toBe('PROVIDER_PROTOCOL_ERROR');
+  });
+
+  it('never retries once content has already been streamed', async () => {
+    // 已经产出内容再重试会造成重复内容，所以内容之后的 error 事件不触发重试。
+    const beforeAttempts = attemptsFor('__LATE_ERROR__');
+    const res = await postChat(ask('__LATE_ERROR__'));
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.choices[0].message.content).toContain('partial answer');
+    expect(data.choices[0].message.content).toContain('Upstream Error');
+
+    await new Promise(r => setTimeout(r, 1500));
+    expect(attemptsFor('__LATE_ERROR__') - beforeAttempts).toBe(1);
   });
 
   it('OpenAI route: 5xx → SERVER_ERROR (retries exhausted, upstream status preserved)', async () => {

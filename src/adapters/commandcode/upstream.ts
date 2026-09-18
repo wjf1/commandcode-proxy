@@ -9,7 +9,7 @@
 //   - 客户端断开立即通过 AbortSignal.any 传播中止
 //   - 终止性计费/套餐错误（terminal errors）不重试，直接快速失败以节省额度
 // =============================================================================
-import { Readable } from 'node:stream';
+import { Readable, PassThrough } from 'node:stream';
 import { CCRequestBody } from '../../types/index.js';
 import { loadConfig, assertSafeUpstreamUrl } from '../../utils/config.js';
 import { logger } from '../../utils/logger.js';
@@ -114,6 +114,192 @@ export interface SendOptions {
   abortSignal?: AbortSignal;
   /** 每次重试前回调，调用方可在额度错误时切换账号。 */
   onRetry?: (attempt: number, err: UpstreamError) => void | Promise<void>;
+  /**
+   * 流内事件的预判钩子：决定「丢弃本次调用重试」还是「放行给调用方」。
+   *
+   * 上游会把「模型不可用 / 区域受限 / 网关请求失败」这类失败以 error 事件发在一个
+   * **HTTP 200** 的流里，而 HTTP 层的重试只覆盖非 2xx，够不到它。返回 'retry' 时本次
+   * 调用会被丢弃并按同一套退避重试。
+   *
+   * 判定在**向调用方交还流之前**完成，此时客户端一个字节都还没收到，重试不会造成重复。
+   * 判据是「内容之前出现可重试的 error」，不是「第一个事件」—— CC 的流以一个 start
+   * 事件开场，用「首事件」判定等于永不触发。
+   */
+  probeEvents?: (rawEventData: string) => 'retry' | 'accept' | 'ignore';
+}
+
+/**
+ * error 事件里的错误文本是否值得重试。
+ *
+ * 只重试「看起来是瞬时」的失败：网关请求失败、服务过载、无可用 provider —— 这些随时段
+ * 与容量波动，下一次很可能就好了。确定性不可用的（区域限制、模型/provider 不认识）
+ * 重试只会白耗额度：本机实测的失败请求带着 29 万 token 上下文，单次就是 $0.087，
+ * 白重试两次是 $0.26 换一个必然相同的错误。
+ *
+ * 计费/套餐类终止错误复用既有的 terminalCodeFor 判定，不在这里重复维护模式表。
+ */
+export function isRetryableEventMessage(message: string): boolean {
+  const m = (message || '').trim();
+  if (!m) return false;
+  if (terminalCodeFor(m) !== undefined) return false;
+  const lower = m.toLowerCase();
+  return !DETERMINISTIC_UNAVAILABLE.some(s => lower.includes(s));
+}
+
+/** error 事件里代表「确定性不可用」的文本特征（全小写比较）。 */
+const DETERMINISTIC_UNAVAILABLE = [
+  'not available in your region',
+  'not available in your country',
+  'model/provider not recognized',
+  'not in your plan',
+  'model_not_in_plan',
+  'does not exist',
+  'invalid api key',
+];
+
+/** 携带内容或会改变客户端流状态、一旦转发就不能再重来的 CC 事件类型。 */
+const CONTENT_EVENT_TYPES = new Set([
+  'text-delta',
+  'reasoning-delta',
+  'tool-call',
+  'tool-call-delta',
+  'finish',
+  'finish-step',
+]);
+
+/**
+ * 判定单个 CC 事件在「能否丢弃重试」上的含义。
+ *   - error 且消息可重试 → 'retry'（上游还没产出任何内容就失败了）
+ *   - error 但确定性不可用 → 'accept'（重试也白搭，按既有逻辑原样交出去）
+ *   - 内容类事件 → 'accept'（已经开始产出，不能再丢）
+ *   - 其余（start / 保活 / 未知元数据）→ 'ignore'（不影响判定，继续看）
+ */
+export function classifyProbeEvent(event: any): 'retry' | 'accept' | 'ignore' {
+  if (!event || typeof event.type !== 'string') return 'ignore';
+  if (event.type === 'error') {
+    const errObj = event.error ?? event;
+    const msg = typeof errObj === 'string' ? errObj : errObj?.message;
+    return isRetryableEventMessage(msg || '') ? 'retry' : 'accept';
+  }
+  return CONTENT_EVENT_TYPES.has(event.type) ? 'accept' : 'ignore';
+}
+
+/**
+ * 扫描已累积文本里**完整的行**并按顺序判定。
+ * 最后一段可能是被截断的半行，不能判定，留给下一次数据到达。
+ * 返回已扫描到的行号，避免重复判定同一行。
+ */
+export function classifyBuffered(
+  text: string,
+  alreadyScanned: number,
+): { verdict: 'retry' | 'accept' | 'ignore'; scanned: number } {
+  const lines = text.split('\n');
+  const complete = lines.length - 1;
+  for (let i = alreadyScanned; i < complete; i++) {
+    const t = lines[i].trim();
+    if (!t) continue;
+    const payload = t.startsWith('data:') ? t.slice(5).trim() : t;
+    if (!payload || payload === '[DONE]') continue;
+    let ev: any;
+    try {
+      ev = JSON.parse(payload);
+    } catch {
+      continue; // 注释行或非法 JSON，跳过
+    }
+    const verdict = classifyProbeEvent(ev);
+    if (verdict !== 'ignore') return { verdict, scanned: complete };
+  }
+  return { verdict: 'ignore', scanned: complete };
+}
+
+/** 探测缓冲的字节上限：还没攒出可判定的事件就别再攒了，直接放行。 */
+const PROBE_MAX_BYTES = 64 * 1024;
+/** 探测的时间上限：上游迟迟不吐可判定的事件就放行，不为判别而拖住请求。 */
+const PROBE_TIMEOUT_MS = 30_000;
+
+/**
+ * 从已累积文本里取第一个完整的 SSE 事件负载。
+ * 返回 found=false 表示还没攒到完整事件（最后一段可能是被截断的半行，不能判定）。
+ */
+export function firstEventPayload(text: string): { found: boolean; payload?: string } {
+  const lines = text.split('\n');
+  for (const line of lines.slice(0, -1)) {
+    const t = line.trim();
+    if (!t || t.startsWith(':')) continue; // 空行 / SSE 注释（保活）
+    const payload = t.startsWith('data:') ? t.slice(5).trim() : t;
+    if (!payload || payload === '[DONE]') continue;
+    return { found: true, payload };
+  }
+  return { found: false };
+}
+
+/**
+ * 预读流开头，判定「上游是否在产出任何内容之前就报错了」。
+ *
+ * 已读字节不会丢：判定为放行时把它们写回返回流的最前面，其余原样透传。预读期间会
+ * `pause()`，确保从摘掉监听器到接上管道之间不会有 chunk 落在空档里被丢掉。
+ */
+async function probeUpstream(raw: Readable): Promise<{ rejected: boolean; stream: Readable }> {
+  const head: Buffer[] = [];
+  const state: { verdict: 'retry' | 'accept' | 'ignore' } = { verdict: 'ignore' };
+  let scannedLines = 0;
+  let consumedBytes = 0;
+
+  await new Promise<void>(resolve => {
+    const finish = () => {
+      clearTimeout(timer);
+      // 先暂停再摘监听器：否则空档期到达的 chunk 会流向已无消费者的流而丢失。
+      raw.pause();
+      raw.off('data', onData);
+      raw.off('end', finish);
+      raw.off('close', finish);
+      raw.off('error', finish);
+      resolve();
+    };
+    const onData = (chunk: Buffer) => {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      head.push(buf);
+      consumedBytes += buf.length;
+      const text = Buffer.concat(head).toString('utf8');
+      const res = classifyBuffered(text, scannedLines);
+      scannedLines = res.scanned;
+      if (res.verdict !== 'ignore') {
+        state.verdict = res.verdict;
+        finish();
+      } else if (consumedBytes > PROBE_MAX_BYTES) {
+        finish(); // 攒不出可判定的事件，放行
+      }
+    };
+    // finish 只会在计时器触发或数据事件里被调用，那时 timer 已初始化。
+    const timer = setTimeout(finish, PROBE_TIMEOUT_MS);
+    raw.on('data', onData);
+    raw.once('end', finish);
+    raw.once('close', finish);
+    raw.once('error', finish);
+  });
+
+  if (state.verdict === 'retry') {
+    raw.destroy();
+    return { rejected: true, stream: raw };
+  }
+  return { rejected: false, stream: reflow(raw, head) };
+}
+
+/** 把预读到的字节放在新流的最前面，其余从原流透传。 */
+function reflow(raw: Readable, head: Buffer[]): Readable {
+  const out = new PassThrough();
+  const buffered = Buffer.concat(head);
+  if (buffered.length) out.write(buffered);
+  const errored = (raw as any).errored;
+  if (errored) {
+    out.destroy(errored);
+  } else if (raw.readableEnded || raw.destroyed) {
+    out.end(); // 极短响应：预读期间就已结束，别让下游等一个永不到来的 end
+  } else {
+    raw.on('error', e => out.destroy(e));
+    raw.pipe(out); // pipe 会自动 resume
+  }
+  return out;
 }
 
 /**
@@ -234,19 +420,41 @@ export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<
       }
 
       // 把 web stream 包装成 Node 流：每收到一个 chunk 都重置空闲看门狗。
-      const nodeStream = Readable.fromWeb(response.body as any);
+      const rawStream = Readable.fromWeb(response.body as any);
       armIdleWatchdog();
-      nodeStream.on('data', () => armIdleWatchdog());
-      nodeStream.on('close', () => {
+      rawStream.on('data', () => armIdleWatchdog());
+      // 被首事件探测判定为「上游以 200 报错」而丢弃的流，不要把并发槽位还回去 ——
+      // 槽位要留给紧随其后的那次重试（槽位在整个 sendToCC 调用里只申请一次）。
+      let discarded = false;
+      const onStreamGone = () => {
         if (idleTimer) clearTimeout(idleTimer);
-        releaseSlot();
-      });
-      nodeStream.on('error', () => {
-        if (idleTimer) clearTimeout(idleTimer);
-        releaseSlot();
-      });
+        if (!discarded) releaseSlot();
+      };
+      rawStream.on('close', onStreamGone);
+      rawStream.on('error', onStreamGone);
 
-      return nodeStream;
+      // 上游以 error 事件报错（模型不可用 / 区域受限 / 网关请求失败）时，这次调用实际
+      // 什么都没产出，而此刻客户端还没收到任何字节 —— 丢弃重试是安全的。
+      //
+      // 只在**还有重试预算**时才探测：最后一次尝试直接放行，让调用方按既有逻辑处理
+      // （把错误并入流）。这样本机制是纯增量——只多试几次，不改对客户端的契约。
+      if (attempt < maxAttempts) {
+        const probe = await probeUpstream(rawStream);
+        if (probe.rejected) {
+          discarded = true;
+          rawStream.destroy();
+          throw new UpstreamError(
+            `Upstream reported an error event before producing any content (model ${body.params.model})`,
+            undefined,
+            true,
+            ErrorCode.PROVIDER_PROTOCOL_ERROR,
+          );
+        }
+        armIdleWatchdog();
+        return probe.stream;
+      }
+
+      return rawStream;
     } catch (err: any) {
       if (idleTimer) clearTimeout(idleTimer);
 
@@ -269,7 +477,7 @@ export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<
       }
       if (attempt < maxAttempts) {
         const backoffMs = Math.min(8000, 500 * Math.pow(2, attempt - 1));
-        logger.warn(`[UPSTREAM] Thread ${body.threadId} | Network error (${err.message}), retry ${attempt}/${maxAttempts - 1} in ${backoffMs}ms`);
+        logger.warn(`[UPSTREAM] Thread ${body.threadId} | Upstream failure (${err.message}), retry ${attempt}/${maxAttempts - 1} in ${backoffMs}ms`);
         await sleep(backoffMs);
         continue;
       }

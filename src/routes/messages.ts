@@ -92,15 +92,19 @@ export async function messagesRoutes(fastify: FastifyInstance) {
       persistCompletion(modelName, usageAcc, requestContext, startTime, status, msgId, 'messages', errorCode);
     };
 
-    // 上游把「模型不可用 / 区域限制 / 无可用 provider」这类失败以 error **事件**的形式发在
-    // 一个 200 流里，而不是用 HTTP 错误码。这种请求过去会被记成 COMPLETED + 0 输出，失败
-    // 在用量历史里看不出来——它比「抛异常」更常见，是真实失败的主要形态。
+    // 上游把「模型不可用 / 区域限制 / 无可用 provider / 网关请求失败」这类失败以 error
+    // **事件**的形式发在一个 200 流里，而不是用 HTTP 错误码。这种请求过去会被记成
+    // COMPLETED + 0 输出，失败在用量历史里完全看不出来——它比「抛异常」更常见。
     let sawUpstreamError = false;
     const noteUpstreamError = (event: any): void => {
       if (event?.type !== 'error') return;
       const errObj = event.error ?? event;
       const msg = typeof errObj === 'string' ? errObj : errObj?.message;
-      if (msg && msg !== 'unknown') sawUpstreamError = true;
+      if (msg && msg !== 'unknown') {
+        sawUpstreamError = true;
+        // 这条文本过去只进响应体、从不落日志，导致排查只能靠反推用量历史。
+        logger.warn(`[MESSAGES] Upstream error event | Model ${modelName} | Trace ${msgId} | ${String(msg).slice(0, 300)}`);
+      }
     };
 
     try {

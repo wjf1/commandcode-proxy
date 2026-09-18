@@ -66,7 +66,7 @@
 
 ### 🛡 可靠性与安全
 
-- **长连接加固** — 429/5xx/网络错误指数退避重试；空闲流看门狗（不会无限挂起）；客户端断开立即取消上游；流干净收尾（补 finish、SSE 心跳防代理断连）
+- **长连接加固** — 429/5xx/网络错误指数退避重试，**并覆盖上游藏在 HTTP 200 流里的失败**（网关请求失败 / 服务过载 / 无可用 provider）：在把流交给路由之前预判流内事件，因此错误不再被当成模型的回答返回；确定性不可用（区域限制、模型不认识）刻意不重试以免白耗额度；空闲流看门狗（不会无限挂起）；客户端断开立即取消上游；流干净收尾（补 finish、SSE 心跳防代理断连）
 - **安全默认** — 仅绑定 `127.0.0.1`；可选 `PROXY_API_KEY` 共享密钥（**同时覆盖 API 与管理面**，仪表盘首次访问弹密钥输入）；`/api/*` 写操作校验 Origin；XSS 加固；CORS 仅对公共 API 表面开放；绑定非回环且未鉴权时界面与启动日志双重警告
 - **上游 SSRF 防护（fail-closed）** — 所有服务端上游请求经白名单校验：仅 `http(s)`、拒绝内嵌凭据、默认拒绝环回/私有/保留地址、非回环强制 `https`，详见[安全校验](#security)
 - **结构化错误码** — 17 个稳定错误码 + 可执行提示，按出口分别返回 OpenAI `error.type/code` 与 Anthropic `error.type`，调用方可据此决定等额度、换模型还是改配置（见[错误码表](#errors)）
@@ -187,8 +187,10 @@ Anthropic 出口（`/v1/messages`）：
 
 **重试语义**：`408/409/425/429/500/502/503/504` 按指数退避重试（上限 `upstream.maxRetries`）；一旦命中终止性计费/套餐标记（`model_not_in_plan`、`premium_credits_exhausted`、`insufficient credits`）**立即失败、绝不重试**——重试只会白耗额度。重试耗尽后仍保留上游真实状态码与错误码，不会包装成"网络故障"。
 
+**上游以 200 报错也会被重试**：上游常把「网关请求失败 / 服务过载 / 无可用 provider」这类失败以 error 事件发在一个 **HTTP 200** 的流里，HTTP 层的重试够不到它——过去它会被并入正文当成模型的回答返回（一轮 16 分钟的工作就以 `[Upstream Error: ...]` 这段文本收场）。现在代理会在把流交给路由**之前**预判流内事件：只要**内容之前**出现可重试的 error 事件，且还有重试预算，就丢弃这次调用并重试（此刻客户端一个字节都没收到，不会重复内容）。**确定性不可用不重试**：区域限制、模型/provider 不认识这类重试只会白耗额度（29 万 token 上下文单次就是 $0.087）。判定细节见 `src/adapters/commandcode/upstream.ts` 的 `classifyProbeEvent`。
+
 > [!NOTE]
-> 流式请求在 HTTP 200 已发出后无法再改状态码，此时错误码会并入内容文本，形如 `[Upstream Error: RATE_LIMIT: ...]`，便于客户端自愈。
+> 流式请求在 HTTP 200 已发出后无法再改状态码，此时错误码会并入内容文本，形如 `[Upstream Error: RATE_LIMIT: ...]`，便于客户端自愈。重试耗尽或遇到确定性不可用时仍是这个行为；识别到的 error 事件原文会同时记入日志（含 model 与 traceId），便于事后追溯。
 
 ## ⚙️ 配置
 <a id="config"></a>
@@ -333,7 +335,7 @@ Point any OpenAI-style client (Cursor, Continue, Aider, OpenWebUI, Hermes, your 
 
 **Reliability & security**
 
-- Exponential-backoff retries on 429/5xx/network errors; idle-stream watchdog (no infinite hangs); client-disconnect cancellation; clean stream termination with SSE keepalive comments
+- Exponential-backoff retries on 429/5xx/network errors; **retries also cover failures the upstream reports inside an HTTP 200 stream** (gateway failure / overload / no available provider) by probing events before the stream is handed to the route, so an error is no longer returned as if it were the model's answer — deterministic unavailability (region, unknown model) is deliberately not retried; idle-stream watchdog (no infinite hangs); client-disconnect cancellation; clean stream termination with SSE keepalive comments
 - Secure defaults: loopback-only binding; optional `PROXY_API_KEY` covering **both `/v1/*` and the admin surface `/api/*`** (dashboard prompts on first visit); Origin check on `/api/*` mutations; XSS-hardened dashboard; CORS limited to the public API surface; prominent warnings when bound non-loopback without auth
 - **SSRF guard, fail-closed** — see the bilingual [Upstream URL safety](#security) section
 - **Structured error codes** — 17 stable codes with actionable hints, surfaced as OpenAI `error.type/code` or Anthropic `error.type` (table below)
