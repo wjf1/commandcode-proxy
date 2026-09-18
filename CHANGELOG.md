@@ -2,6 +2,24 @@
 
 所有主要版本更新都记录在此文件。
 
+## [4.15.0] - 2026-09-18
+
+### 新增
+- **`bench-models.mjs`：对套餐内每个可用模型跑一次真实基准，为「端到端性能」面板播种初始数据** — 面板此前只有被 agent 实际调用过的模型有数据，大量模型是空白或只有 1 条样本，无法横向比较。本工具对 `GET /v1/models?plan=…&available=1` 返回的每个模型发一次**真实请求**（打真实上游、花真实额度、由 proxy 记入用量历史），因此面板上的数字是实测值，不是任何形式的伪造数据。
+  - 为可追溯，每条请求都带客户端声明的上下文（`x-session-id: bench-<时间戳>`、`x-zcode-session-type: benchmark`、`x-zcode-agent: bench`），在会话表里能认出这批流量来自基准，而不是冒充 agent 工作负载；不计入项目归因。
+  - 方法论：**串行**执行（并发会让延迟与吞吐互相污染，测出来的数不可比）；提示词固定（`List the integers from 1 to 60…`）让各模型输出长度同量级——t/s 受输出长度影响，短输出的首 token 时间占比更高会低估吞吐；`max_tokens` 1024；每请求 150s 硬超时；仅对网络/5xx 错误补一次重试（应用层错误重试无用）。
+  - 安全阀：每 5 个模型按本次基准的 sessionId 从本地用量历史**精确累加**已花成本，超过 `BENCH_MAX_USD`（默认 4）即中止。刻意不用官方额度计数器（`/alpha/billing/credits`）——实测花掉 $0.0197 后其增量仍显示 `0.0000`，粒度太粗拦不住。
+  - 默认预演（只列出将基准的模型），`--run` 才发请求；明细写入 `logs/bench-<时间戳>.json`。
+- **本次实测结果**（GOAT 档，2026-09-18）：62 个可用模型中 **51 个成功、11 个失败**，花费 **$0.2663**。面板性能表由 44 行增至 **51 行**，其中 **48 行**有真实吞吐样本，可视区 20 行内 `—` 行 0 个。输出 token 区间 min 120 / p50 186 / max 1024。
+
+### 已知问题（本次基准暴露，尚未修复）
+- **11 个「GOAT 可用」的目录条目实际被上游 403 拒绝** — `qwen-3.8-omni-flash`、`qwen-3.8-max-0902`、`qwen-3.8-max`、`qwen-3.8-27b`、`qwen-3.6-max`、`qwen-3.6-plus`、`qwen-3.7-max`、`qwen-3.7-plus`、`qwen-3.8-flash`、`qwen-3.7-flash`、`nemotron-3-ultra`：全部报 `Upstream error 403: Model/provider not recognized: anthropic:<id>`。对照 `models.json` 可见这些是**短别名条目**（`owned_by` 指向模型自身，如 `"owned_by":"qwen-3.7-max"`），而同名的带前缀条目（`Qwen/Qwen3.7-Max`、`nvidia/nemotron-3-ultra-550b-a55b`）`owned_by` 为 `command-code` 且调用正常。即目录把 62 个模型标为可用，其中 11 个根本调不通。需要在模型目录层处理（剔除别名条目，或按 `owned_by` 正确解析 provider），涉及产品决策故未擅自改动。
+- **用量记录永远不会有 FAILED 状态，面板的失败数结构性恒为 0** — `persistCompletion()` 在 `chat.ts` / `messages.ts` 的 3 处调用点全部硬编码 `'COMPLETED'`，`'FAILED'` 只存在于类型定义与 `getUsageStats()` 的计数分支里，没有任何代码路径能产生它。后果：上面那 11 次 403 在用量历史里**一条记录都没留下**（`total.failures` 仍显示 0），面板的 100% 成功率是构造出来的，不是真实情况的反映。修复需要在各错误分支补 FAILED 落库。
+
+### 测试
+- 全量 **250 项通过**，`tsc --noEmit` 与 `eslint .` 无错误。
+- `bench-models.mjs` 不参与单测（它打真实上游、花钱），以预演模式 + `BENCH_LIMIT=1` 单模型冒烟验证：记录正确落入用量历史并带 `sessionType: benchmark`，面板 `byModelPerf` 立即看到该模型（`throughputSamples: 1`）。
+
 ## [4.14.1] - 2026-09-18
 
 ### 修复

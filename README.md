@@ -236,6 +236,17 @@ node purge-test-usage.mjs --apply    # 实际清理
 
 判定谓词刻意保守（宁可漏删不可误删）——必须同时满足：已完成、无任何会话/项目/agent 上下文、耗时 <300ms（跨公网调用实测下界 2245ms，本机 mock 才可能这么快）、且该模型从无带上下文的真实流量。写盘前完整备份，被删记录单独留档，并带并发写保护（避免与本机正在写日志的 proxy 抢文件）。`USAGE_HISTORY_PATH` 可指向其它文件。
 
+### 维护工具：为性能面板播种基准数据
+
+```bash
+node bench-models.mjs            # 预演，列出将要基准的模型
+node bench-models.mjs --run      # 实际执行（会产生真实上游消耗）
+```
+
+对套餐内每个可用模型发一次**真实请求**，让面板一开始就有可比的数据，而不是只有被 agent 调用过的模型才有数。要点：串行执行（并发会让延迟/吞吐互相污染）、提示词固定让输出长度同量级、每请求 150s 超时。为可追溯，请求带 `x-session-id: bench-<时间戳>` 与 `x-zcode-session-type: benchmark`，在会话表里能认出这批流量来自基准。每 5 个模型按本地用量历史精确累加成本，超过 `BENCH_MAX_USD`（默认 4 美元）即中止。
+
+注意这是**一次性探针**：每个模型只跑一次，面板上该模型的 P50 就是这一次的实测值（样本列会如实显示 1）。参考量级：62 个模型全量约 $0.5 以内、耗时 10~25 分钟。
+
 agent 驱动的自测方案见 [HERMES_TEST_PROMPT.md](./HERMES_TEST_PROMPT.md)。
 
 ## 🏗 架构
@@ -374,6 +385,8 @@ npm run build:win    # Windows exe
 ```
 
 Two environment variables govern the performance panel. `PERF_MIN_OUTPUT_TOKENS` (default `32`) is the throughput gate: responses shorter than this count toward latency but not toward throughput, because a near-zero divisor makes `outputTokens / elapsed` meaningless — 19ms / 3 tokens reports 187 t/s and drags the P50/P95 with it. Set it to `0` to disable. `USAGE_HISTORY_PATH` (default `~/.commandcode/usage-history.jsonl`) must be overridden by tests and multi-instance deployments; that file is the billing and performance data source, so test traffic written into it fabricates performance numbers. If it has already been polluted, run `node purge-test-usage.mjs` (dry-run) and then `--apply` — it backs up first, archives the removed rows, and uses a deliberately conservative predicate that requires a completed request with no session/project/agent context, under 300ms, on a model that has never carried real traffic.
+
+To seed the performance panel with comparable data instead of leaving it sparse, run `node bench-models.mjs --run`: it issues one **real** request per available model (real upstream, real spend, recorded by the proxy), sequentially with a fixed prompt so output lengths are comparable. Requests carry `x-session-id: bench-<timestamp>` and `x-zcode-session-type: benchmark` so they are identifiable as benchmark traffic rather than agent workload. A safety valve sums the actual local cost every 5 models and aborts past `BENCH_MAX_USD` (default 4). Note these are single probes — the P50 shown for such a model is that one measurement, which the sample column discloses.
 
 ### Disclaimer & License
 
