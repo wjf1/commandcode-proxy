@@ -28,6 +28,15 @@
   - `--replace`：正式开跑前清掉**所有历史基准记录**（按 `sessionId: bench-*` 识别）。必须先清，否则新旧混在一起，"替换数据"会变成"掺入数据"，中位数被单次探针拉偏。清理前完整备份、被清记录单独留档，并复用 `rewriteSafely` 的并发写保护。
   - 单轮内的成本安全阀改为**每轮**检查（原先每 5 个模型），并改用本地用量历史精确累加。
 
+### 实测结果（GOAT 档，2026-09-18，5 轮 × 62 个可用模型）
+- **310 次请求：成功 309 / 失败 1**（一次 DNS 抖动 `ENOTFOUND api.commandcode.ai`，补跑一次成功），**实际花费 $0.8647**。其中 292 条输出 ≥32 token（面板吞吐闸门之内）。
+- **面板从 44 行增至 52 行**，49 行有真实吞吐样本，可视区 20 行内 `—` 行 0 个。
+- **覆盖率：62 个「GOAT 可用」条目去重后是 51 个规范模型**（11 个别名已并入其规范条目，不再各占一行），其中 **49 个拿到真实吞吐样本**。仅 2 个全程拿不到样本，原因是上游确实不提供：`MiniMaxAI/MiniMax-M2.7`（`No available providers match the 'only' filter`）与 `google/gemini-3.7-flash`（`not available in your region`）——**不是提示词问题**，换提示词重测无效（4.15.0 曾误记为「输出过短」，本版更正该判断）。
+- 失败分类验证了本版的 FAILED 修复：18 条 FAILED 记录里 **16 条是 `PROVIDER_PROTOCOL_ERROR`、outputTokens 全为 0**，即 HTTP 200 流内的 error 事件（上游区域受限 / provider 不可用 / 服务器过载）；另 1 条 NETWORK_ERROR、1 条 INTERNAL_ERROR。这些在修复前会被记成 `COMPLETED + 0 输出`，从面板上完全看不出失败。
+- 瞬时性得到证实：`thinkingmachines/inkling` 4/5 轮失败、`tencent/hy3-paid` 与 `poolside/laguna-s-2.1-free` 各 2/5 轮失败，其余轮次正常；`z-ai/glm-5.3-flash` 在 4.15.0 的单轮基准里返回 0 输出、本轮 5 轮全部成功。这正是需要多轮中位数而非单次探针的直接证据。
+- 吞吐中位数（仅计可用轮次）区间：最高 `nvidia/nemotron-3-ultra-550b-a55b` 84.1 t/s、`deepseek/deepseek-v4-flash-fast` 72.9、`deepseek/deepseek-v4.1-flash` 71.9；最低 `gpt-5.6-sol` 8.6。延迟中位数 2.0s ~ 14.3s。
+- 计数核对：310 次请求产生 **311 条记录**，多出的 1 条是 `tencent/hy3-paid` r2 失败后补跑的那一次（FAILED + COMPLETED 各一条）。已核对 `(model, traceId)` 全库唯一、无任何重复记录，确认 `persistOnce()` 的一次性写入保护在真实流量下有效。
+
 ### 测试
 - `models.test.ts` 新增 7 项：`buildAliasMap` 的映射/不映射/同名歧义不猜/缺 name 跳过，以及 `resolveModelName` 的别名优先于精确匹配。
 - `integration.test.ts` 新增 4 项：失败请求落 `FAILED` 且带 `errorCode`、上游中断不丢记录、成功请求只落一条（无双记）、**200 流内的 error 事件在 OpenAI 与 Anthropic 两条路由上都记为 FAILED**。mock 上游相应新增 `__ERROR_EVENT__` 与 `__STREAM_ERROR__` 两个场景，并新增隔离的用量历史读取工具。
