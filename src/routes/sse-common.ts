@@ -73,6 +73,11 @@ export function hardenConnectionForLongStream(
 /**
  * 持久化一次会话记录到 usage-history.jsonl。
  * 成本优先取上游权威金额（上游已算好峰谷价与缓存折扣），缺失时才本地估算。
+ *
+ * `status='FAILED'` 同样落库（修复前没有任何调用点传 FAILED，失败请求在用量历史里完全
+ * 不留痕，面板失败数因此结构性恒为 0）：此时通常没有上游金额、token 为 0，估算成本自然
+ * 也是 0；若流中途失败前已累积了真实 usage，则照常按定价估算——那部分上游很可能已计费，
+ * 记 0 会低估。
  */
 export function persistCompletion(
   model: string,
@@ -82,6 +87,7 @@ export function persistCompletion(
   status: 'COMPLETED' | 'FAILED',
   traceId?: string,
   mode: 'chat' | 'messages' = 'chat',
+  errorCode?: string,
 ): void {
   const estimated = estimateCostUsd(model, usage.inputTokens || 0, usage.outputTokens || 0, {
     cacheReadTokens: usage.cacheReadTokens,
@@ -102,6 +108,7 @@ export function persistCompletion(
     estimatedCostUsd: estimated.costUsd,
     hasPricing: hasUpstreamCost || estimated.hasPricing,
     status,
+    ...(errorCode ? { errorCode } : {}),
     traceId,
     mode,
     ...(context.sessionId ? { sessionId: context.sessionId } : {}),

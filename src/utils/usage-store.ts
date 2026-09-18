@@ -43,6 +43,13 @@ export interface UsageRecord {
   /** 是否命中定价（无官方定价时 costUsd=0 且此标记为 false） */
   hasPricing: boolean;
   status: 'COMPLETED' | 'FAILED';
+  /**
+   * 失败请求的稳定错误码（见 errors.ts 的 ErrorCode）。
+   * 修复前 FAILED 只存在于类型里、没有任何代码路径能产生它，失败请求因此**一条记录都
+   * 不留**，面板的失败数与成功率恒为 0/100%——是构造出来的，不是真实情况。现在各错误
+   * 分支都会落一条 FAILED，并带上错误码，好让"失败了但不知道为什么"变成可查。
+   */
+  errorCode?: string;
   traceId?: string;
   mode: 'chat' | 'messages';
 

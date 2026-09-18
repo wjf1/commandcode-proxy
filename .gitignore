@@ -14,9 +14,10 @@ logs/
 *.bak
 *.py
 *.mjs
-# 例外：这两个工具的判定谓词/基准逻辑被仓库内文档与测试引用，必须入库。
+# 例外：这些工具的逻辑被仓库内文档与测试引用，必须入库。
 !purge-test-usage.mjs
 !bench-models.mjs
+!usage-history-io.mjs
 *.png
 !docs/screenshots/
 !docs/screenshots/*.png

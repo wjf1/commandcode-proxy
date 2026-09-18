@@ -433,8 +433,50 @@ export async function fetchUpstreamModels(apiKey: string, ccVersion: string, ref
 }
 
 /**
+ * 短别名 → 上游认可的规范 id。
+ *
+ * 目录里同时存在两类条目：短别名（`qwen-3.7-max`、`nemotron-3-ultra`）与规范条目
+ * （`Qwen/Qwen3.7-Max`、`nvidia/nemotron-3-ultra-550b-a55b`）。上游只认后者：别名
+ * 透传过去一律 403 `Model/provider not recognized: anthropic:<别名>`。实测 11 个别名
+ * 全部如此，而它们的同名规范条目调用正常。
+ *
+ * 判别信号取自目录自身，不硬编码任何模型名：
+ *   - 别名条目的 `owned_by` **回指自身**（上游并不认识这个 owner）——目录里恰好 11 个，
+ *     与实测打不通的 11 个完全重合，且没有孤立项；
+ *   - 规范条目的 `owned_by` 是真实 owner（`command-code`），即 `owned_by !== id`；
+ *   - 两者 **display name 相同**，据此建立映射目标。
+ *
+ * 只认 1:1 的同名组：一侧同名条目多于一个时不做猜测，宁可让别名继续报上游的准确错误，
+ * 也不要静默替换成用户没请求过的模型。
+ */
+export function buildAliasMap(models: ModelItem[]): Map<string, string> {
+  const byName = new Map<string, ModelItem[]>();
+  for (const m of models) {
+    if (!m?.id || !m.name) continue;
+    const key = m.name.trim().toLowerCase();
+    if (!key) continue;
+    const bucket = byName.get(key);
+    if (bucket) bucket.push(m);
+    else byName.set(key, [m]);
+  }
+
+  const map = new Map<string, string>();
+  for (const group of byName.values()) {
+    if (group.length !== 2) continue;
+    const alias = group.find(m => m.owned_by === m.id);
+    const canonical = group.find(m => m.owned_by !== m.id);
+    if (!alias || !canonical) continue;
+    map.set(alias.id, canonical.id);
+  }
+  return map;
+}
+
+/**
  * 模糊解析请求的模型名到已知上游模型。
- * 匹配顺序：精确 → 去掉厂商前缀 → 后缀 → 部分包含 → 家族关键字 → 第一个模型。
+ * 匹配顺序：别名重映射 → 精确 → 去掉厂商前缀 → 后缀 → 部分包含 → 家族关键字 → 原样透传。
+ *
+ * 别名重映射必须排在精确匹配**之前**：短别名本身就在目录里，精确匹配会直接把它放行，
+ * 于是打到上游换来一个 403（这正是修复前的行为）。
  */
 export function resolveModelName(requestedModel: string): string {
   if (!requestedModel || typeof requestedModel !== 'string') {
@@ -443,6 +485,12 @@ export function resolveModelName(requestedModel: string): string {
 
   const raw = requestedModel.trim();
   const available = getCachedModels();
+
+  const aliased = buildAliasMap(available).get(raw);
+  if (aliased) {
+    logger.info(`[MODELS] Resolved alias '${raw}' -> '${aliased}'`);
+    return aliased;
+  }
 
   if (available.some(m => m.id === raw)) return raw;
 

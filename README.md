@@ -62,7 +62,7 @@
 - **Anthropic `/v1/messages`** — 完整流式块生命周期（`message_start` → `content_block_start/delta/stop` → `signature_delta` → `message_delta` → `message_stop`）；`tool_use` / `tool_result` 往返；thinking 块（签名兼容）；system 块数组
 - **忠实还原 wire 翻译** — 经官方 CLI 源码逐行核对：原始 base64 图片块带 `mediaType`、`tool_search→search_tools` 别名、终止性错误不重试清单（`model_not_in_plan`、`premium_credits_exhausted`、`insufficient credits`）
 - **工具定义全量透传** — 不截断为 15 个：多工具 Agent 宿主（DSH Desktop 等）下发的 30+ 个工具全部转发，避免模型调用到被丢弃的工具而被上游拒绝
-- **模糊模型名解析 + 套餐过滤** — 未知模型**原样透传**（上游给出准确报错，而不是静默换成默认模型）；`GET /v1/models` 支持按档位过滤（fail-open，数据缺失不误杀）
+- **模糊模型名解析 + 短别名重映射 + 套餐过滤** — 目录里同时存在短别名（`qwen-3.7-max`）与规范条目（`Qwen/Qwen3.7-Max`）时，别名会被重映射到上游认可的规范 id（上游只认后者，别名透传过去一律 403）；判定取自目录自身——别名条目的 `owned_by` 回指自身——不硬编码任何模型名，同名歧义时不做猜测。未知模型仍**原样透传**（上游给出准确报错，而不是静默换成默认模型）；`GET /v1/models` 支持按档位过滤（fail-open，数据缺失不误杀）
 
 ### 🛡 可靠性与安全
 
@@ -239,13 +239,20 @@ node purge-test-usage.mjs --apply    # 实际清理
 ### 维护工具：为性能面板播种基准数据
 
 ```bash
-node bench-models.mjs            # 预演，列出将要基准的模型
-node bench-models.mjs --run      # 实际执行（会产生真实上游消耗）
+node bench-models.mjs                              # 预演，列出将要基准的模型
+node bench-models.mjs --run --rounds 5             # 每个模型 5 轮
+node bench-models.mjs --run --rounds 5 --replace   # 先清掉历史基准记录再跑
 ```
 
-对套餐内每个可用模型发一次**真实请求**，让面板一开始就有可比的数据，而不是只有被 agent 调用过的模型才有数。要点：串行执行（并发会让延迟/吞吐互相污染）、提示词固定让输出长度同量级、每请求 150s 超时。为可追溯，请求带 `x-session-id: bench-<时间戳>` 与 `x-zcode-session-type: benchmark`，在会话表里能认出这批流量来自基准。每 5 个模型按本地用量历史精确累加成本，超过 `BENCH_MAX_USD`（默认 4 美元）即中止。
+对套餐内每个可用模型发**真实请求**，让面板一开始就有可比的数据，而不是只有被 agent 调用过的模型才有数。要点：串行执行（并发会让延迟/吞吐互相污染）、提示词固定让输出长度同量级、每请求 150s 超时。为可追溯，请求带 `x-session-id: bench-<时间戳>` 与 `x-zcode-session-type: benchmark`，在会话表里能认出这批流量来自基准。成本安全阀按本地用量历史精确累加，超过 `BENCH_MAX_USD`（默认 4 美元）即中止。
 
-注意这是**一次性探针**：每个模型只跑一次，面板上该模型的 P50 就是这一次的实测值（样本列会如实显示 1）。参考量级：62 个模型全量约 $0.5 以内、耗时 10~25 分钟。
+`--rounds N` 让每个模型连续跑 N 轮。**单轮只是一次探针**，面板上该模型的 P50 就是那一次的值；而实测上游存在明显的瞬时失败与波动（同一模型连续请求可见 2.5s 与 6.1s 的差异，也见过随机 `overloaded`），多轮才能给出稳定中位数。`--replace` 会在开跑前清掉所有历史基准记录（按 `sessionId: bench-*` 识别）——必须先清，否则新旧混在一起，"替换数据"会变成"掺入数据"。清理由 `usage-history-io.mjs` 的并发写保护执行，清理前完整备份、被清记录单独留档。
+
+参考量级：62 个模型、5 轮（310 次请求）约 $1.4、耗时 40 分钟左右。
+
+### 维护工具共用的存储层
+
+`usage-history-io.mjs` 提供 `readRecords` / `rewriteSafely` / `backupFile`，被上面两个工具共用。它解决的是"proxy 正在写、工具却要覆盖写"这个冲突：追加哨兵 → 读回确认哨兵是最后一行 → 由本次快照重算 payload → 校验文件尺寸未变 → 原子 rename，任一环节发现并发写入就整体重试。**payload 必须由本次快照构建**（曾在循环外用旧快照预先算好，导致两次读取之间追加的记录被静默覆盖）。残余风险已在模块内记录：尺寸校验与 rename 之间有微秒级窗口。
 
 agent 驱动的自测方案见 [HERMES_TEST_PROMPT.md](./HERMES_TEST_PROMPT.md)。
 
@@ -322,7 +329,7 @@ Point any OpenAI-style client (Cursor, Continue, Aider, OpenWebUI, Hermes, your 
 - **Usage detail reaches the client** — the Anthropic route reports `input_tokens` / `cache_read_input_tokens` / `cache_creation_input_tokens` in the closing `message_delta` (non-streaming: `message.usage`), and the OpenAI route reports `prompt_tokens_details.cached_tokens`. Clients can therefore see **cache hits** and the **upstream's real input count** instead of a locally estimated total. The two exits follow **different conventions, each per its own spec**: on the Anthropic side `input_tokens` counts **only the uncached input**, so total input = `input_tokens + cache_read_input_tokens + cache_creation_input_tokens` (you **must** add the cache fields); on the OpenAI side `prompt_tokens` already includes cache reads and `cached_tokens` is a subset of it (**do not** add them)
 - **Faithful wire translation**, verified line-by-line against the original CLI: raw-base64 image parts with `mediaType`, `tool_search→search_tools` aliasing, terminal-error no-retry list
 - **Full tool passthrough** — no truncation to 15; the 30+ tools issued by multi-tool agent hosts are all forwarded
-- **Fuzzy model resolution + per-plan filtering** — unknown models pass through as-is (upstream returns an accurate error instead of a silently substituted default); `GET /v1/models?plan=…&available=1` (fail-open)
+- **Fuzzy model resolution + short-alias remapping + per-plan filtering** — when the catalog carries both a short alias (`qwen-3.7-max`) and a canonical entry (`Qwen/Qwen3.7-Max`), the alias is remapped to the id the upstream accepts (the upstream only knows the canonical one; passing the alias through yields a 403). The discriminator comes from the catalog itself — an alias entry's `owned_by` points back at its own id — so no model name is hardcoded, and ambiguous same-name groups are left alone rather than guessed. Unknown models still pass through as-is (upstream returns an accurate error instead of a silently substituted default); `GET /v1/models?plan=…&available=1` (fail-open)
 
 **Reliability & security**
 
@@ -386,7 +393,9 @@ npm run build:win    # Windows exe
 
 Two environment variables govern the performance panel. `PERF_MIN_OUTPUT_TOKENS` (default `32`) is the throughput gate: responses shorter than this count toward latency but not toward throughput, because a near-zero divisor makes `outputTokens / elapsed` meaningless — 19ms / 3 tokens reports 187 t/s and drags the P50/P95 with it. Set it to `0` to disable. `USAGE_HISTORY_PATH` (default `~/.commandcode/usage-history.jsonl`) must be overridden by tests and multi-instance deployments; that file is the billing and performance data source, so test traffic written into it fabricates performance numbers. If it has already been polluted, run `node purge-test-usage.mjs` (dry-run) and then `--apply` — it backs up first, archives the removed rows, and uses a deliberately conservative predicate that requires a completed request with no session/project/agent context, under 300ms, on a model that has never carried real traffic.
 
-To seed the performance panel with comparable data instead of leaving it sparse, run `node bench-models.mjs --run`: it issues one **real** request per available model (real upstream, real spend, recorded by the proxy), sequentially with a fixed prompt so output lengths are comparable. Requests carry `x-session-id: bench-<timestamp>` and `x-zcode-session-type: benchmark` so they are identifiable as benchmark traffic rather than agent workload. A safety valve sums the actual local cost every 5 models and aborts past `BENCH_MAX_USD` (default 4). Note these are single probes — the P50 shown for such a model is that one measurement, which the sample column discloses.
+To seed the performance panel with comparable data instead of leaving it sparse, run `node bench-models.mjs --run --rounds N`: it issues **real** requests per available model (real upstream, real spend, recorded by the proxy), sequentially with a fixed prompt so output lengths are comparable. Requests carry `x-session-id: bench-<timestamp>` and `x-zcode-session-type: benchmark` so they are identifiable as benchmark traffic rather than agent workload. A safety valve sums the actual local cost and aborts past `BENCH_MAX_USD` (default 4).
+
+A **single round is only one probe** — the P50 shown for that model is that one measurement, which the sample column discloses. `--rounds N` runs each model N times consecutively for a stable median; it matters because the upstream fails and fluctuates transiently (the same model can answer in 2.5s or 6.1s, and random `overloaded` errors occur). `--replace` clears all previous benchmark records first (identified by `sessionId: bench-*`) — without it you get "mixed in" data rather than "replaced" data, and the median is dragged by the old single probes. Both tools share the concurrency-safe storage layer in `usage-history-io.mjs`, which backs up before rewriting and archives the removed rows. Rough scale: 62 models × 5 rounds (310 requests) ≈ $1.4 and ~40 minutes.
 
 ### Disclaimer & License
 

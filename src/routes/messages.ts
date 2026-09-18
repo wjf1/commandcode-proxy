@@ -83,6 +83,26 @@ export async function messagesRoutes(fastify: FastifyInstance) {
     // 会话/项目等归因信息：会话 ID 来自客户端声明，项目为推断（见模块注释）。
     const requestContext = buildRequestContext(req.headers as any, body);
 
+    // 一次请求只落一条用量记录：非流式在 send() 之前就记了 COMPLETED，若 send 抛错会走进
+    // 外层 catch 再记一条 FAILED，把同一次请求记成两条，样本数与成功率都会失真。
+    let recorded = false;
+    const persistOnce = (status: 'COMPLETED' | 'FAILED', errorCode?: string): void => {
+      if (recorded) return;
+      recorded = true;
+      persistCompletion(modelName, usageAcc, requestContext, startTime, status, msgId, 'messages', errorCode);
+    };
+
+    // 上游把「模型不可用 / 区域限制 / 无可用 provider」这类失败以 error **事件**的形式发在
+    // 一个 200 流里，而不是用 HTTP 错误码。这种请求过去会被记成 COMPLETED + 0 输出，失败
+    // 在用量历史里看不出来——它比「抛异常」更常见，是真实失败的主要形态。
+    let sawUpstreamError = false;
+    const noteUpstreamError = (event: any): void => {
+      if (event?.type !== 'error') return;
+      const errObj = event.error ?? event;
+      const msg = typeof errObj === 'string' ? errObj : errObj?.message;
+      if (msg && msg !== 'unknown') sawUpstreamError = true;
+    };
+
     try {
       let upstreamStream: any;
       try {
@@ -98,6 +118,9 @@ export async function messagesRoutes(fastify: FastifyInstance) {
       } catch (err: any) {
         if (isAbortError(err) || err?.isAbort) return reply.raw.end();
         const proxyErr = toProxyError(err, ErrorCode.PROVIDER_PROTOCOL_ERROR);
+        // 上游在发出任何数据之前就失败（最典型的是模型不可用的 403/404）。这类请求过去
+        // 在用量历史里完全不留痕，面板的失败数因此结构性恒为 0。
+        persistOnce('FAILED', proxyErr.code);
         return reply.status(proxyErr.status).send(proxyErr.anthropicPayload());
       }
 
@@ -173,6 +196,7 @@ export async function messagesRoutes(fastify: FastifyInstance) {
           if (!event) return;
 
           accumulateUsage(usageAcc, event);
+          noteUpstreamError(event);
 
           if (event.type === 'text-delta') {
             const text = event.text || event.data?.text;
@@ -271,10 +295,12 @@ export async function messagesRoutes(fastify: FastifyInstance) {
           );
           reply.raw.write(sse('message_stop', { type: 'message_stop' }));
           const timing = ((Date.now() - startTime) / 1000).toFixed(3);
+          const finalStatus = sawUpstreamError ? 'FAILED' : 'COMPLETED';
           logger.info(
-            `Input Tokens ${inputTokens.toLocaleString('en-US')} | Output Tokens ${outputTokens.toLocaleString('en-US')} | Timing ${timing}s | Model ${modelName} | Status COMPLETED`
+            `Input Tokens ${inputTokens.toLocaleString('en-US')} | Output Tokens ${outputTokens.toLocaleString('en-US')} | Timing ${timing}s | Model ${modelName} | Status ${finalStatus}`
           );
-          persistCompletion(modelName, usageAcc, requestContext, startTime, 'COMPLETED', msgId, 'messages');
+          // 上游以 error 事件告知失败时，这条请求不该记成 COMPLETED（见 sawUpstreamError）。
+          persistOnce(finalStatus, sawUpstreamError ? ErrorCode.PROVIDER_PROTOCOL_ERROR : undefined);
           reply.raw.end();
         });
 
@@ -289,6 +315,8 @@ export async function messagesRoutes(fastify: FastifyInstance) {
           closeThinkingBlock();
           closeTextBlock();
           const proxyErr = toProxyError(err, ErrorCode.PROVIDER_PROTOCOL_ERROR);
+          // 流中途失败：带上已累积的 usage 落库（前半段上游很可能已计费，记 0 会低估）。
+          persistOnce('FAILED', proxyErr.code);
           // Anthropic 客户端按 error.type 分支，这里给出规范类型而非自定义串。
           reply.raw.write(sse('error', { type: 'error', error: proxyErr.anthropicPayload().error }));
           reply.raw.write(
@@ -313,6 +341,7 @@ export async function messagesRoutes(fastify: FastifyInstance) {
         if (event) {
           events.push(event);
           accumulateUsage(usageAcc, event);
+          noteUpstreamError(event);
         }
       }
 
@@ -323,19 +352,22 @@ export async function messagesRoutes(fastify: FastifyInstance) {
         message.usage.input_tokens +
         message.usage.cache_read_input_tokens +
         message.usage.cache_creation_input_tokens;
+      const nonStreamStatus = sawUpstreamError ? 'FAILED' : 'COMPLETED';
       logger.info(
-        `Input Tokens ${logInputTokens.toLocaleString('en-US')} | Output Tokens ${message.usage.output_tokens.toLocaleString('en-US')} | Timing ${((Date.now() - startTime) / 1000).toFixed(3)}s | Model ${modelName} | Status COMPLETED`
+        `Input Tokens ${logInputTokens.toLocaleString('en-US')} | Output Tokens ${message.usage.output_tokens.toLocaleString('en-US')} | Timing ${((Date.now() - startTime) / 1000).toFixed(3)}s | Model ${modelName} | Status ${nonStreamStatus}`
       );
       if (!usageAcc.sawUsage) {
         usageAcc.inputTokens = message.usage.input_tokens;
         usageAcc.outputTokens = message.usage.output_tokens;
       }
-      persistCompletion(modelName, usageAcc, requestContext, startTime, 'COMPLETED', msgId, 'messages');
+      persistOnce(nonStreamStatus, sawUpstreamError ? ErrorCode.PROVIDER_PROTOCOL_ERROR : undefined);
       return reply.send(message);
     } catch (err: any) {
       if (isAbortError(err) || err?.isAbort) return reply.raw.end();
       logger.error(`[MESSAGES] Request failed | Trace ${msgId} | ${err.message}`);
       const proxyErr = toProxyError(err, ErrorCode.INTERNAL_ERROR);
+      // 若成功路径已记过 COMPLETED，persistOnce 会跳过，不会把同一次请求记成两条。
+      persistOnce('FAILED', proxyErr.code);
       return reply.status(proxyErr.status).send(proxyErr.anthropicPayload());
     }
   });

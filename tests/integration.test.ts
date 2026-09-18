@@ -38,6 +38,40 @@ function sse(events: any[]): string {
   return events.map(e => `data: ${JSON.stringify(e)}\n\n`).join('') + 'data: [DONE]\n\n';
 }
 
+/** beforeAll 里赋值为本次运行的状态目录（用量历史已隔离在此，不碰 ~/.commandcode）。 */
+let usageStateDir = '';
+
+/**
+ * 读 proxy 写下的用量历史。读失败返回空数组：文件在首条记录落盘前并不存在。
+ */
+function readUsageRecords(): any[] {
+  if (!usageStateDir) return [];
+  const p = path.join(usageStateDir, 'usage.jsonl');
+  if (!existsSync(p)) return [];
+  return readFileSync(p, 'utf-8')
+    .split('\n')
+    .filter(Boolean)
+    .map(l => {
+      try {
+        return JSON.parse(l);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+}
+
+/** 轮询等待用量历史满足条件（写入走串行队列，断言前需要等一拍）。 */
+async function waitForUsage(predicate: (rs: any[]) => boolean, timeoutMs = 3000): Promise<any[]> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const rs = readUsageRecords();
+    if (predicate(rs)) return rs;
+    if (Date.now() > deadline) return rs;
+    await new Promise(r => setTimeout(r, 50));
+  }
+}
+
 beforeAll(async () => {
   // ── Mock CommandCode upstream ──
   mockServer = http.createServer((req, res) => {
@@ -153,7 +187,24 @@ beforeAll(async () => {
 
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
 
-      if (userText.includes('__TOOLSTREAM__')) {
+      // 上游在流中途断开连接：用来覆盖 proxy 的 upstreamStream error 分支（该分支过去
+      // 也不落 FAILED 记录）。
+      if (userText.includes('__STREAM_ERROR__')) {
+        res.write(sse([{ type: 'start' }, { type: 'text-delta', text: 'partial answer' }]));
+        setTimeout(() => res.destroy(), 20);
+        return;
+      }
+
+      if (userText.includes('__ERROR_EVENT__')) {
+        // 上游用 error **事件**报告失败（真实案例："This model is not available in your
+        // region"、"No available providers match the 'only' filter"）。HTTP 仍是 200，
+        // 因此这类失败过去被记成 COMPLETED + 0 输出，在用量历史里看不出来。
+        res.end(sse([
+          { type: 'start' },
+          { type: 'error', error: 'This model is not available in your region' },
+          { type: 'finish', finishReason: 'stop', data: { usage: { inputTokens: 7, outputTokens: 0 } } },
+        ]));
+      } else if (userText.includes('__TOOLSTREAM__')) {
         // Tool-calling scenario: model decides to call a tool
         res.end(sse([
           { type: 'start' },
@@ -187,6 +238,7 @@ beforeAll(async () => {
   // 状态文件（config/models/pricing）隔离到临时目录：否则启动时的账号名补全会把
   // mock 的假身份与随机 key 写进仓库根的 config.json，污染之后的真实运行。
   const stateDir = mkdtempSync(path.join(tmpdir(), 'ccproxy-it-'));
+  usageStateDir = stateDir;
   proxyProcess = spawn(process.execPath, [path.join(projectRoot, 'dist', 'index.js')], {
     cwd: stateDir,
     env: {
@@ -683,6 +735,79 @@ describe.skipIf(!distReady)('structured error contract', () => {
     expect(data.error.code).toBe('MODEL_NOT_IN_PLAN');
     expect(data.error.type).toBe('permission_error');
     expect(data.error.hint).toContain('subscription tier');
+  });
+
+  // 修复前 persistCompletion 的 3 个调用点全部硬编码 COMPLETED，'FAILED' 只存在于类型
+  // 定义里、没有任何代码路径能产生它 —— 于是失败请求在用量历史里一条记录都不留，面板的
+  // 失败数与成功率结构性恒为 0/100%。这条用例锁住"失败也要落库、并带上可查的错误码"。
+  it('a failed request is persisted with status FAILED and an error code', async () => {
+    const before = readUsageRecords().length;
+    const res = await postChat(ask('__NOT_IN_PLAN__'));
+    expect(res.status).toBe(403);
+
+    const failed = await waitForUsage(
+      rs => rs.length > before && rs.slice(before).some(r => r.status === 'FAILED'),
+    );
+    const rec = failed.slice(before).find(r => r.status === 'FAILED')!;
+    expect(rec.errorCode).toBe('MODEL_NOT_IN_PLAN');
+    expect(rec.model).toBe('claude-sonnet-5');
+    // 上游在没有产生任何 token 前就拒绝了，不该凭空记出用量或成本。
+    expect(rec.outputTokens).toBe(0);
+    expect(rec.costUsd).toBe(0);
+    expect(Number.isFinite(rec.timingMs) && rec.timingMs > 0).toBe(true);
+  });
+
+  it('an aborted upstream stream is still persisted as FAILED rather than lost', async () => {
+    const before = readUsageRecords().length;
+    // __STREAM_ERROR__ 让 mock 在发出 200 与部分数据后掐断连接（见 mock 的 generate 分支）。
+    // 客户端看到 500 还是被截断的 200，取决于 proxy 是否已经把 SSE 头刷给客户端：连接级
+    // 断开会先触发重试，重试全失败就在提交流之前抛错。这里断言的不变量是"失败不丢记录"。
+    const res = await postChat(ask('__STREAM_ERROR__'));
+    expect([200, 500]).toContain(res.status);
+
+    const rs = await waitForUsage(r => r.length > before && r.slice(before).some(x => x.status === 'FAILED'));
+    const rec = rs.slice(before).find(r => r.status === 'FAILED');
+    expect(rec).toBeDefined();
+    expect(rec!.errorCode).toBeTruthy();
+  });
+
+  it('a successful request is recorded exactly once (no COMPLETED + FAILED duplicate)', async () => {
+    const before = readUsageRecords().length;
+    const res = await postChat(ask('plain'));
+    expect(res.status).toBe(200);
+    const rs = await waitForUsage(r => r.length > before);
+    const added = rs.slice(before);
+    expect(added).toHaveLength(1);
+    expect(added[0].status).toBe('COMPLETED');
+  });
+
+  // 真实世界里最常见的失败形态：HTTP 200 + error 事件（模型区域受限、无可用 provider）。
+  // 它过去被记成 COMPLETED + 0 输出，于是"成功率高得可疑"而失败无法追溯。
+  it('an upstream error EVENT inside a 200 stream is recorded as FAILED, not COMPLETED', async () => {
+    const before = readUsageRecords().length;
+    const res = await postChat(ask('__ERROR_EVENT__'));
+    expect(res.status).toBe(200); // 状态码确实是 200——正因为如此才需要看记录而不是看码
+
+    const rs = await waitForUsage(r => r.length > before);
+    const added = rs.slice(before);
+    expect(added).toHaveLength(1);
+    expect(added[0].status).toBe('FAILED');
+    expect(added[0].errorCode).toBe('PROVIDER_PROTOCOL_ERROR');
+  });
+
+  it('the Anthropic route also records an upstream error event as FAILED', async () => {
+    const before = readUsageRecords().length;
+    const res = await postMessages({
+      model: 'claude-sonnet-5',
+      max_tokens: 64,
+      messages: [{ role: 'user', content: '__ERROR_EVENT__' }],
+    });
+    expect(res.status).toBe(200);
+
+    const rs = await waitForUsage(r => r.length > before);
+    const rec = rs.slice(before).find(r => r.mode === 'messages');
+    expect(rec?.status).toBe('FAILED');
+    expect(rec?.errorCode).toBe('PROVIDER_PROTOCOL_ERROR');
   });
 
   it('OpenAI route: 5xx → SERVER_ERROR (retries exhausted, upstream status preserved)', async () => {

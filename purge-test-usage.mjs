@@ -27,16 +27,14 @@
 // 可用 USAGE_HISTORY_PATH 指向其它文件。
 // =============================================================================
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { resolveUsageFile, readRecords, rewriteSafely, backupFile } from './usage-history-io.mjs';
 
 const APPLY = process.argv.includes('--apply');
 const MIN_CONNECTED_MS = 300;
 
-const FILE = process.env.USAGE_HISTORY_PATH
-  ? path.resolve(process.env.USAGE_HISTORY_PATH)
-  : path.join(os.homedir(), '.commandcode', 'usage-history.jsonl');
+const FILE = resolveUsageFile();
 
 /** 判定一条记录是否为集成测试残留（纯函数，便于在测试中锁定）。 */
 export function isTestNoise(record, modelsWithRealTraffic) {
@@ -60,64 +58,12 @@ function plan(records) {
   return { keep, drop, modelsWithRealTraffic };
 }
 
-/**
- * 带并发写保护的原地替换：先追加一个哨兵行，读回后确认哨兵就是最后一行（否则说明
- * 期间有其它写入，重试）；写临时文件后再校验文件尺寸未变，最后原子 rename。
- */
-function replaceSafely(file, keepRecords, attempts = 6) {
-  const dir = path.dirname(file);
-  const tmp = path.join(dir, `.purge-tmp-${process.pid}`);
-  const payload = keepRecords.map(r => JSON.stringify(r)).join('\n') + (keepRecords.length ? '\n' : '');
-
-  for (let i = 0; i < attempts; i++) {
-    const tag = `__purge_sentinel_${process.pid}_${Date.now()}_${i}`;
-    const sentinel = JSON.stringify({ __sentinel: tag });
-    fs.appendFileSync(file, sentinel + '\n');
-
-    const raw = fs.readFileSync(file, 'utf8');
-    const lines = raw.split('\n');
-    // 读取期间若有并发写入落在哨兵之后，本次快照就不完整，重来。
-    if (!raw.trimEnd().endsWith(sentinel)) continue;
-    if (lines.filter(l => l.includes(tag)).length !== 1) continue;
-    const sizeAtRead = fs.statSync(file).size;
-
-    // 快照里哨兵之前的所有行就是待处理记录（哨兵之后为空，上面已校验）。
-    const snapshotted = lines.slice(0, lines.findIndex(l => l.trim() === sentinel));
-    const { keep, drop } = plan(
-      snapshotted
-        .filter(Boolean)
-        .map(l => JSON.parse(l))
-    );
-
-    fs.writeFileSync(tmp, payload);
-    if (fs.statSync(file).size !== sizeAtRead) {
-      fs.rmSync(tmp, { force: true });
-      continue; // 期间有并发写入，丢弃本次结果重来
-    }
-    fs.renameSync(tmp, file);
-    return { ok: true, drop, written: keep.length, attempts: i + 1 };
-  }
-  fs.rmSync(tmp, { force: true });
-  return { ok: false, attempts };
-}
-
 function main() {
-  if (!fs.existsSync(FILE)) {
+  const records = readRecords(FILE);
+  if (!records.length && !fs.existsSync(FILE)) {
     console.error(`找不到用量历史文件：${FILE}`);
     process.exit(1);
   }
-  const records = fs
-    .readFileSync(FILE, 'utf8')
-    .split('\n')
-    .filter(Boolean)
-    .map(l => {
-      try {
-        return JSON.parse(l);
-      } catch {
-        return null;
-      }
-    })
-    .filter(Boolean);
 
   const { keep, drop } = plan(records);
 
@@ -151,13 +97,12 @@ function main() {
     return;
   }
 
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const backup = `${FILE}.backup-${stamp}`;
+  const backup = backupFile(FILE, 'backup');
+  const stamp = backup.replace(`${FILE}.backup-`, '');
   const removed = `${FILE}.removed-${stamp}`;
-  fs.copyFileSync(FILE, backup);
   fs.writeFileSync(removed, drop.map(r => JSON.stringify(r)).join('\n') + '\n');
 
-  const res = replaceSafely(FILE, keep);
+  const res = rewriteSafely(FILE, plan, { label: 'purge' });
   if (!res.ok) {
     console.error(`\n替换失败（${res.attempts} 次重试仍未拿到稳定快照）。文件未被修改，请稍后重试。`);
     process.exit(2);
@@ -167,8 +112,9 @@ function main() {
   console.log(`\n完成（${res.attempts} 次尝试）。原有 ${records.length} 条 → 现有 ${after} 条。`);
   console.log(`完整备份：${backup}`);
   console.log(`被移除记录留档：${removed}`);
-  if (after > keep.length) {
-    console.log(`注：清理期间 proxy 又写入了 ${after - keep.length} 条新记录（已保留）。`);
+  // 数量对不上只可能是清理窗口内 proxy 追加了新记录（rewriteSafely 会用最新快照重算）。
+  if (after !== res.keep.length) {
+    console.log(`注：清理期间 proxy 又写入了 ${after - res.keep.length} 条新记录（已保留）。`);
   }
 }
 

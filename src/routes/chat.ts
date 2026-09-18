@@ -108,6 +108,25 @@ export async function chatRoutes(fastify: FastifyInstance) {
     // 会话/项目等归因信息：会话 ID 来自客户端声明，项目为推断（见模块注释）。
     const requestContext = buildRequestContext(req.headers as any, body);
 
+    // 一次请求只落一条用量记录。非流式在 send() 之前就记了 COMPLETED，若 send 抛错会
+    // 走进外层 catch 再记一条 FAILED——那会把同一次请求记成两条，样本数与成功率都失真。
+    // 上游把「模型不可用 / 区域限制 / 无可用 provider」这类失败以 error **事件**的形式
+    // 发在一个 200 流里，而不是用 HTTP 错误码。这种请求过去会被记成 COMPLETED + 0 输出，
+    // 失败在用量历史里完全看不出来——它比「抛异常」更常见，是真实失败的主要形态。
+    let sawUpstreamError = false;
+    const noteUpstreamError = (event: any): void => {
+      if (event?.type !== 'error') return;
+      const msg = typeof event.error === 'string' ? event.error : event.error?.message;
+      if (msg && msg !== 'unknown') sawUpstreamError = true;
+    };
+
+    let recorded = false;
+    const persistOnce = (status: 'COMPLETED' | 'FAILED', errorCode?: string, traceOverride?: string): void => {
+      if (recorded) return;
+      recorded = true;
+      persistCompletion(modelName, usageAcc, requestContext, startTime, status, traceOverride ?? traceId, 'chat', errorCode);
+    };
+
     try {
       let upstreamStream: any;
       try {
@@ -124,6 +143,9 @@ export async function chatRoutes(fastify: FastifyInstance) {
       } catch (err: any) {
         if (isAbortError(err) || err?.isAbort) return reply.raw.end();
         const proxyErr = toProxyError(err, ErrorCode.PROVIDER_PROTOCOL_ERROR);
+        // 上游在发出任何数据之前就失败了（最典型的是模型不可用的 403/404）。这类请求
+        // 过去在用量历史里完全不留痕，面板的失败数因此恒为 0。
+        persistOnce('FAILED', proxyErr.code);
         if (body.stream) {
           writeSSEHeaders(reply);
           const state = adapter.createStreamEncoderState(modelName, {
@@ -163,6 +185,7 @@ export async function chatRoutes(fastify: FastifyInstance) {
           if (!event) return;
           try {
             accumulateUsage(usageAcc, event);
+            noteUpstreamError(event);
             for (const c of adapter.encodeOpenAIChunk(event, state)) reply.raw.write(c);
           } catch (err: any) {
             logger.warn(`[CHAT] Chunk encode error: ${err.message}`);
@@ -179,7 +202,12 @@ export async function chatRoutes(fastify: FastifyInstance) {
           // 上游未回 usage 时回落到本地估算的输入量，避免记录为 0。
           if (!usageAcc.sawUsage) usageAcc.inputTokens = inputTokens;
           logCompletion(usageAcc.inputTokens, usageAcc.outputTokens, startTime, modelName);
-          persistCompletion(modelName, usageAcc, requestContext, startTime, 'COMPLETED', state.id, 'chat');
+          // 上游以 error 事件告知失败时，这条请求不该记成 COMPLETED。
+          persistOnce(
+            sawUpstreamError ? 'FAILED' : 'COMPLETED',
+            sawUpstreamError ? ErrorCode.PROVIDER_PROTOCOL_ERROR : undefined,
+            state.id,
+          );
           reply.raw.end();
         });
 
@@ -191,6 +219,8 @@ export async function chatRoutes(fastify: FastifyInstance) {
           }
           cleanupPings();
           logger.error(`[CHAT] Stream error | Model ${modelName} | Trace ${state.id} | ${err.message}`);
+          // 流中途失败：带上已经累积的 usage 落库（前半段上游很可能已计费，记 0 会低估）。
+          persistOnce('FAILED', ErrorCode.PROVIDER_PROTOCOL_ERROR, state.id);
           if (!state.sawFinish) {
             for (const c of adapter.encodeOpenAIChunk({ type: 'error', error: { message: err.message || 'Upstream stream error' } }, state)) {
               reply.raw.write(c);
@@ -221,7 +251,10 @@ export async function chatRoutes(fastify: FastifyInstance) {
 
         if (event.type === 'error') {
           const errMsg = typeof event.error === 'string' ? event.error : event.error?.message;
-          if (errMsg && errMsg !== 'unknown') fullText += `\n[Upstream Error: ${errMsg}]\n`;
+          if (errMsg && errMsg !== 'unknown') {
+            noteUpstreamError(event);
+            fullText += `\n[Upstream Error: ${errMsg}]\n`;
+          }
         }
         if (event.type === 'text-delta') {
           const txt = event.text || event.data?.text || '';
@@ -274,7 +307,11 @@ export async function chatRoutes(fastify: FastifyInstance) {
         usageAcc.inputTokens = inputTokens;
         usageAcc.outputTokens = outputTokens;
       }
-      persistCompletion(modelName, usageAcc, requestContext, startTime, 'COMPLETED', traceId, 'chat');
+      // 上游以 error 事件告知失败时，这条请求不该记成 COMPLETED（见 sawUpstreamError）。
+      persistOnce(
+        sawUpstreamError ? 'FAILED' : 'COMPLETED',
+        sawUpstreamError ? ErrorCode.PROVIDER_PROTOCOL_ERROR : undefined,
+      );
 
       return reply.send({
         id: traceId,
@@ -294,6 +331,9 @@ export async function chatRoutes(fastify: FastifyInstance) {
       if (isAbortError(err) || err?.isAbort) return reply.raw.end();
       logger.error(`[CHAT] Fatal request error | Trace ${traceId} | ${err.message}`);
       const proxyErr = toProxyError(err, ErrorCode.INTERNAL_ERROR);
+      // 若成功路径已记过 COMPLETED（非流式在 send 之前记），persistOnce 会跳过，
+      // 不会把同一次请求记成两条。
+      persistOnce('FAILED', proxyErr.code);
       return reply.status(proxyErr.status).send({ error: proxyErr.openAIPayload() });
     }
   });

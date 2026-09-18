@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { parsePricingFromHtml, resolveModelName, setCachedModelsForTest } from '../src/utils/models.js';
+import { parsePricingFromHtml, resolveModelName, buildAliasMap, setCachedModelsForTest } from '../src/utils/models.js';
 import type { ModelItem } from '../src/types/index.js';
 
 // ── 定价页 RSC payload 解析（parsePricingFromHtml）────────────────────────────
@@ -126,5 +126,77 @@ describe('resolveModelName', () => {
   it('falls back to the first catalog entry for empty input', () => {
     expect(resolveModelName('')).toBe('claude-sonnet-5');
     expect(resolveModelName(undefined as any)).toBe('claude-sonnet-5');
+  });
+});
+
+// ── 短别名重映射（buildAliasMap / resolveModelName）──────────────────────────
+//
+// 背景：目录里同时有短别名（`qwen-3.7-max`）与规范条目（`Qwen/Qwen3.7-Max`），上游
+// 只认后者——别名透传过去一律 403 `Model/provider not recognized`（实测 11 个别名
+// 全部如此）。判别信号完全取自目录：别名条目的 owned_by 回指自身，规范条目不是。
+//
+// 关键在于重映射必须排在**精确匹配之前**：别名本身就在目录里，精确匹配会直接放行，
+// 于是又打回上游换来一个 403——这正是修复前的行为。
+
+const ALIAS_CATALOG: ModelItem[] = [
+  // 别名：owned_by 回指自身
+  { id: 'qwen-3.7-max', object: 'model', created: 0, owned_by: 'qwen-3.7-max', name: 'Qwen 3.7 Max' },
+  { id: 'nemotron-3-ultra', object: 'model', created: 0, owned_by: 'nemotron-3-ultra', name: 'Nemotron 3 Ultra' },
+  // 同名规范条目：owned_by 是真实 owner
+  { id: 'Qwen/Qwen3.7-Max', object: 'model', created: 0, owned_by: 'command-code', name: 'Qwen 3.7 Max' },
+  { id: 'nvidia/nemotron-3-ultra-550b-a55b', object: 'model', created: 0, owned_by: 'command-code', name: 'Nemotron 3 Ultra' },
+  // 正常的短 id：owned_by 不是自身，不该被当成别名
+  { id: 'gpt-5.6-sol', object: 'model', created: 0, owned_by: 'command-code', name: 'GPT 5.6 Sol' },
+  // 带前缀的正常条目：owned_by 与 id 前缀一致，同样不是别名
+  { id: 'deepseek/deepseek-v4-pro', object: 'model', created: 0, owned_by: 'deepseek', name: 'DeepSeek V4 Pro' },
+];
+
+describe('buildAliasMap — 只认 owned_by 回指自身的同名条目', () => {
+  it('把别名映射到同名规范条目（不依赖硬编码的模型名）', () => {
+    const map = buildAliasMap(ALIAS_CATALOG);
+    expect(map.get('qwen-3.7-max')).toBe('Qwen/Qwen3.7-Max');
+    expect(map.get('nemotron-3-ultra')).toBe('nvidia/nemotron-3-ultra-550b-a55b');
+  });
+
+  it('正常的短 id 与带前缀条目都不进映射表', () => {
+    const map = buildAliasMap(ALIAS_CATALOG);
+    expect(map.has('gpt-5.6-sol')).toBe(false);
+    expect(map.has('deepseek/deepseek-v4-pro')).toBe(false);
+    expect(map.has('Qwen/Qwen3.7-Max')).toBe(false);
+  });
+
+  it('同名条目多于两个时不做猜测（宁可让上游报准确错误）', () => {
+    const ambiguous: ModelItem[] = [
+      { id: 'x-1', object: 'model', created: 0, owned_by: 'x-1', name: 'Dup' },
+      { id: 'a/x', object: 'model', created: 0, owned_by: 'command-code', name: 'Dup' },
+      { id: 'b/x', object: 'model', created: 0, owned_by: 'command-code', name: 'Dup' },
+    ];
+    expect(buildAliasMap(ambiguous).size).toBe(0);
+  });
+
+  it('缺少 name 或 name 为空时不参与映射', () => {
+    const noName: ModelItem[] = [
+      { id: 'a-1', object: 'model', created: 0, owned_by: 'a-1' } as ModelItem,
+      { id: 'p/a', object: 'model', created: 0, owned_by: 'command-code', name: '  ' },
+    ];
+    expect(buildAliasMap(noName).size).toBe(0);
+  });
+});
+
+describe('resolveModelName — 别名重映射优先于精确匹配', () => {
+  beforeEach(() => setCachedModelsForTest(ALIAS_CATALOG));
+
+  it('请求短别名时改写为上游认可的规范 id', () => {
+    expect(resolveModelName('qwen-3.7-max')).toBe('Qwen/Qwen3.7-Max');
+    expect(resolveModelName('nemotron-3-ultra')).toBe('nvidia/nemotron-3-ultra-550b-a55b');
+  });
+
+  it('请求规范 id 时保持原样', () => {
+    expect(resolveModelName('Qwen/Qwen3.7-Max')).toBe('Qwen/Qwen3.7-Max');
+  });
+
+  it('不带别名的正常 id 不受影响', () => {
+    expect(resolveModelName('gpt-5.6-sol')).toBe('gpt-5.6-sol');
+    expect(resolveModelName('deepseek/deepseek-v4-pro')).toBe('deepseek/deepseek-v4-pro');
   });
 });
