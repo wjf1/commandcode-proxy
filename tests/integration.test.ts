@@ -25,9 +25,23 @@ const PROXY_PORT = await getFreePort();
 const PROXY_BASE = `http://127.0.0.1:${PROXY_PORT}`;
 
 // 集成测试启动的是编译产物 dist/index.js；干净克隆上没有 dist 会必然超时。
-// 此时跳过整个套件并提示先 `npm run build`，避免 `npm test` 一上来就红。
+// 各 describe 上的 describe.skipIf 用于避免整片红。
+//
+// 但"静默跳过"本身是个陷阱：它曾让 42 项端到端用例（两条推理路由的 SSE、重试循环、
+// 错误契约、管理面）在没 build 的克隆上完全不执行，而 `npm test` 照样报全绿。
+// 防护放在下面 beforeAll 的第一行：缺产物就明确报错，而不是让跳过混在汇总行里。
+// （`npm test` 已配 pretest 自动 build；该守卫主要保护直接跑 `npx vitest run` 的路径。）
 const DIST_ENTRY = path.resolve(__dirname, '..', 'dist', 'index.js');
 const distReady = existsSync(DIST_ENTRY);
+
+// 这条**不带 skipIf** 的用例是刻意存在的：vitest 在一个文件里没有任何可运行用例时
+// 根本不会执行文件级 beforeAll，那就会退回到"42 skipped + 全绿"的老问题。
+// 有这条在，beforeAll 必然运行，缺产物时由它抛出上面那句人话。
+describe('集成套件前置条件', () => {
+  it('构建产物 dist/index.js 存在（否则本文件 42 项端到端用例会被静默跳过）', () => {
+    expect(distReady).toBe(true);
+  });
+});
 
 let mockServer: http.Server;
 let proxyProcess: ChildProcess;
@@ -92,6 +106,14 @@ async function waitForUsage(predicate: (rs: any[]) => boolean, timeoutMs = 3000)
 }
 
 beforeAll(async () => {
+  // 缺产物时必须在这里说清楚，而不是往下走 spawn 换一句误导性的"没有就绪"。
+  if (!distReady) {
+    throw new Error(
+      `缺少构建产物 ${DIST_ENTRY}。本套件 spawn 的是编译产物，未构建时下面所有用例都会被` +
+      ` skipIf 静默跳过（历史上曾因此让 npm test 对推理路由零覆盖地报全绿）。` +
+      `请先 npm run build —— 或直接 npm test（已配 pretest 自动构建）。`,
+    );
+  }
   // ── Mock CommandCode upstream ──
   mockServer = http.createServer((req, res) => {
     let body = '';

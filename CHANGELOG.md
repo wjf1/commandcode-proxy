@@ -2,6 +2,41 @@
 
 所有主要版本更新都记录在此文件。
 
+## [Unreleased]
+
+架构审查（批次 A）修复。7 项中有 2 项是**行为变更**，已单独标注。
+
+### 修复
+- **额度/瞬时错误重试时的账号切换现在真正生效**（原 `onRetry` 死代码，见 4.17.0「已知问题」）。这条路径上实际有**三层**缺陷，只补第 1 层仍然不会切号：
+  1. `sendToCC` 从不 `await opts.onRetry`；
+  2. `headers` 在重试循环**之外**构建一次，换号后仍带旧 key；
+  3. 路由里的回调给局部变量 `apiKey` 赋值，而 `opts.apiKey` 早在构造参数对象时把旧值快照进去了。
+  契约随之调整：`onRetry` 现在**返回**下一次要用的 apiKey（返回 undefined = 沿用当前 key）。
+  **行为变更**：撞额度时会在重试途中切到另一个账号，该请求的上游归属随之改变。
+- **`upstream.timeoutMs` 从此真正生效**。此前它被加载、写入默认值、并在 `/api/status` 与仪表盘展示，但 `src/` 里 0 个消费点——唯一起作用的是 `idleTimeoutMs`，而它每收到一个字节就重置，因此一个持续 trickle 的上游可以无限期挂住连接。新增跨"等响应头 + 读流"两阶段的挂钟上限，超时归类为既有的 `REQUEST_TIMEOUT`。
+  **行为变更 / 需要关注**：任何长度超过 `timeoutMs`（默认 600s）的请求现在会被切断。此前它能活下来纯粹是因为这个配置不执行。长推理会话请确认 600s 是否合适，必要时在 `config.json` 调大。
+- **`npm test` 不再对推理路由零覆盖地报全绿**。本仓库所有集成用例都 `spawn` 编译产物，缺 `dist/` 时被 `describe.skipIf` 静默跳过（实测：未构建时 244 passed / 42 skipped 且退出码 0）。现在 `pretest` 自动构建，并在 `beforeAll` 首行加了明确报错。注意 vitest 在一个文件没有任何可运行用例时**不会执行文件级 beforeAll**，所以 `tests/integration.test.ts` 里那条不带 skipIf 的前置用例是这套防护的触发器，删除它会退回老行为。
+- **「发现新版本」提示恢复工作**：改为读 `/tags` 并按 semver 取最大。此前读的是 `releases/latest`，而本仓库只打 tag 不建 Release 对象——实测 `releases/latest` 停在 v4.12.0 而 tag 已到 v4.17.0，于是自 v4.13.0 起该提示永远不会触发。（另一条路线是恢复创建 GitHub Release，未在本次改动内。）
+- **`/api/auth/manual-login` 不再明文回传上游 apiKey**，改为与 `/api/accounts` 一致的 `apiKeyMasked`。`loginNewAccount` 的返回类型仍带完整凭据（内部调用方需要），收口在 HTTP 边界。
+- **仪表盘 `badge()` 转义 text**：`title` 参数一直走 `esc()`，`text` 却是裸拼进 innerHTML，而调用点把上游定价页抓来的 `m.deal.discountPercent` 直接传入。全站仍无 CSP，故属纵深防御缺口。
+
+### 构建
+- `pkg.assets` 移除 `models.json`：它是运行时生成的缓存且已在 `.gitignore` 里，全新克隆上打包会静默缺该资产。
+
+### 测试
+- 新增 5 个文件共 16 项，全部先观察到失败再实现：`onretry-account-switch`（断言上游实际收到的 `Authorization` 头变化，而非"回调被调用过"）、`upstream-total-timeout`（把 `idleTimeoutMs` 刻意设得大于总时限，使超时只能归因于挂钟上限）、`admin-key-mask`、`spa-badge-escape`（取出 index.html 里真实的 `badge`/`esc`/`BADGE_TONES` 源码执行）、`update-check-tags`。
+- 新增 `COMMANDCODE_ENV_PATH` 覆盖（与 `COMMANDCODE_CONFIG_PATH` / `..._MODELS_CACHE_PATH` 等同一套约定，不设置时行为不变）。动机是修一处测试自伤：`admin-key-mask` 走进程内 `app.inject`，`.env` 路径按 `getProjectRootDir()`(=cwd) 解析，于是它把一次账号保存的副作用写进了**仓库根 `.env`**；而 `.env` 在启动时被回注且 `COMMANDCODE_API_BASE`/`COMMANDCODE_VERSION` 的优先级高于 `config.json`（`config.ts:264`）——在既当部署目录又当源码目录的地方跑一次测试，下次启动就会被指到别处。`.env` 命中 `.gitignore:4`，`git status` 看不见它。基线（4.17.0）跑测试只留 `logs/`、`models.json`（同样被忽略），不写 `.env`，所以这条是本次新增测试带来的。
+- 全量 **304 项通过**（原 288 + 16），`tsc --noEmit`、`eslint .` 无错误；语句覆盖率 48.36% → **57.57%（1460/2536，无污染下的真实值）**。
+  - 顺带修正一处读数：早先记的 57.8% 偏高，因为仓库根存在 `.env` 时 `loadEnvFile()` 的解析分支会被顺带跑到的语句计入覆盖。实测同一棵树：有仓库根 `.env` → 1472 条，无 → 1460 条，差 12 条。反过来说，`loadEnvFile()` 的正经解析路径目前**没有任何直接覆盖**，靠副作用才被动跑到——补测试归入后续批次。
+
+### 已知问题（本次排查中发现，未修）
+- **管理面默认零鉴权**：`PROXY_API_KEY` 未设置时 `verifyProxyAuth` 直接 return，`/api/*` 16 个管理端点完全无鉴权；且 `/v1` 数据面与 `/api` 管理面共用同一把密钥，未做权限分离。跨站驱动已被 `isSameOriginIfPresent` 挡住，但该检查比对的是**攻击者可控的 `Host` 头**，DNS rebinding 可绕过（无 Host 白名单）。属需要设计决策的独立批次，未随本次一起改。
+- 出站 fetch 未设 `redirect:'manual'`，`assertSafeUpstreamUrl` 只校验初始 URL，二跳可逃逸 SSRF 白名单。
+- OAuth 回调在 `state` 缺失时放行（`config.ts` 注释说明是为兼容旧版 CLI 的有意取舍）。
+- 密钥以明文写入 `config.json` / `.env`，无文件权限加固；`.env` 会被回注 `process.env`。
+- **`syncEnvFile` 把 `apiBase`/`ccVersion` 写死成默认值**（`config.ts:342-343`），而回注时这两个 env 的优先级高于 `config.json`（`config.ts:264`）。于是一个用自建/反代上游的人：在仪表盘加或切换一次账号 → `.env` 被写入 `COMMANDCODE_API_BASE=https://api.commandcode.ai` → 下次重启后他的自定义 `upstream.apiBase` 被**静默改回公网默认**。默认部署里两者取值相同（都是 `https://api.commandcode.ai` / `1.27.1`），所以这台机器上不会触发，属潜伏缺陷。修法是把写入值改成生效配置，或干脆不写这两行。
+- `rewriteSafely`（仅 dev 工具，不在服务路径）的 `renameSync` 无 try/catch，Windows 上偶发 `EPERM` 会抛出并泄漏临时文件。
+
 ## [4.17.0] - 2026-09-18
 
 ### 修复

@@ -25,7 +25,9 @@ export { getProjectRootDir };
 export const CONFIG_FILE_PATH = process.env.COMMANDCODE_CONFIG_PATH
   ? path.resolve(process.env.COMMANDCODE_CONFIG_PATH)
   : path.join(getProjectRootDir(), 'config.json');
-const ENV_FILE_PATH = path.join(getProjectRootDir(), '.env');
+const ENV_FILE_PATH = process.env.COMMANDCODE_ENV_PATH
+  ? path.resolve(process.env.COMMANDCODE_ENV_PATH)
+  : path.join(getProjectRootDir(), '.env');
 
 const DEFAULTS = {
   port: 9090,
