@@ -112,8 +112,14 @@ function sleep(ms: number): Promise<void> {
 export interface SendOptions {
   apiKey: string;
   abortSignal?: AbortSignal;
-  /** 每次重试前回调，调用方可在额度错误时切换账号。 */
-  onRetry?: (attempt: number, err: UpstreamError) => void | Promise<void>;
+  /**
+   * 每次重试前回调，调用方可在额度错误时切换账号。
+   *
+   * 返回**下一次尝试要用的 apiKey**；返回 undefined / 不返回表示沿用当前 key。
+   * 之所以要返回而不是就地改外部变量：apiKey 在本对象构造时已被快照，回调再去改
+   * 调用方的局部变量对这里没有任何影响。
+   */
+  onRetry?: (attempt: number, err: Error) => string | undefined | Promise<string | undefined>;
   /**
    * 流内事件的预判钩子：决定「丢弃本次调用重试」还是「放行给调用方」。
    *
@@ -325,8 +331,23 @@ export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<
   body.permissionMode = 'auto-accept';
   body.params.stream = true;
 
-  const headers = buildHeaders(opts.apiKey, config.ccVersion, body);
+  // headers 必须在重试循环**内部**构建：onRetry 换账号后，旧 key 不能再用于下一次尝试。
+  let currentApiKey = opts.apiKey;
   const reqData = JSON.stringify(body);
+
+  // 切号失败（轮换回调自己打上游打挂）不该让本次重试作废，因此只记日志不抛。
+  const maybeSwitchAccount = async (attempt: number, err: Error): Promise<void> => {
+    if (!opts.onRetry) return;
+    try {
+      const next = await opts.onRetry(attempt, err);
+      if (next && next !== currentApiKey) {
+        currentApiKey = next;
+        logger.info(`[UPSTREAM] Thread ${body.threadId} | Account switched on retry ${attempt} (key tail ${String(next).slice(-4)})`);
+      }
+    } catch (cbErr: any) {
+      logger.warn(`[UPSTREAM] onRetry callback failed: ${cbErr?.message || cbErr}`);
+    }
+  };
 
   if (MAX_UPSTREAM_CONCURRENCY > 0) {
     if (activeUpstreamRequests >= MAX_UPSTREAM_CONCURRENCY) {
@@ -353,9 +374,32 @@ export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<
   // 循环内任何 throw 都先释放并发槽位；成功路径的释放挂在返回流的 close/error 上。
   try {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const headers = buildHeaders(currentApiKey, config.ccVersion, body);
     const timeoutController = new AbortController();
     let idleTimer: NodeJS.Timeout | null = null;
     let idleFired = false;
+    let deadlineTimer: NodeJS.Timeout | null = null;
+    let deadlineFired = false;
+
+    // 挂钟总时限（upstream.timeoutMs）。与空闲看门狗的本质区别：看门狗每收到一个字节
+    // 就会重置，所以一个持续 trickle 的上游可以无限期挂住连接；这个上限跨"等响应头"
+    // 与"读流"两个阶段一次性生效，直到流结束才撤销。
+    //
+    // 注意：这是一次**行为变更**——修复前该配置完全不起作用，任何长度超过 timeoutMs
+    // 的长推理请求都是靠它不被执行才活下来的。
+    const armDeadline = () => {
+      if (deadlineTimer) clearTimeout(deadlineTimer);
+      deadlineTimer = setTimeout(() => {
+        deadlineFired = true;
+        timeoutController.abort(new Error(`Upstream exceeded ${config.upstreamTimeoutMs / 1000}s total deadline`));
+      }, config.upstreamTimeoutMs);
+      deadlineTimer.unref?.();
+    };
+    armDeadline();
+
+    const disarmDeadline = () => {
+      if (deadlineTimer) { clearTimeout(deadlineTimer); deadlineTimer = null; }
+    };
 
     // 空闲看门狗：每次被调用都会重置计时器。一旦上游超过 idleTimeoutMs 无数据，
     // 主动 abort 本次请求并标记 idleFired，抛"上游卡死"错误。
@@ -406,6 +450,7 @@ export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<
         );
         if (retryable && attempt < maxAttempts) {
           lastError = err;
+          await maybeSwitchAccount(attempt, err);
           // 指数退避：500ms * 2^(attempt-1)，封顶 8s。
           const backoffMs = Math.min(8000, 500 * Math.pow(2, attempt - 1));
           logger.warn(`[UPSTREAM] Retryable ${response.status}, retry ${attempt}/${maxAttempts - 1} in ${backoffMs}ms`);
@@ -428,6 +473,7 @@ export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<
       let discarded = false;
       const onStreamGone = () => {
         if (idleTimer) clearTimeout(idleTimer);
+        disarmDeadline();
         if (!discarded) releaseSlot();
       };
       rawStream.on('close', onStreamGone);
@@ -457,6 +503,17 @@ export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<
       return rawStream;
     } catch (err: any) {
       if (idleTimer) clearTimeout(idleTimer);
+      disarmDeadline();
+
+      // 挂钟上限先于空闲判定：两者的 abort 都走 isAbortError，但成因与错误码不同。
+      if (deadlineFired) {
+        throw new UpstreamError(
+          `Upstream exceeded ${config.upstreamTimeoutMs / 1000}s total deadline`,
+          504,
+          false,
+          ErrorCode.REQUEST_TIMEOUT,
+        );
+      }
 
       if (isAbortError(err)) {
         if (idleFired) {
@@ -478,6 +535,7 @@ export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<
       if (attempt < maxAttempts) {
         const backoffMs = Math.min(8000, 500 * Math.pow(2, attempt - 1));
         logger.warn(`[UPSTREAM] Thread ${body.threadId} | Upstream failure (${err.message}), retry ${attempt}/${maxAttempts - 1} in ${backoffMs}ms`);
+        await maybeSwitchAccount(attempt, err);
         await sleep(backoffMs);
         continue;
       }

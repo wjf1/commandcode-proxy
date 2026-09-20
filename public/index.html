@@ -669,7 +669,7 @@ const BADGE_TONES = {
 };
 function badge(text, tone, title) {
   return '<span class="text-[10px] px-2 py-0.5 rounded border font-semibold ' + BADGE_TONES[tone] + '"' +
-    (title ? ' title="' + esc(title) + '"' : '') + '>' + text + '</span>';
+    (title ? ' title="' + esc(title) + '"' : '') + '>' + esc(text) + '</span>';
 }
 // 档位药丸：可用=实心强调色，不可用=灰底。两枚固定占位，卡片高度一致，
 // 整列纵向对齐后即可一眼比较 GO / GOAT 的差别。

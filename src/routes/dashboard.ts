@@ -227,7 +227,13 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
     if (!apiKey) return reply.status(400).send({ error: 'API key is required' });
     try {
       const acc = await loginNewAccount(String(apiKey), name ? String(name).slice(0, 60) : undefined);
-      return { status: 'success', account: acc };
+      // 明文 apiKey 绝不出接口：loginNewAccount 的返回类型带完整凭据（内部调用方需要），
+      // 这里是它到 HTTP 响应体的唯一出口。掩码范式与 /api/accounts 一致。
+      const { apiKey: _plaintext, ...safeAccount } = acc;
+      return {
+        status: 'success',
+        account: { ...safeAccount, apiKeyMasked: acc.apiKey ? `${acc.apiKey.slice(0, 8)}...${acc.apiKey.slice(-4)}` : 'None' },
+      };
     } catch (err: any) {
       return reply.status(500).send({ error: err.message });
     }
