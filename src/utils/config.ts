@@ -25,7 +25,12 @@ export { getProjectRootDir };
 export const CONFIG_FILE_PATH = process.env.COMMANDCODE_CONFIG_PATH
   ? path.resolve(process.env.COMMANDCODE_CONFIG_PATH)
   : path.join(getProjectRootDir(), 'config.json');
-const ENV_FILE_PATH = path.join(getProjectRootDir(), '.env');
+// 与 CONFIG_FILE_PATH 同一套隔离约定。缺了它，.env 会无视 COMMANDCODE_CONFIG_PATH
+// 落到项目根 —— 而 .env 里存的是明文上游 key（见 saveEnvFile），测试与从
+// Program Files 运行的打包产物都会把凭据写进各自的工作目录。
+const ENV_FILE_PATH = process.env.COMMANDCODE_ENV_FILE_PATH
+  ? path.resolve(process.env.COMMANDCODE_ENV_FILE_PATH)
+  : path.join(getProjectRootDir(), '.env');
 
 const DEFAULTS = {
   port: 9090,
