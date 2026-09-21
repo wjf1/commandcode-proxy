@@ -18,6 +18,8 @@ logs/
 !purge-test-usage.mjs
 !bench-models.mjs
 !usage-history-io.mjs
+# Release workflow 在 CI 里执行它；少了这行，全新克隆会因为文件未入库而直接失败。
+!scripts/extract-release-notes.mjs
 *.png
 !docs/screenshots/
 !docs/screenshots/*.png

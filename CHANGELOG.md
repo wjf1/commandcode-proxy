@@ -2,6 +2,24 @@
 
 所有主要版本更新都记录在此文件。
 
+## [4.18.1] - 2026-09-21
+
+### 新增
+- **CI 发布流水线 `.github/workflows/release.yml`**：推 `v*` tag 就按 CHANGELOG 对应段落自动创建 GitHub Release（标题取 annotated tag 的 subject）。也支持 `workflow_dispatch` 手工补建，且幂等——Release 已存在则跳过。
+  背景：v4.13.0 起的 6 个版本只打了 tag、没建 Release 对象，而应用内检查读的是 `/releases/latest`，于是"发现新版本"静默失效了好几天且无处报错。4.18.0 已把检查改读 tags 兜住，但**人工建 Release 本身就是病根**，这次补上自动化防复发。
+  取舍：本 workflow 不等 CI，tag 一推就发；若希望"CI 绿了才发"，改成 `workflow_run` 触发即可。
+
+### 修复
+- **`.gitignore` 加 `!scripts/extract-release-notes.mjs`**。仓库根级 `*.mjs` 规则会把它吞掉，`git status` 里根本看不见这个文件——少了这行，全新克隆上 workflow 会因为引用的脚本未入库而直接失败。
+
+### 构建
+- `eslint.config.js` 为 `scripts/**/*.mjs` 声明 node 全局（`console`）。**没有**把它加进 ignores：CI 会执行、又没有任何静态检查的文件，等于把第一次运行留到线上。已负向确认该脚本真的在被检查（引入未声明引用会报 `no-undef`）。
+
+### 测试
+- 新增 `scripts/extract-release-notes.mjs` + `tests/release-notes.test.ts`（9 项）。重点是**失败路径**：版本不在 CHANGELOG 里、或 tag 名不合 `vX.Y.Z` 规范时，脚本必须非零退出——否则就会发出一个空正文的 Release，正好是这套自动化想消灭的那类静默失效。
+- 契约经变异校验：把三处 `process.exit(1)` 改成 `process.exit(0)` 后，2 项失败路径用例立刻红；恢复后 9 项全绿。
+- 全量 **316 项通过**（原 307 + 9），`tsc --noEmit`、`eslint .` 无错误。
+
 ## [4.18.0] - 2026-09-21
 
 架构审查（批次 A）修复。取**次版本号**而非修订号：本次含两处行为变更（下方标注 ⚠️）与一处内部契约变更（`SendOptions.onRetry` 的签名），不是单纯补丁。

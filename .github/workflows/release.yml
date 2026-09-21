@@ -1,0 +1,81 @@
+name: Release
+
+# tag 推上来就按 CHANGELOG 正文建 GitHub Release。
+# 起因：v4.13.0 起的 6 个版本只打了 tag 没建 Release，而应用内检查读的是
+# /releases/latest —— 结果"发现新版本"静默失效了好几天，且没有任何地方报错。
+# 人工建 Release 是病根本身，所以这里补上自动化。
+#
+# 注意取舍：本 workflow 不等 CI，tag 一推就发。若希望"只有 CI 绿了才发"，
+# 改成 workflow_run 触发（在 CI 完成后再跑本文件）即可。
+on:
+  push:
+    tags:
+      - 'v*'
+  # 允许手工补建历史版本（幂等：已存在就跳过）
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要补建 Release 的 tag，例如 v4.12.1'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  github-release:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # 读 annotated tag 的 subject 作为 Release 标题，需要 tag 对象在本地
+          fetch-depth: 0
+          fetch-tags: true
+
+      # 所有来自上下文/输入的字符串一律经 env 传入，不内插进 shell —— 防脚本注入。
+      - name: 解析目标 tag 与标题
+        id: meta
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          TAG="${INPUT_TAG:-$REF_NAME}"
+          case "$TAG" in
+            refs/*) TAG="${TAG#refs/tags/}" ;;
+          esac
+          # annotated tag 有 subject 就用它；轻量 tag 回落到 tag 名。
+          TITLE="$(git tag -l --format='%(contents:subject)' "$TAG" 2>/dev/null || true)"
+          if [ -z "$TITLE" ]; then TITLE="$TAG"; fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          {
+            echo 'title<<EOF_TITLE'
+            echo "$TITLE"
+            echo 'EOF_TITLE'
+          } >> "$GITHUB_OUTPUT"
+          echo "目标 tag: $TAG"
+          echo "标题    : $TITLE"
+
+      - name: 从 CHANGELOG 抽取正文
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # 取不到正文就非零退出 → 本步失败 → 不会发出空正文的 Release。
+          node scripts/extract-release-notes.mjs "$TAG" CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          wc -c "$RUNNER_TEMP/notes.md"
+
+      - name: 创建 Release（已存在则跳过）
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          TITLE: ${{ steps.meta.outputs.title }}
+          NOTES: ${{ runner.temp }}/notes.md
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，跳过创建（幂等，便于手工重跑）。"
+            exit 0
+          fi
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TITLE" --notes-file "$NOTES"

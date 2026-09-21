@@ -20,4 +20,15 @@ export default tseslint.config(
       'no-empty': ['error', { allowEmptyCatch: true }],
     },
   },
+  {
+    // CI 会执行 scripts/ 下的工具脚本（.github/workflows/release.yml 就调它），
+    // 所以必须过 lint 而不是 ignore —— 只在 CI 里跑、又没有任何静态检查的文件，
+    // 等于把第一次运行留到线上。
+    // 上面的 `*.mjs` 只匹配仓库根，不会罩住这里；node 全局按文件作用域声明。
+    files: ['scripts/**/*.mjs'],
+    languageOptions: {
+      sourceType: 'module',
+      globals: { console: 'readonly' },
+    },
+  },
 );
