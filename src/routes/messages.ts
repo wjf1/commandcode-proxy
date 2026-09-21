@@ -114,9 +114,13 @@ export async function messagesRoutes(fastify: FastifyInstance) {
           apiKey,
           abortSignal: abortController.signal,
           onRetry: async () => {
+            // 必须把新 key **返回**给 sendToCC：opts.apiKey 在构造时已快照，就地改局部
+            // 变量对下一次尝试没有任何影响（P0-4 的第三层缺陷）。
             if (await checkAndRotateAccountsOnQuota()) {
               apiKey = getActiveApiKey();
+              return apiKey;
             }
+            return undefined;
           },
         });
       } catch (err: any) {
