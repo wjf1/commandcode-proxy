@@ -115,4 +115,27 @@ describe('上游挂钟总时限（P1-1）', () => {
     expect(['errored', 'ended', 'closed']).toContain(outcome);
     expect(elapsed).toBeLessThan(DEADLINE_BOUND_MS);
   }, 8_000);
+
+  // 这条才是「静默截断」的真正防线。chat.ts:222-227 与 messages.ts:316 都先用
+  // isAbortError(err) 判定"客户端自己走了"，命中就静默 end()：不发 error 事件、
+  // 不 persistOnce('FAILED')。而裸 AbortError 会命中它 —— 于是超时在客户端侧表现为
+  // "模型答到一半自己停了"，用量历史里连 FAILED 都不留。
+  // 注意 isAbortError 的判据包含「消息里含 abort 子串」，所以错误文案也不能出现该词。
+  it('挂钟上限在流中途触发时给出可辨识错误，且不被 isAbortError 误判为客户端离开', async () => {
+    const { isAbortError } = await import('../src/adapters/commandcode/upstream.js');
+    const sendToCC = await loadSendToCC((trickleServer.address() as AddressInfo).port);
+
+    const stream = await sendToCC(makeBody(), { apiKey: 'ck-deadline' });
+
+    const err = await new Promise<any>(resolve => {
+      stream.on('data', () => {});
+      stream.once('error', resolve);
+      const guard = setTimeout(() => resolve(null), IDLE_TIMEOUT_MS * 2);
+      guard.unref?.();
+    });
+
+    expect(err, '流中途必须带着错误终止，而不是安静地结束').toBeTruthy();
+    expect(err.code).toBe('REQUEST_TIMEOUT');
+    expect(isAbortError(err)).toBe(false);
+  }, 8_000);
 });

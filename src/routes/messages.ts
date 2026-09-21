@@ -312,7 +312,12 @@ export async function messagesRoutes(fastify: FastifyInstance) {
           reply.raw.end();
         });
 
-        upstreamStream.on('error', (err: any) => {
+        // 与 chat.ts 同理：readline 会把 input 流的错误转成它自己的 'error'，
+        // 只挂 upstreamStream 会漏，而无监听器的 'error' 会抛成未捕获异常。
+        let streamErrorHandled = false;
+        const handleStreamError = (err: any): void => {
+          if (streamErrorHandled) return;
+          streamErrorHandled = true;
           if (isAbortError(err) || err?.isAbort) {
             cleanupPings();
             reply.raw.end();
@@ -336,7 +341,9 @@ export async function messagesRoutes(fastify: FastifyInstance) {
           );
           reply.raw.write(sse('message_stop', { type: 'message_stop' }));
           reply.raw.end();
-        });
+        };
+        upstreamStream.on('error', handleStreamError);
+        rl.on('error', handleStreamError);
 
         return reply;
       }

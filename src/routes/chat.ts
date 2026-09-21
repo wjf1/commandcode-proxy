@@ -219,7 +219,16 @@ export async function chatRoutes(fastify: FastifyInstance) {
           reply.raw.end();
         });
 
-        upstreamStream.on('error', (err: any) => {
+        // 流错误只此一处处理，但必须同时挂在两个源上：
+        //   - upstreamStream 自身的 'error'；
+        //   - readline 的 'error' —— createInterface({input}) 会把 input 流的错误转成
+        //     它自己的 'error' 事件，只挂前者会漏，而无监听器的 'error' 直接抛成
+        //     未捕获异常（实测日志：[CRITICAL] Uncaught Exception: Upstream exceeded
+        //     1.5s total deadline），把一次超时升级成进程级事故。
+        let streamErrorHandled = false;
+        const handleStreamError = (err: any): void => {
+          if (streamErrorHandled) return;
+          streamErrorHandled = true;
           if (isAbortError(err) || err?.isAbort) {
             cleanupPings();
             reply.raw.end();
@@ -228,7 +237,10 @@ export async function chatRoutes(fastify: FastifyInstance) {
           cleanupPings();
           logger.error(`[CHAT] Stream error | Model ${modelName} | Trace ${state.id} | ${err.message}`);
           // 流中途失败：带上已经累积的 usage 落库（前半段上游很可能已计费，记 0 会低估）。
-          persistOnce('FAILED', ErrorCode.PROVIDER_PROTOCOL_ERROR, state.id);
+          // 错误码取上游真实分类——超时与协议错误不该一律记成 PROVIDER_PROTOCOL_ERROR，
+          // 与 messages.ts 的 toProxyError 保持一致。
+          const proxyErr = toProxyError(err, ErrorCode.PROVIDER_PROTOCOL_ERROR);
+          persistOnce('FAILED', proxyErr.code, state.id);
           if (!state.sawFinish) {
             for (const c of adapter.encodeOpenAIChunk({ type: 'error', error: { message: err.message || 'Upstream stream error' } }, state)) {
               reply.raw.write(c);
@@ -238,7 +250,9 @@ export async function chatRoutes(fastify: FastifyInstance) {
             }
           }
           reply.raw.end();
-        });
+        };
+        upstreamStream.on('error', handleStreamError);
+        rl.on('error', handleStreamError);
 
         return reply;
       }

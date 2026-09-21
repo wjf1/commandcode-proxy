@@ -479,6 +479,24 @@ export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<
       rawStream.on('close', onStreamGone);
       rawStream.on('error', onStreamGone);
 
+      // 流已经交还调用方之后再被挂钟上限掐断时，必须替换成一个「不像 abort」的错误对象：
+      // 两条路由的 upstreamStream.on('error') 都先用 isAbortError(err) 判定"客户端自己
+      // 走了"，命中就静默 reply.raw.end()，既不发 error 事件也不落 FAILED。裸 AbortError
+      // 会命中那条分支，于是超时在客户端侧的表现是"模型答到一半自己停了"。
+      // AbortSignal 的 abort 监听器是同步派发的，因此这里 destroy(err) 会先于 fetch
+      // 自己抛出的 AbortError 到达调用方。错误文案刻意不含 "abort" 子串（isAbortError
+      // 的判据之一）。
+      timeoutController.signal.addEventListener('abort', () => {
+        if (deadlineFired && !rawStream.destroyed) {
+          rawStream.destroy(new UpstreamError(
+            `Upstream exceeded ${config.upstreamTimeoutMs / 1000}s total deadline`,
+            504,
+            false,
+            ErrorCode.REQUEST_TIMEOUT,
+          ));
+        }
+      }, { once: true });
+
       // 上游以 error 事件报错（模型不可用 / 区域受限 / 网关请求失败）时，这次调用实际
       // 什么都没产出，而此刻客户端还没收到任何字节 —— 丢弃重试是安全的。
       //
