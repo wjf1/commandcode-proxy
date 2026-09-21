@@ -14,7 +14,10 @@
   契约随之调整：`onRetry` 现在**返回**下一次要用的 apiKey（返回 undefined = 沿用当前 key）。
   **行为变更**：撞额度时会在重试途中切到另一个账号，该请求的上游归属随之改变。
 - ⚠️ **`upstream.timeoutMs` 从此真正生效**。此前它被加载、写入默认值、并在 `/api/status` 与仪表盘展示，但 `src/` 里 0 个消费点——唯一起作用的是 `idleTimeoutMs`，而它每收到一个字节就重置，因此一个持续 trickle 的上游可以无限期挂住连接。新增跨"等响应头 + 读流"两阶段的挂钟上限，超时归类为既有的 `REQUEST_TIMEOUT`。
-  **行为变更 / 需要关注**：任何长度超过 `timeoutMs`（默认 600s）的请求现在会被切断。此前它能活下来纯粹是因为这个配置不执行。长推理会话请确认 600s 是否合适，必要时在 `config.json` 调大。
+  **默认值同时从 600s 提高到 1800s**：这个配置以前从不执行，所以任何"看起来正常"的长请求都从没被它约束过；编码 agent 带大上下文的单次请求合理可能超过 10 分钟，直接按 600s 执行会误杀。注意 `0` 不等于"不限制"（读取处是 `||`，0 会回落到默认值）。上限按**尝试**计，配默认 `maxRetries: 2` 时最坏耗时约为 3 × 上限。
+- **流错误不再变成进程级未捕获异常**（接上一条，实施后才暴露）。给 `sendToCC` 加上"用可辨识错误掐断流"之后，适配层单测全绿，但端到端跑起来代理日志出现 `[CRITICAL] Uncaught Exception: Upstream exceeded …`：`createInterface({ input })` 会把 input 流的 error 转成 **readline 自己的** `'error'` 事件，而两条路由只挂了 `upstreamStream.on('error')`，无人监听的 `'error'` 直接抛成未捕获异常——一次超时被升级成进程事故。现由同一个具名处理函数同时挂到两个源上，并用 `streamErrorHandled` 保证只处理一次。
+  同时修正 `chat.ts` 落库错误码：流中途失败过去一律记 `PROVIDER_PROTOCOL_ERROR`，现按 `toProxyError` 的真实分类记录（与 `messages.ts` 一致），超时在用量历史里可辨。
+  **端到端实测**（1.5s 上限 / 8s 空闲、持续 trickle 的 mock 上游）：1554ms 终止、SSE 内含超时文本、用量历史落 `status:FAILED / errorCode:REQUEST_TIMEOUT`、无未捕获异常。
 - **`npm test` 不再对推理路由零覆盖地报全绿**。本仓库所有集成用例都 `spawn` 编译产物，缺 `dist/` 时被 `describe.skipIf` 静默跳过（实测：未构建时 244 passed / 42 skipped 且退出码 0）。现在 `pretest` 自动构建，并在 `beforeAll` 首行加了明确报错。注意 vitest 在一个文件没有任何可运行用例时**不会执行文件级 beforeAll**，所以 `tests/integration.test.ts` 里那条不带 skipIf 的前置用例是这套防护的触发器，删除它会退回老行为。
 - **「发现新版本」提示恢复工作**：改为读 `/tags` 并按 semver 取最大。此前读的是 `releases/latest`，而本仓库只打 tag 不建 Release 对象——实测 `releases/latest` 停在 v4.12.0 而 tag 已到 v4.17.0，于是自 v4.13.0 起该提示永远不会触发。（另一条路线是恢复创建 GitHub Release，未在本次改动内。）
 - **`/api/auth/manual-login` 不再明文回传上游 apiKey**，改为与 `/api/accounts` 一致的 `apiKeyMasked`。`loginNewAccount` 的返回类型仍带完整凭据（内部调用方需要），收口在 HTTP 边界。
@@ -25,7 +28,8 @@
 - `pkg.assets` 移除 `models.json`：它是运行时生成的缓存且已在 `.gitignore` 里，全新克隆上打包会静默缺该资产。
 
 ### 测试
-- 新增 5 个文件共 15 项，全部先观察到失败再实现：`onretry-account-switch`（断言上游实际收到的 `Authorization` 头变化，而非"回调被调用过"）、`upstream-total-timeout`（把 `idleTimeoutMs` 刻意设得大于总时限，使超时只能归因于挂钟上限）、`admin-key-mask`、`spa-badge-escape`（取出 index.html 里真实的 `badge`/`esc`/`BADGE_TONES` 源码执行）、`update-check-tags`。
+- 新增 6 个文件共 19 项（288 → 307），全部先观察到失败再实现：`onretry-account-switch`（断言上游实际收到的 `Authorization` 头变化，而非"回调被调用过"）、`upstream-total-timeout`（把 `idleTimeoutMs` 刻意设得大于总时限，使超时只能归因于挂钟上限）、`admin-key-mask`、`spa-badge-escape`（取出 index.html 里真实的 `badge`/`esc`/`BADGE_TONES` 源码执行）、`update-check-tags`、`route-stream-error`（路由级：真监听端口走 `/v1/chat/completions`，断言超时对客户端可见且不产生未捕获异常）。
+- `route-stream-error` 做过变异校验：临时删掉 `chat.ts` 里那行 `rl.on('error', …)`，两条用例立刻失败（一条测到 16s 未被上限终止，一条抓到 1 个未捕获异常），确认这道防线是有牙的而不是常绿摆设。另注：该用例必须真监听端口——`app.inject` 没有真实 socket，路由在 `req.raw.setTimeout(0)` 处就会 500，测不到想测的路径。
 - 全量 **303 项通过**（原 288 + 15），`tsc --noEmit`、`eslint .` 无错误；语句覆盖率 48.36% → 57.8%。
 
 ### 已知问题（本次排查中发现，未修）

@@ -38,7 +38,10 @@ const DEFAULTS = {
   apiBase: 'https://api.commandcode.ai',
   ccVersion: '1.27.1',
   rotationMode: 'manual' as const,
-  upstreamTimeoutMs: 600_000,
+  // 挂钟总时限。4.18.0 起该配置才真正被执行（此前 0 个消费点），因此默认值必须明显
+  // 高于真实长尾：编码 agent 的单次请求带上大上下文可以合理跑过 10 分钟。
+  // 注意 0 不等于"不限制"——下面用的是 `||`，0 会回落到本默认值。
+  upstreamTimeoutMs: 1_800_000,
   idleTimeoutMs: 120_000,
   maxRetries: 2,
 };
