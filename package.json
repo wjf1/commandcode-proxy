@@ -47,8 +47,8 @@
   "license": "MIT",
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@types/node": "^26.5.1",
-    "@vitest/coverage-v8": "^5.0.0",
+    "@types/node": "^26.6.1",
+    "@vitest/coverage-v8": "^5.0.1",
     "esbuild": "^0.28.2",
     "eslint": "^10.10.0",
     "pkg": "^5.8.1",
