@@ -276,7 +276,10 @@ function rotateUsageFile(): void {
     const raw = fs.readFileSync(USAGE_FILE_PATH, 'utf-8');
     const nl = raw.indexOf('\n', Math.floor(raw.length / 2));
     const kept = nl >= 0 ? raw.slice(nl + 1) : raw;
-    const tmp = `${USAGE_FILE_PATH}.tmp`;
+    // 临时文件名带 pid：固定名在两个实例共用同一数据目录时会互相踩，且 Windows 上
+    // rename 覆盖被对方打开的文件会 EPERM（仓库自带的 usage-history-io.mjs 早就
+    // 用了 pid 唯一 + 哨兵的写法，生产代码这里却漏了）。
+    const tmp = `${USAGE_FILE_PATH}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, kept, 'utf-8');
     fs.renameSync(tmp, USAGE_FILE_PATH);
     logger.info(`[USAGE] Rotated usage history: ${(size / 1048576).toFixed(1)}MB -> ${(kept.length / 1048576).toFixed(1)}MB`);
@@ -579,13 +582,31 @@ interface SessionBucket {
  * 此前用服务器本地时区，跨时区调用方会看到日期错位（例如 UTC+8 用户在
  * 本地 00:30 的请求会被归到前一天）。记录里带了客户端时区就按其计算。
  */
+/**
+ * 按 timeZone 缓存 Intl.DateTimeFormat。
+ *
+ * 构造一个 formatter 非常贵（实测 3 万条用量、每条构造一次 = 1.63s；同一份数据
+ * 不带时区时整轮聚合只要 96ms）。而构造参数只随时区变化，没有理由逐条重建。
+ * 客户端带 `x-client-timezone` 时这条路径才会走到 —— 也就是说仪表盘 30s 轮询会
+ * 把事件循环阻塞近 2 秒，正在流式输出的响应全跟着卡，并可能诱发上游空闲看门狗。
+ *
+ * 只缓存构造成功的：非法时区在 Intl 那层抛 RangeError，不进表，所以表的大小
+ * 受 IANA 时区总数约束，不会被伪造的头部值撑爆。
+ */
+const dayFormatters = new Map<string, Intl.DateTimeFormat>();
+
 function dayKey(ts: string, timeZone?: string | null): string {
   const d = new Date(ts);
   if (Number.isNaN(d.getTime())) return String(ts).slice(0, 10);
   if (timeZone) {
     try {
       // en-CA 的 toLocaleDateString 输出恰为 YYYY-MM-DD
-      return new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+      let fmt = dayFormatters.get(timeZone);
+      if (!fmt) {
+        fmt = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' });
+        dayFormatters.set(timeZone, fmt);
+      }
+      return fmt.format(d);
     } catch { /* 时区非法则回落到服务器本地 */ }
   }
   const y = d.getFullYear();

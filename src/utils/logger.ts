@@ -22,7 +22,12 @@ export const LOG_FILE_PATH = process.env.COMMANDCODE_LOG_PATH
 const LOG_FILE_MAX_BYTES = 5 * 1024 * 1024;
 
 function timestamp(): string {
-  return new Date().toLocaleTimeString('en-GB', { hour12: false });
+  // 手写而不是 toLocaleTimeString('en-GB', { hour12: false })：后者每次调用都要
+  // 重新构造一个 Intl formatter（实测 3 万次 ≈ 1.6s），而日志是每请求多条的热点。
+  // 顺带消掉 ICU 在 hour12:false 下把午夜渲染成 "24:00:00" 的版本差异。
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
 /**

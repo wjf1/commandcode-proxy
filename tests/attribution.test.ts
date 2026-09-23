@@ -210,6 +210,33 @@ describe('buildRequestContext — 汇总', () => {
     const ctx = buildRequestContext({}, { system: [{ type: 'text', text: REAL_SYSTEM }] });
     expect(ctx.projectSource).toBe('label');
   });
+
+  // OpenAI Chat 把系统提示放在 messages 里，而 systemTextOf 此前只读 body.system，
+  // 于是所有 /v1/chat/completions 记录的 project 都是空的 —— 面板呈现成"未识别"，
+  // 看着像推断规则失败，实际是输入压根没读到。
+  it('OpenAI Chat 形态的 system 消息同样参与推断', () => {
+    const byRole = buildRequestContext({}, {
+      model: 'gpt',
+      messages: [{ role: 'system', content: REAL_SYSTEM }, { role: 'user', content: 'hi' }],
+    });
+    expect(byRole.projectSource).toBe('label');
+    expect(byRole.project).toBe(`c:${BS}Users${BS}admin${BS}.zcode${BS}workspace${BS}default`);
+
+    // OpenAI 新形态把系统提示改名成 developer。
+    const byDeveloper = buildRequestContext({}, { messages: [{ role: 'developer', content: REAL_SYSTEM }] });
+    expect(byDeveloper.projectSource).toBe('label');
+
+    // content 为多块数组时也要取到。
+    const byParts = buildRequestContext({}, {
+      messages: [{ role: 'system', content: [{ type: 'text', text: REAL_SYSTEM }] }],
+    });
+    expect(byParts.projectSource).toBe('label');
+
+    // 反向护栏：普通 user/assistant 消息不能被当成系统提示。
+    const userOnly = buildRequestContext({}, { messages: [{ role: 'user', content: REAL_SYSTEM }] });
+    expect(userOnly.project).toBeNull();
+    expect(userOnly.projectSource).toBeNull();
+  });
 });
 
 describe('projectDisplayName', () => {
@@ -341,5 +368,34 @@ describe('getUsageStats — byProject / bySession 聚合', () => {
     const s = store.getUsageStats();
     const dates = s.byDay.map(d => d.date).sort();
     expect(dates).toEqual(['2026-09-11', '2026-09-12']);
+  });
+
+  it('带客户端时区的聚合不被逐条构造的 Intl formatter 放大', () => {
+    // 实测：3 万条记录，不带时区整轮聚合 ~100ms，带时区曾要 ~1776ms ——
+    // 因为 dayKey 每条都 new 一个 Intl.DateTimeFormat，而构造成本极高。
+    // 客户端只要发了 x-client-timezone（ZCode 就会发），仪表盘 30s 轮询就会
+    // 把事件循环阻塞近 2 秒，连带卡住正在流式输出的响应。
+    //
+    // 用相对倍率而不是绝对毫秒做门限，免得在慢机器上变成假失败。
+    const N = 30_000;
+    // rec() 本身已经返回 JSON 字符串，不能再 stringify 一次。
+    const plain = Array.from({ length: N }, () => rec({})).join('\n');
+    const withTz = Array.from({ length: N }, () => rec({ timezone: 'Asia/Shanghai' })).join('\n');
+
+    writeFileSync(process.env.USAGE_HISTORY_PATH!, plain + '\n', 'utf-8');
+    const t0 = Date.now();
+    const sPlain = store.getUsageStats();
+    const plainMs = Math.max(Date.now() - t0, 1);
+    // 两轮都必须真的解析到记录，否则这组计时对比是空的。
+    expect(sPlain.byDay.length).toBeGreaterThan(0);
+
+    writeFileSync(process.env.USAGE_HISTORY_PATH!, withTz + '\n', 'utf-8');
+    const t1 = Date.now();
+    const s = store.getUsageStats();
+    const tzMs = Date.now() - t1;
+
+    // 结果正确性不受缓存 formatter 影响
+    expect(s.byDay.length).toBeGreaterThan(0);
+    expect(tzMs, `带时区 ${tzMs}ms vs 不带时区 ${plainMs}ms`).toBeLessThan(plainMs * 4 + 150);
   });
 });
