@@ -34,40 +34,40 @@
 
 <header class="border-b border-slate-800 bg-slate-900/80 backdrop-blur px-6 py-4 flex items-center justify-between sticky top-0 z-50">
   <div class="flex items-center space-x-3">
-    <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-600 to-violet-500 flex items-center justify-center text-white shadow-lg shadow-indigo-500/20"><i class="fa-solid fa-bolt text-lg"></i></div>
+    <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-600 to-violet-500 flex items-center justify-center text-white shadow-lg shadow-indigo-500/20"><i aria-hidden="true" class="fa-solid fa-bolt text-lg"></i></div>
     <div>
-      <h1 class="font-bold text-lg leading-tight text-white flex items-center gap-2">CommandCode 代理 <span class="text-xs font-semibold px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">v4</span><a id="updateBadge" href="https://github.com/wjf1/commandcode-proxy/releases" target="_blank" rel="noopener" class="hidden text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 hover:bg-amber-500/20"><i class="fa-solid fa-arrow-up-right-from-square text-[9px]"></i> 新版本 <span id="updateVer"></span></a></h1>
+      <h1 class="font-bold text-lg leading-tight text-white flex items-center gap-2">CommandCode 代理 <span class="text-xs font-semibold px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">v4</span><a id="updateBadge" href="https://github.com/wjf1/commandcode-proxy/releases" target="_blank" rel="noopener" class="hidden text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 hover:bg-amber-500/20"><i aria-hidden="true" class="fa-solid fa-arrow-up-right-from-square text-[9px]"></i> 新版本 <span id="updateVer"></span></a></h1>
       <p class="text-xs text-slate-400">OpenAI Chat 与 Anthropic Messages 兼容网关</p>
     </div>
   </div>
   <div class="flex items-center space-x-4">
     <div class="flex items-center space-x-2 px-3 py-1.5 rounded-full bg-slate-800 border border-slate-700 text-xs">
-      <span id="statusDot" class="w-2.5 h-2.5 rounded-full bg-slate-500"></span>
-      <span id="statusText" class="font-medium text-slate-300">检测中...</span>
+      <span id="statusDot" aria-hidden="true" class="w-2.5 h-2.5 rounded-full bg-slate-500"></span>
+      <span id="statusText" role="status" aria-live="polite" class="font-medium text-slate-300">检测中...</span>
     </div>
-    <button onclick="toggleEngine()" class="px-4 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white transition shadow-md shadow-emerald-600/20"><i class="fa-solid fa-power-off"></i> <span id="toggleBtnText">切换</span></button>
+    <button onclick="toggleEngine()" class="px-4 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white transition shadow-md shadow-emerald-600/20"><i aria-hidden="true" class="fa-solid fa-power-off"></i> <span id="toggleBtnText">切换</span></button>
   </div>
 </header>
 
-<nav class="border-b border-slate-800 bg-slate-900/40 px-6 flex space-x-8 text-sm text-slate-400">
-  <button onclick="switchTab('overview')" id="tab-overview" class="tab-btn active py-3 flex items-center gap-2"><i class="fa-solid fa-gauge-high"></i> 概览</button>
-  <button onclick="switchTab('accounts')" id="tab-accounts" class="tab-btn py-3 flex items-center gap-2"><i class="fa-solid fa-users-gear"></i> 账号与鉴权</button>
-  <button onclick="switchTab('usage')" id="tab-usage" class="tab-btn py-3 flex items-center gap-2"><i class="fa-solid fa-chart-pie"></i> 用量与额度</button>
-  <button onclick="switchTab('models')" id="tab-models" class="tab-btn py-3 flex items-center gap-2"><i class="fa-solid fa-cubes"></i> 模型</button>
-  <button onclick="switchTab('logs')" id="tab-logs" class="tab-btn py-3 flex items-center gap-2"><i class="fa-solid fa-terminal"></i> 实时日志</button>
+<nav class="border-b border-slate-800 bg-slate-900/40 px-6 flex space-x-8 text-sm text-slate-400" role="tablist" aria-label="面板分区">
+  <button onclick="switchTab('overview')" id="tab-overview" role="tab" aria-selected="true" aria-controls="content-overview" class="tab-btn active py-3 flex items-center gap-2"><i aria-hidden="true" class="fa-solid fa-gauge-high"></i> 概览</button>
+  <button onclick="switchTab('accounts')" id="tab-accounts" role="tab" aria-selected="false" aria-controls="content-accounts" tabindex="-1" class="tab-btn py-3 flex items-center gap-2"><i aria-hidden="true" class="fa-solid fa-users-gear"></i> 账号与鉴权</button>
+  <button onclick="switchTab('usage')" id="tab-usage" role="tab" aria-selected="false" aria-controls="content-usage" tabindex="-1" class="tab-btn py-3 flex items-center gap-2"><i aria-hidden="true" class="fa-solid fa-chart-pie"></i> 用量与额度</button>
+  <button onclick="switchTab('models')" id="tab-models" role="tab" aria-selected="false" aria-controls="content-models" tabindex="-1" class="tab-btn py-3 flex items-center gap-2"><i aria-hidden="true" class="fa-solid fa-cubes"></i> 模型</button>
+  <button onclick="switchTab('logs')" id="tab-logs" role="tab" aria-selected="false" aria-controls="content-logs" tabindex="-1" class="tab-btn py-3 flex items-center gap-2"><i aria-hidden="true" class="fa-solid fa-terminal"></i> 实时日志</button>
 </nav>
 
 <main class="flex-1 p-6 max-w-7xl w-full mx-auto space-y-6">
 
-<section id="content-overview" class="space-y-6">
+<section id="content-overview" role="tabpanel" tabindex="0" aria-labelledby="tab-overview" class="space-y-6">
   <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
     <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl"><p class="text-xs text-slate-400 font-medium">网关服务</p><h3 id="statPort" class="text-xl font-bold text-white mt-1">Port :9090</h3><p id="statUptime" class="text-xs text-indigo-400 mt-2">运行时间：0s</p></div>
     <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl"><p class="text-xs text-slate-400 font-medium">当前账号</p><h3 id="statAccount" class="text-xl font-bold text-white mt-1">None</h3><p id="statAccountsCount" class="text-xs text-slate-400 mt-2">0 个账号已注册</p></div>
     <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl"><p class="text-xs text-slate-400 font-medium">安全</p><h3 id="statBind" class="text-xl font-bold text-emerald-400 mt-1">127.0.0.1</h3><p id="statAuth" class="text-xs text-slate-400 mt-2">API 鉴权：关闭</p></div>
-    <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl"><p class="text-xs text-slate-400 font-medium">可用模型</p><h3 id="statModels" class="text-xl font-bold text-white mt-1">0</h3><p class="text-xs text-emerald-400 mt-2"><i class="fa-solid fa-check"></i> 可用于对话</p></div>
+    <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl"><p class="text-xs text-slate-400 font-medium">可用模型</p><h3 id="statModels" class="text-xl font-bold text-white mt-1">0</h3><p class="text-xs text-emerald-400 mt-2"><i aria-hidden="true" class="fa-solid fa-check"></i> 可用于对话</p></div>
   </div>
   <div class="bg-slate-900 border border-slate-800 rounded-xl p-6">
-    <h2 class="text-md font-semibold text-white mb-4 flex items-center gap-2"><i class="fa-solid fa-link text-indigo-400"></i> 已启用的 API 接口</h2>
+    <h2 class="text-md font-semibold text-white mb-4 flex items-center gap-2"><i aria-hidden="true" class="fa-solid fa-link text-indigo-400"></i> 已启用的 API 接口</h2>
     <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
       <div class="p-4 bg-slate-950/60 border border-slate-800 rounded-lg"><span class="text-xs font-bold px-2 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20">POST</span><span class="font-mono text-sm text-slate-200 ml-2">/v1/chat/completions</span><p class="text-xs text-slate-400 mt-2">OpenAI 对话补全 — 工具、视觉、推理</p></div>
       <div class="p-4 bg-slate-950/60 border border-slate-800 rounded-lg"><span class="text-xs font-bold px-2 py-0.5 rounded bg-orange-500/10 text-orange-400 border border-orange-500/20">POST</span><span class="font-mono text-sm text-slate-200 ml-2">/v1/messages</span><p class="text-xs text-slate-400 mt-2">Anthropic Messages — 工具调用、思考块</p></div>
@@ -76,15 +76,15 @@
   </div>
 </section>
 
-<section id="content-accounts" class="space-y-6 hidden">
+<section id="content-accounts" role="tabpanel" tabindex="0" aria-labelledby="tab-accounts" class="space-y-6 hidden">
   <div class="flex items-center justify-between">
     <div>
       <h2 class="text-lg font-bold text-white">多账号管理</h2>
       <p class="text-xs text-slate-400">使用 Command Code CLI 浏览器授权登录，或直接粘贴 API Key</p>
     </div>
     <div class="flex space-x-3">
-      <button onclick="startBrowserLogin()" id="browserAuthBtn" class="px-4 py-2 bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white rounded-lg text-xs font-semibold flex items-center gap-2 shadow-lg shadow-indigo-600/20"><i class="fa-solid fa-globe"></i> 浏览器登录（OAuth）</button>
-      <button onclick="showLoginModal()" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold flex items-center gap-2 border border-slate-700"><i class="fa-solid fa-key"></i> 手动输入 Key</button>
+      <button onclick="startBrowserLogin()" id="browserAuthBtn" class="px-4 py-2 bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white rounded-lg text-xs font-semibold flex items-center gap-2 shadow-lg shadow-indigo-600/20"><i aria-hidden="true" class="fa-solid fa-globe"></i> 浏览器登录（OAuth）</button>
+      <button onclick="showLoginModal()" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold flex items-center gap-2 border border-slate-700"><i aria-hidden="true" class="fa-solid fa-key"></i> 手动输入 Key</button>
     </div>
   </div>
   <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl flex items-center justify-between">
@@ -92,7 +92,7 @@
       <h3 class="text-sm font-semibold text-white">账号轮换策略</h3>
       <p class="text-xs text-slate-400">自动额度模式每 30 分钟检查 5 小时额度窗口，使用率 ≥90% 时自动切换</p>
     </div>
-    <select id="rotationSelect" onchange="changeRotationMode(this.value)" class="bg-slate-950 border border-slate-700 text-slate-200 text-xs rounded-lg px-3 py-2 outline-none font-semibold">
+    <select id="rotationSelect" aria-label="密钥轮换模式" onchange="changeRotationMode(this.value)" class="bg-slate-950 border border-slate-700 text-slate-200 text-xs rounded-lg px-3 py-2 outline-none font-semibold">
       <option value="manual">手动选择</option>
       <option value="auto-quota">自动额度保护（30 分钟检查）</option>
     </select>
@@ -100,13 +100,13 @@
   <div id="accountsGrid" class="grid grid-cols-1 md:grid-cols-2 gap-4"></div>
 </section>
 
-<section id="content-usage" class="space-y-6 hidden">
+<section id="content-usage" role="tabpanel" tabindex="0" aria-labelledby="tab-usage" class="space-y-6 hidden">
   <div class="flex items-center justify-between">
     <div>
       <h2 class="text-lg font-bold text-white">实时用量与额度</h2>
       <p class="text-xs text-slate-400">各账号的实时余额与额度窗口</p>
     </div>
-    <select id="usageAccountSelect" onchange="renderUsageForAccount(this.value)" class="bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded-lg px-3 py-2 outline-none font-semibold"></select>
+    <select id="usageAccountSelect" aria-label="选择要查看额度的账号" onchange="renderUsageForAccount(this.value)" class="bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded-lg px-3 py-2 outline-none font-semibold"></select>
   </div>
   <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
     <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl"><p class="text-xs text-slate-400 font-medium">月度额度</p><h3 id="creditMonthly" class="text-2xl font-extrabold text-emerald-400 mt-1">$0.00</h3></div>
@@ -123,7 +123,7 @@
   <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
     <div class="win-card c-indigo">
       <div class="win-head">
-        <div class="win-title"><span class="win-ico bg-indigo-500/10 text-indigo-400 border-indigo-500/20"><i class="fa-solid fa-clock"></i></span><h3>5 小时窗口</h3></div>
+        <div class="win-title"><span class="win-ico bg-indigo-500/10 text-indigo-400 border-indigo-500/20"><i aria-hidden="true" class="fa-solid fa-clock"></i></span><h3>5 小时窗口</h3></div>
         <span id="window5hText" class="win-val">$0.00 / $0.00</span>
       </div>
       <div class="meter"><span id="window5hBar" style="width:0%;background:#6366f1"></span></div>
@@ -134,7 +134,7 @@
     </div>
     <div class="win-card c-violet">
       <div class="win-head">
-        <div class="win-title"><span class="win-ico bg-violet-500/10 text-violet-400 border-violet-500/20"><i class="fa-solid fa-calendar-week"></i></span><h3>每周窗口</h3></div>
+        <div class="win-title"><span class="win-ico bg-violet-500/10 text-violet-400 border-violet-500/20"><i aria-hidden="true" class="fa-solid fa-calendar-week"></i></span><h3>每周窗口</h3></div>
         <span id="windowWeeklyText" class="win-val">$0.00 / $0.00</span>
       </div>
       <div class="meter"><span id="windowWeeklyBar" style="width:0%;background:#8b5cf6"></span></div>
@@ -144,7 +144,7 @@
     </div>
     <div class="win-card c-emerald">
       <div class="win-head">
-        <div class="win-title"><span class="win-ico bg-emerald-500/10 text-emerald-400 border-emerald-500/20"><i class="fa-solid fa-calendar-days"></i></span><h3>计费周期 <span id="cyclePlan" class="text-[11px] font-normal text-slate-400"></span></h3></div>
+        <div class="win-title"><span class="win-ico bg-emerald-500/10 text-emerald-400 border-emerald-500/20"><i aria-hidden="true" class="fa-solid fa-calendar-days"></i></span><h3>计费周期 <span id="cyclePlan" class="text-[11px] font-normal text-slate-400"></span></h3></div>
         <span class="win-val"><b id="cycleDays" class="win-big">--</b><span class="text-slate-400">天后重置</span></span>
       </div>
       <div class="meter"><span id="cycleBar" style="width:0%;background:#10b981"></span></div>
@@ -158,10 +158,10 @@
   <div class="bg-slate-900 border border-slate-800 rounded-xl p-6">
     <div class="flex items-center justify-between">
       <div>
-        <h2 class="text-md font-semibold text-white flex items-center gap-2"><i class="fa-solid fa-list-check text-indigo-400"></i> 会话明细</h2>
+        <h2 class="text-md font-semibold text-white flex items-center gap-2"><i aria-hidden="true" class="fa-solid fa-list-check text-indigo-400"></i> 会话明细</h2>
         <p class="text-xs text-slate-400 mt-0.5">经过本网关的每次请求：token、耗时、成本、模型、状态（持久化到本地）</p>
       </div>
-      <button onclick="clearUsageHistory()" class="px-3 py-1.5 bg-slate-800 hover:bg-rose-900/60 text-slate-300 hover:text-rose-200 text-xs rounded-lg flex items-center gap-1.5 border border-slate-700 transition"><i class="fa-solid fa-trash-can"></i> 清空历史</button>
+      <button onclick="clearUsageHistory()" class="px-3 py-1.5 bg-slate-800 hover:bg-rose-900/60 text-slate-300 hover:text-rose-200 text-xs rounded-lg flex items-center gap-1.5 border border-slate-700 transition"><i aria-hidden="true" class="fa-solid fa-trash-can"></i> 清空历史</button>
     </div>
 
     <div id="billingWindow" class="mt-4 hidden"></div>
@@ -170,36 +170,36 @@
       <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg"><p class="text-[11px] text-slate-400 font-medium">今日 Token</p><h3 id="usageTodayToken" class="text-lg font-bold text-white mt-1">--</h3><p id="usageTodayRuns" class="text-[11px] text-slate-400 mt-1">-- 次请求</p></div>
       <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg"><p class="text-[11px] text-slate-400 font-medium">本周成本</p><h3 id="usageWeekCost" class="text-lg font-bold text-emerald-400 mt-1">--</h3><p id="usageWeekToken" class="text-[11px] text-slate-400 mt-1">--</p></div>
       <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg"><p class="text-[11px] text-slate-400 font-medium">本月成本</p><h3 id="usageMonthCost" class="text-lg font-bold text-emerald-400 mt-1">--</h3><p id="usageMonthToken" class="text-[11px] text-slate-400 mt-1">--</p></div>
-      <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg" title="缓存命中的输入按缓存读单价计费（约为输入价的 1/50），此处为相比全价输入省下的金额"><p class="text-[11px] text-slate-400 font-medium">缓存节省 <i class="fa-solid fa-circle-info text-slate-600"></i></p><h3 id="usageSavings" class="text-lg font-bold text-sky-400 mt-1">--</h3><p id="usageSavingsNote" class="text-[11px] text-slate-400 mt-1">--</p></div>
-      <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg"><p class="text-[11px] text-slate-400 font-medium">累计</p><h3 id="usageTotalToken" class="text-lg font-bold text-white mt-1">--</h3><p id="usageTotalRuns" class="text-[11px] text-slate-400 mt-1">-- 次请求</p><p id="usageCacheHit" class="text-[11px] text-sky-400 mt-1">--</p><p id="usagePricingNote" class="text-[11px] text-amber-400 mt-1 hidden"><i class="fa-solid fa-triangle-exclamation"></i> 未同步定价</p></div>
+      <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg" title="缓存命中的输入按缓存读单价计费（约为输入价的 1/50），此处为相比全价输入省下的金额"><p class="text-[11px] text-slate-400 font-medium">缓存节省 <i aria-hidden="true" class="fa-solid fa-circle-info text-slate-600"></i></p><h3 id="usageSavings" class="text-lg font-bold text-sky-400 mt-1">--</h3><p id="usageSavingsNote" class="text-[11px] text-slate-400 mt-1">--</p></div>
+      <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg"><p class="text-[11px] text-slate-400 font-medium">累计</p><h3 id="usageTotalToken" class="text-lg font-bold text-white mt-1">--</h3><p id="usageTotalRuns" class="text-[11px] text-slate-400 mt-1">-- 次请求</p><p id="usageCacheHit" class="text-[11px] text-sky-400 mt-1">--</p><p id="usagePricingNote" class="text-[11px] text-amber-400 mt-1 hidden"><i aria-hidden="true" class="fa-solid fa-triangle-exclamation"></i> 未同步定价</p></div>
     </div>
 
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
       <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg">
-        <h3 class="font-bold text-xs text-white mb-3"><i class="fa-solid fa-chart-line text-indigo-400"></i> 每日 Token 趋势</h3>
+        <h3 class="font-bold text-xs text-white mb-3"><i aria-hidden="true" class="fa-solid fa-chart-line text-indigo-400"></i> 每日 Token 趋势</h3>
         <div class="h-56"><canvas id="usageTrendChart"></canvas></div>
       </div>
       <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg">
-        <h3 class="font-bold text-xs text-white mb-3"><i class="fa-solid fa-chart-pie text-violet-400"></i> 模型分布</h3>
+        <h3 class="font-bold text-xs text-white mb-3"><i aria-hidden="true" class="fa-solid fa-chart-pie text-violet-400"></i> 模型分布</h3>
         <div class="h-56"><canvas id="usageModelChart"></canvas></div>
       </div>
     </div>
 
     <div class="mt-4 bg-slate-950/60 border border-slate-800 p-4 rounded-lg">
       <div class="flex items-center justify-between flex-wrap gap-2">
-        <h3 class="font-bold text-xs text-white"><i class="fa-solid fa-gauge-high text-cyan-400"></i> 端到端性能</h3>
+        <h3 class="font-bold text-xs text-white"><i aria-hidden="true" class="fa-solid fa-gauge-high text-cyan-400"></i> 端到端性能</h3>
         <span class="text-[11px] text-slate-500" title="耗时覆盖整个请求生命周期（上游排队、重试、网络往返），反映体感等待而非模型生成速度；输出不足 32 token 的响应不进吞吐统计">口径：端到端，非模型生成速度</span>
       </div>
       <div class="overflow-x-auto mt-3">
         <table class="w-full text-xs text-left">
           <thead class="bg-slate-950/60 text-slate-400">
             <tr>
-              <th class="px-2 py-2 font-medium">模型</th>
-              <th class="px-2 py-2 font-medium text-right" title="已完成的请求数；带筛选图标的行表示其输出都过短，不参与吞吐统计">样本</th>
-              <th class="px-2 py-2 font-medium text-right">吞吐 P50</th>
-              <th class="px-2 py-2 font-medium text-right">吞吐 P95</th>
-              <th class="px-2 py-2 font-medium text-right">延迟 P50</th>
-              <th class="px-2 py-2 font-medium text-right">延迟 P95</th>
+              <th scope="col" class="px-2 py-2 font-medium">模型</th>
+              <th scope="col" class="px-2 py-2 font-medium text-right" title="已完成的请求数；带筛选图标的行表示其输出都过短，不参与吞吐统计">样本</th>
+              <th scope="col" class="px-2 py-2 font-medium text-right">吞吐 P50</th>
+              <th scope="col" class="px-2 py-2 font-medium text-right">吞吐 P95</th>
+              <th scope="col" class="px-2 py-2 font-medium text-right">延迟 P50</th>
+              <th scope="col" class="px-2 py-2 font-medium text-right">延迟 P95</th>
             </tr>
           </thead>
           <tbody id="perfTableBody" class="divide-y divide-slate-800/60"></tbody>
@@ -209,24 +209,24 @@
 
     <div class="mt-4 bg-slate-950/40 border border-slate-800 rounded-lg overflow-hidden">
       <div class="flex items-center justify-between px-4 py-2.5 border-b border-slate-800">
-        <h3 class="font-bold text-xs text-white"><i class="fa-solid fa-table-list text-emerald-400"></i> 请求明细</h3>
-        <button onclick="exportUsageCsv()" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] rounded-lg border border-slate-700 flex items-center gap-1.5"><i class="fa-solid fa-file-csv"></i> 导出 CSV</button>
+        <h3 class="font-bold text-xs text-white"><i aria-hidden="true" class="fa-solid fa-table-list text-emerald-400"></i> 请求明细</h3>
+        <button onclick="exportUsageCsv()" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] rounded-lg border border-slate-700 flex items-center gap-1.5"><i aria-hidden="true" class="fa-solid fa-file-csv"></i> 导出 CSV</button>
         <span id="usageRecentCount" class="text-[11px] text-slate-400"></span>
       </div>
       <div class="overflow-x-auto max-h-[360px] overflow-y-auto">
         <table class="w-full text-xs text-left">
           <thead class="bg-slate-950/60 text-slate-400 sticky top-0 z-10">
             <tr>
-              <th class="px-3 py-2 font-medium">时间</th>
-              <th class="px-3 py-2 font-medium">模型</th>
-              <th class="px-3 py-2 font-medium text-right">输入</th>
-              <th class="px-3 py-2 font-medium text-right">缓存命中</th>
-              <th class="px-3 py-2 font-medium text-right">输出</th>
-              <th class="px-3 py-2 font-medium text-right" title="输出 token / 端到端耗时（含上游排队、重试与网络），不等于模型生成速度">吞吐 <i class="fa-solid fa-circle-info text-slate-600"></i></th>
-              <th class="px-3 py-2 font-medium text-right">耗时</th>
-              <th class="px-3 py-2 font-medium text-right">成本</th>
-              <th class="px-3 py-2 font-medium">状态</th>
-              <th class="px-3 py-2 font-medium">模式</th>
+              <th scope="col" class="px-3 py-2 font-medium">时间</th>
+              <th scope="col" class="px-3 py-2 font-medium">模型</th>
+              <th scope="col" class="px-3 py-2 font-medium text-right">输入</th>
+              <th scope="col" class="px-3 py-2 font-medium text-right">缓存命中</th>
+              <th scope="col" class="px-3 py-2 font-medium text-right">输出</th>
+              <th scope="col" class="px-3 py-2 font-medium text-right" title="输出 token / 端到端耗时（含上游排队、重试与网络），不等于模型生成速度">吞吐 <i aria-hidden="true" class="fa-solid fa-circle-info text-slate-600"></i></th>
+              <th scope="col" class="px-3 py-2 font-medium text-right">耗时</th>
+              <th scope="col" class="px-3 py-2 font-medium text-right">成本</th>
+              <th scope="col" class="px-3 py-2 font-medium">状态</th>
+              <th scope="col" class="px-3 py-2 font-medium">模式</th>
             </tr>
           </thead>
           <tbody id="usageTableBody" class="divide-y divide-slate-800/60"></tbody>
@@ -240,7 +240,7 @@
       <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg">
         <div class="flex items-center justify-between flex-wrap gap-2">
           <h3 class="font-bold text-xs text-white flex items-center gap-2">
-            <i class="fa-solid fa-folder-tree text-amber-400"></i> 项目分布
+            <i aria-hidden="true" class="fa-solid fa-folder-tree text-amber-400"></i> 项目分布
             <span class="px-1.5 py-0.5 rounded text-[10px] bg-amber-500/10 text-amber-400 border border-amber-500/20" title="项目无权威字段来源，由 system prompt 文本推断；上游不提供该维度">推断</span>
           </h3>
           <p id="projectCoverage" class="text-[11px] text-slate-500">--</p>
@@ -250,10 +250,10 @@
           <table class="w-full text-xs text-left">
             <thead class="bg-slate-950/60 text-slate-400 sticky top-0 z-10">
               <tr>
-                <th class="px-2 py-2 font-medium">项目</th>
-                <th class="px-2 py-2 font-medium text-right">请求</th>
-                <th class="px-2 py-2 font-medium text-right">Token</th>
-                <th class="px-2 py-2 font-medium text-right">成本</th>
+                <th scope="col" class="px-2 py-2 font-medium">项目</th>
+                <th scope="col" class="px-2 py-2 font-medium text-right">请求</th>
+                <th scope="col" class="px-2 py-2 font-medium text-right">Token</th>
+                <th scope="col" class="px-2 py-2 font-medium text-right">成本</th>
               </tr>
             </thead>
             <tbody id="projectTableBody" class="divide-y divide-slate-800/60"></tbody>
@@ -264,7 +264,7 @@
       <div class="bg-slate-950/60 border border-slate-800 p-4 rounded-lg">
         <div class="flex items-center justify-between flex-wrap gap-2">
           <h3 class="font-bold text-xs text-white flex items-center gap-2">
-            <i class="fa-solid fa-comments text-indigo-400"></i> 会话排行
+            <i aria-hidden="true" class="fa-solid fa-comments text-indigo-400"></i> 会话排行
             <span class="px-1.5 py-0.5 rounded text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" title="会话 ID 由客户端声明（x-session-id），属事实性标识">声明值</span>
           </h3>
           <p id="sessionCoverage" class="text-[11px] text-slate-500">--</p>
@@ -274,10 +274,10 @@
           <table class="w-full text-xs text-left">
             <thead class="bg-slate-950/60 text-slate-400 sticky top-0 z-10">
               <tr>
-                <th class="px-2 py-2 font-medium">会话</th>
-                <th class="px-2 py-2 font-medium">项目</th>
-                <th class="px-2 py-2 font-medium text-right">请求</th>
-                <th class="px-2 py-2 font-medium text-right">成本</th>
+                <th scope="col" class="px-2 py-2 font-medium">会话</th>
+                <th scope="col" class="px-2 py-2 font-medium">项目</th>
+                <th scope="col" class="px-2 py-2 font-medium text-right">请求</th>
+                <th scope="col" class="px-2 py-2 font-medium text-right">成本</th>
               </tr>
             </thead>
             <tbody id="sessionTableBody" class="divide-y divide-slate-800/60"></tbody>
@@ -286,22 +286,22 @@
       </div>
     </div>
 
-    <p class="text-[11px] text-slate-500 mt-2"><i class="fa-solid fa-circle-info"></i> 归因仅覆盖<b>经过本代理</b>的流量：上游 usage 汇总通常显著高于此处（直连 CLI 等不受代理记录）。</p>
+    <p class="text-[11px] text-slate-500 mt-2"><i aria-hidden="true" class="fa-solid fa-circle-info"></i> 归因仅覆盖<b>经过本代理</b>的流量：上游 usage 汇总通常显著高于此处（直连 CLI 等不受代理记录）。</p>
   </div>
 </section>
 
-<section id="content-models" class="space-y-4 hidden">
+<section id="content-models" role="tabpanel" tabindex="0" aria-labelledby="tab-models" class="space-y-4 hidden">
   <div class="flex items-center justify-between gap-3 flex-wrap">
     <div><h2 class="text-lg font-bold text-white">上游实时模型</h2><p class="text-xs text-slate-400">官方定价目录 · 价格单位：人民币（元）/ 每 1M tokens · 按 1 USD ≈ ¥6.72 折算</p></div>
-    <button onclick="loadModels(true)" id="modelsRefreshBtn" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs rounded-lg flex items-center gap-1.5 shrink-0"><i class="fa-solid fa-rotate"></i> 获取最新模型</button>
+    <button onclick="loadModels(true)" id="modelsRefreshBtn" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs rounded-lg flex items-center gap-1.5 shrink-0"><i aria-hidden="true" class="fa-solid fa-rotate"></i> 获取最新模型</button>
   </div>
   <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-3 space-y-2.5">
     <div class="flex items-center gap-2 flex-wrap justify-end">
       <div class="relative flex-1 min-w-[220px] max-w-[340px] ml-auto">
-        <i class="fa-solid fa-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-xs pointer-events-none"></i>
-        <input id="modelSearch" type="search" placeholder="搜索模型名称 / ID / 提供商…" autocomplete="off"
+        <i aria-hidden="true" class="fa-solid fa-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-xs pointer-events-none"></i>
+        <input id="modelSearch" type="search" aria-label="搜索模型" placeholder="搜索模型名称 / ID / 提供商…" autocomplete="off"
           class="w-full bg-slate-950 border border-slate-700 text-slate-200 text-xs rounded-lg pl-8 pr-8 py-2 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/40 placeholder:text-slate-600">
-        <button id="modelSearchClear" title="清空" class="hidden absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-200 text-xs px-1"><i class="fa-solid fa-xmark"></i></button>
+        <button id="modelSearchClear" aria-label="清空搜索" title="清空" class="hidden absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-200 text-xs px-1"><i aria-hidden="true" class="fa-solid fa-xmark"></i></button>
       </div>
       <select id="modelSort" title="排序" class="bg-slate-950 border border-slate-700 text-slate-300 text-xs rounded-lg px-2.5 py-2 outline-none font-medium cursor-pointer">
         <option value="default">默认顺序</option>
@@ -326,10 +326,10 @@
     <div class="flex items-end justify-between gap-x-4 gap-y-1 flex-wrap">
       <p class="text-[11px] text-slate-500 leading-relaxed">
         每张卡片底部「档位」行标注该模型在两个套餐下的可用性：
-        <span class="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border font-semibold bg-indigo-500/15 text-indigo-300 border-indigo-500/40">GO<i class="fa-solid fa-check text-[9px] opacity-80"></i></span>
-        / <span class="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border font-semibold bg-amber-500/15 text-amber-300 border-amber-500/40"><i class="fa-solid fa-crown text-[9px]"></i>GOAT<i class="fa-solid fa-check text-[9px] opacity-80"></i></span>
+        <span class="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border font-semibold bg-indigo-500/15 text-indigo-300 border-indigo-500/40">GO<i aria-hidden="true" class="fa-solid fa-check text-[9px] opacity-80"></i></span>
+        / <span class="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border font-semibold bg-amber-500/15 text-amber-300 border-amber-500/40"><i aria-hidden="true" class="fa-solid fa-crown text-[9px]"></i>GOAT<i aria-hidden="true" class="fa-solid fa-check text-[9px] opacity-80"></i></span>
         为可用，
-        <span class="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border font-semibold bg-slate-800/40 text-slate-400 border-slate-700/70">GO<i class="fa-solid fa-xmark text-[9px] opacity-80"></i></span>
+        <span class="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border font-semibold bg-slate-800/40 text-slate-400 border-slate-700/70">GO<i aria-hidden="true" class="fa-solid fa-xmark text-[9px] opacity-80"></i></span>
         为不可用。
       </p>
       <p id="modelsCount" class="text-[11px] text-slate-500 text-right"></p>
@@ -338,12 +338,12 @@
   <div id="modelsList" class="grid grid-cols-1 md:grid-cols-3 gap-3"></div>
 </section>
 
-<section id="content-logs" class="space-y-4 hidden">
+<section id="content-logs" role="tabpanel" tabindex="0" aria-labelledby="tab-logs" class="space-y-4 hidden">
   <div class="flex items-center justify-between">
     <h2 class="text-lg font-bold text-white">网关事件控制台</h2>
     <div class="flex items-center space-x-2">
-      <button onclick="clearLogs()" class="px-3 py-1.5 bg-slate-800 hover:bg-rose-900/60 text-slate-300 hover:text-rose-200 text-xs rounded-lg flex items-center gap-1.5 border border-slate-700 transition"><i class="fa-solid fa-trash-can"></i> 清空日志</button>
-      <button onclick="loadLogs()" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs rounded-lg flex items-center gap-1.5 border border-slate-700 transition"><i class="fa-solid fa-rotate"></i> 刷新日志</button>
+      <button onclick="clearLogs()" class="px-3 py-1.5 bg-slate-800 hover:bg-rose-900/60 text-slate-300 hover:text-rose-200 text-xs rounded-lg flex items-center gap-1.5 border border-slate-700 transition"><i aria-hidden="true" class="fa-solid fa-trash-can"></i> 清空日志</button>
+      <button onclick="loadLogs()" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs rounded-lg flex items-center gap-1.5 border border-slate-700 transition"><i aria-hidden="true" class="fa-solid fa-rotate"></i> 刷新日志</button>
     </div>
   </div>
   <div class="bg-slate-950 border border-slate-800 rounded-xl p-4 font-mono text-xs text-slate-300 h-[500px] overflow-y-auto space-y-1" id="logsBox"><p class="text-slate-500">正在初始化日志控制台...</p></div>
@@ -351,12 +351,12 @@
 
 </main>
 
-<div id="loginModal" class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center hidden">
+<div id="loginModal" role="dialog" aria-modal="true" aria-label="添加 Command Code 账号" class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center hidden">
   <div class="bg-slate-900 border border-slate-800 rounded-xl p-6 max-w-md w-full shadow-2xl space-y-4">
-    <h3 class="text-base font-bold text-white flex items-center gap-2"><i class="fa-solid fa-key text-indigo-400"></i> 添加 Command Code API Key</h3>
+    <h3 class="text-base font-bold text-white flex items-center gap-2"><i aria-hidden="true" class="fa-solid fa-key text-indigo-400"></i> 添加 Command Code API Key</h3>
     <div class="space-y-3">
-      <div><label class="text-xs text-slate-300 block mb-1">账号昵称（可选）</label><input type="text" id="loginNickname" placeholder="例如：工作账号" class="w-full bg-slate-950 border border-slate-700 text-xs rounded-lg p-2.5 text-white outline-none focus:border-indigo-500"></div>
-      <div><label class="text-xs text-slate-300 block mb-1">Command Code API Key</label><input type="password" id="loginApiKey" placeholder="user_..." class="w-full bg-slate-950 border border-slate-700 text-xs rounded-lg p-2.5 text-white outline-none focus:border-indigo-500"></div>
+      <div><label for="loginNickname" class="text-xs text-slate-300 block mb-1">账号昵称（可选）</label><input type="text" id="loginNickname" placeholder="例如：工作账号" class="w-full bg-slate-950 border border-slate-700 text-xs rounded-lg p-2.5 text-white outline-none focus:border-indigo-500"></div>
+      <div><label for="loginApiKey" class="text-xs text-slate-300 block mb-1">Command Code API Key</label><input type="password" id="loginApiKey" placeholder="user_..." class="w-full bg-slate-950 border border-slate-700 text-xs rounded-lg p-2.5 text-white outline-none focus:border-indigo-500"></div>
       <div id="loginError" class="text-xs text-rose-400 hidden"></div>
     </div>
     <div class="flex justify-end space-x-2 pt-2">
@@ -366,9 +366,9 @@
   </div>
 </div>
 
-<div id="confirmModal" class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-[60] flex items-center justify-center hidden">
+<div id="confirmModal" role="dialog" aria-modal="true" aria-label="确认操作" class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-[60] flex items-center justify-center hidden">
   <div class="bg-slate-900 border border-slate-800 rounded-xl p-6 max-w-sm w-full shadow-2xl space-y-4">
-    <h3 class="text-base font-bold text-white flex items-center gap-2"><i class="fa-solid fa-circle-question text-amber-400"></i> 请确认</h3>
+    <h3 class="text-base font-bold text-white flex items-center gap-2"><i aria-hidden="true" class="fa-solid fa-circle-question text-amber-400"></i> 请确认</h3>
     <p id="confirmMsg" class="text-xs text-slate-300"></p>
     <div class="flex justify-end space-x-2 pt-1">
       <button onclick="settleConfirm(false)" class="px-4 py-2 bg-slate-800 text-slate-300 rounded-lg text-xs font-medium">取消</button>
@@ -376,10 +376,10 @@
     </div>
   </div>
 </div>
-<div id="toastBox" class="fixed top-20 right-6 z-[70] space-y-2 flex flex-col items-end"></div>
-<div id="adminKeyModal" class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-[60] flex items-center justify-center hidden">
+<div id="toastBox" role="status" aria-live="polite" class="fixed top-20 right-6 z-[70] space-y-2 flex flex-col items-end"></div>
+<div id="adminKeyModal" role="dialog" aria-modal="true" aria-label="输入管理密钥" class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-[60] flex items-center justify-center hidden">
   <div class="bg-slate-900 border border-slate-800 rounded-xl p-6 max-w-sm w-full shadow-2xl space-y-4">
-    <h3 class="text-base font-bold text-white flex items-center gap-2"><i class="fa-solid fa-shield-halved text-indigo-400"></i> 管理密钥</h3>
+    <h3 class="text-base font-bold text-white flex items-center gap-2"><i aria-hidden="true" class="fa-solid fa-shield-halved text-indigo-400"></i> 管理密钥</h3>
     <p class="text-xs text-slate-400">本网关设置了 <code class="font-mono text-slate-300">PROXY_API_KEY</code>，访问管理接口与 API 都需要携带该密钥。验证通过后本标签页内记住（sessionStorage），关闭标签页即清除。</p>
     <input type="password" id="adminKeyInput" placeholder="PROXY_API_KEY" autocomplete="off" class="w-full bg-slate-950 border border-slate-700 text-xs rounded-lg p-2.5 text-white outline-none focus:border-indigo-500">
     <div class="flex justify-end space-x-2 pt-1">
@@ -391,12 +391,47 @@
 
 <script>
 const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+
+/**
+ * 统一的接口调用：把「连不上 / HTTP 非 2xx / 响应体不是 JSON」三类失败变成**返回值**，
+ * 而不是各自 await fetch 再 .json()。此前 18 处 fetch 只有 2 处检查 res.ok —— 后端把账号
+ * 相关写端点改成失败返回 500 之后，`data.accounts.map(...)` 会直接 TypeError，
+ * 用户看到的就是"点了删除没反应、列表还是老样子"。
+ *
+ * 永不抛异常，因此调用点也不会产生未处理的 rejection。
+ */
+async function apiJson(url, opts) {
+  let res;
+  try { res = await fetch(url, opts); }
+  catch (e) { return { ok: false, data: null, error: '无法连接代理：' + ((e && e.message) || e) }; }
+  let text = '';
+  try { text = await res.text(); } catch (e) { text = ''; }
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch { data = null; }
+  if (!res.ok) {
+    const e = data && data.error;
+    const msg = (typeof e === 'string' ? e : (e && e.message)) || ('HTTP ' + res.status);
+    return { ok: false, data, error: String(msg) };
+  }
+  if (data === null) return { ok: false, data: null, error: '响应体不是 JSON' };
+  return { ok: true, data, error: null };
+}
+const JSON_HDR = { 'Content-Type': 'application/json' };
+/** 卡片取数兜底：字段缺失显示占位，而不是把 undefined 写进界面。 */
+function orDash(v){ return (v === undefined || v === null || v === '') ? '—' : v; }
 let currentTab = 'overview';
 let selectedUsageAccountId = '';
 let globalUsageCache = [];
 
 function switchTab(tab) {
-  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => {
+    const on = b.id === 'tab-' + tab;
+    b.classList.toggle('active', on);
+    // 此前只切 CSS 类：读屏用户无法知道当前在哪个分区，且五个标签都能被 Tab 命中，
+    // 与 ARIA tablist 的"仅选中项可聚焦 + 方向键切换"约定不符。
+    b.setAttribute('aria-selected', on ? 'true' : 'false');
+    b.tabIndex = on ? 0 : -1;
+  });
   document.querySelectorAll('main > section').forEach(s => s.classList.add('hidden'));
   document.getElementById('tab-' + tab).classList.add('active');
   document.getElementById('content-' + tab).classList.remove('hidden');
@@ -407,74 +442,116 @@ function switchTab(tab) {
   if (tab === 'logs') loadLogs();
 }
 
+// 最近一次**成功**轮询到的引擎状态。toggleEngine 用它取反，而不是再 GET 一次
+// （GET-then-invert 会让快速连点两次提交同一个值）。
+let lastEngineRunning = true;
+
 async function fetchStatus() {
-  try {
-    const data = await (await fetch('/api/status')).json();
-    const dot = document.getElementById('statusDot'), txt = document.getElementById('statusText'), btn = document.getElementById('toggleBtnText');
+  const { ok, data, error } = await apiJson('/api/status');
+  const dot = document.getElementById('statusDot'), txt = document.getElementById('statusText'), btn = document.getElementById('toggleBtnText');
+  if (!ok) {
+    // 此前整个函数包在 try{}catch{} 里，代理挂掉时这几行永远停在最后一次成功状态，
+    // 头部状态胶囊可以连续几小时谎报"引擎运行中"。
+    // 只改文字、不弹 toast：这个函数 5s 轮一次，弹出来会刷屏。
+    dot.className = 'w-2.5 h-2.5 rounded-full bg-slate-500';
+    txt.innerText = String(error);
+    txt.className = 'font-medium text-amber-400';
+    return;
+  }
+  if (data.running === undefined) {
+    // 拿到 200 但没有 running 字段：宁可显式存疑，也不要把 undefined 当成"已停止"，
+    // 那会让按钮文案与实际相反。
+    dot.className = 'w-2.5 h-2.5 rounded-full bg-slate-500';
+    txt.innerText = '状态字段缺失';
+    txt.className = 'font-medium text-amber-400';
+  } else {
+    lastEngineRunning = !!data.running;
     if (data.running) { dot.className='w-2.5 h-2.5 rounded-full bg-emerald-500'; txt.innerText='引擎运行中'; txt.className='font-medium text-emerald-400'; btn.innerText='停止引擎'; }
     else { dot.className='w-2.5 h-2.5 rounded-full bg-rose-500'; txt.innerText='引擎已停止'; txt.className='font-medium text-rose-400'; btn.innerText='启动引擎'; }
-    document.getElementById('statPort').innerText = 'Port :' + data.port;
-    document.getElementById('statUptime').innerText = '运行时间：' + data.uptime;
-    document.getElementById('statAccount').innerText = data.activeAccountName || '无';
-    document.getElementById('statAccountsCount').innerText = '已注册 ' + data.accountsCount + ' 个账号';
-    const bindEl = document.getElementById('statBind');
-    if (data.boundNonLoopback && !data.authRequired) {
-      bindEl.className = 'text-xl font-bold text-rose-400 mt-1';
-      bindEl.innerText = data.host + '（未鉴权暴露！）';
-      bindEl.title = '已绑定到非回环地址且未设置 PROXY_API_KEY：局域网内任何人都可以调用 API 并管理本网关（增删账号、清空历史）。建议设置 PROXY_API_KEY，或改回 127.0.0.1。';
-    } else {
-      bindEl.className = 'text-xl font-bold text-emerald-400 mt-1';
-      bindEl.innerText = data.host === '0.0.0.0' ? '0.0.0.0（局域网）' : data.host;
-      bindEl.title = '';
-    }
-    document.getElementById('statAuth').innerText = 'API 鉴权：' + (data.authRequired ? '开' : '关');
-    const ub = document.getElementById('updateBadge');
-    if (ub && data.update && data.update.available) {
-      ub.classList.remove('hidden');
-      document.getElementById('updateVer').innerText = data.update.latest;
-    }
-    document.getElementById('statModels').innerText = data.modelsCount;
-    document.getElementById('rotationSelect').value = data.rotationMode;
-  } catch {}
+  }
+  document.getElementById('statPort').innerText = 'Port :' + orDash(data.port);
+  document.getElementById('statUptime').innerText = '运行时间：' + orDash(data.uptime);
+  document.getElementById('statAccount').innerText = data.activeAccountName || '无';
+  document.getElementById('statAccountsCount').innerText = '已注册 ' + orDash(data.accountsCount) + ' 个账号';
+  const bindEl = document.getElementById('statBind');
+  if (data.boundNonLoopback && !data.authRequired) {
+    bindEl.className = 'text-xl font-bold text-rose-400 mt-1 break-all';
+    bindEl.innerText = orDash(data.host) + '（未鉴权暴露！）';
+    bindEl.title = '已绑定到非回环地址且未设置 PROXY_API_KEY：局域网内任何人都可以调用 API 并管理本网关（增删账号、清空历史）。建议设置 PROXY_API_KEY，或改回 127.0.0.1。';
+  } else {
+    bindEl.className = 'text-xl font-bold text-emerald-400 mt-1 break-all';
+    bindEl.innerText = data.host === '0.0.0.0' ? '0.0.0.0（局域网）' : orDash(data.host);
+    bindEl.title = '';
+  }
+  document.getElementById('statAuth').innerText = 'API 鉴权：' + (data.authRequired ? '开' : '关');
+  const ub = document.getElementById('updateBadge');
+  if (ub && data.update && data.update.available) {
+    ub.classList.remove('hidden');
+    document.getElementById('updateVer').innerText = data.update.latest;
+  }
+  document.getElementById('statModels').innerText = orDash(data.modelsCount);
+  // 轮转模式下拉只在后端真的给了值时回写，否则会把用户刚选的选择框重置成 undefined。
+  if (data.rotationMode) document.getElementById('rotationSelect').value = data.rotationMode;
 }
 
 async function toggleEngine() {
-  const data = await (await fetch('/api/status')).json();
-  await fetch('/api/gateway/toggle', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ running: !data.running }) });
+  const want = !lastEngineRunning;
+  const { ok, data, error } = await apiJson('/api/gateway/toggle', {
+    method: 'POST', headers: JSON_HDR, body: JSON.stringify({ running: want }),
+  });
+  if (!ok) { showToast('切换引擎状态失败：' + error, 'error'); fetchStatus(); return; }
+  // 以后端回显为准，而不是假设它一定按我们提交的值改了。
+  if (data && data.running !== undefined) lastEngineRunning = !!data.running;
+  showToast(want ? '引擎已启动' : '引擎已暂停，新的 /v1/* 请求会被拒绝', want ? 'success' : 'info');
   fetchStatus();
 }
 
 async function startBrowserLogin() {
   const btn = document.getElementById('browserAuthBtn');
   const original = btn.innerHTML;
-  btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 正在等待浏览器授权...';
+  btn.innerHTML = '<i aria-hidden="true" class="fa-solid fa-spinner fa-spin"></i> 正在等待浏览器授权...';
   btn.disabled = true;
   try {
-    const res = await fetch('/api/auth/browser-login', { method:'POST' });
-    const data = await res.json();
-    if (res.ok && data.status === 'success') { showToast('登录成功：' + data.account.name, 'success'); loadAccounts(); fetchStatus(); }
-    else showToast('浏览器登录失败：' + (data.error || '未知错误'), 'error');
+    const { ok, data, error } = await apiJson('/api/auth/browser-login', { method:'POST' });
+    if (ok && data.status === 'success') { showToast('登录成功：' + ((data.account && data.account.name) || '新账号'), 'success'); loadAccounts(); fetchStatus(); }
+    else showToast('浏览器登录失败：' + ((data && data.error) || error), 'error');
   } catch (e) { showToast('浏览器登录失败：' + e.message, 'error'); }
   finally { btn.innerHTML = original; btn.disabled = false; }
 }
 
-function showLoginModal(){ document.getElementById('loginModal').classList.remove('hidden'); document.getElementById('loginApiKey').focus(); }
-function hideLoginModal(){ document.getElementById('loginModal').classList.add('hidden'); }
+function showLoginModal(){ modalReturnFocus = document.activeElement; document.getElementById('loginModal').classList.remove('hidden'); document.getElementById('loginApiKey').focus(); }
+// 重开弹窗时清掉上一次的报错，否则空字段旁边还挂着"API Key 不能为空"。
+function hideLoginModal(){
+  document.getElementById('loginModal').classList.add('hidden');
+  const e = document.getElementById('loginError'); if (e) { e.classList.add('hidden'); e.innerText = ''; }
+  // 在 showLoginModal 里同步记下的触发元素上归还焦点。放在 MutationObserver 里取
+  // activeElement 是不可靠的：那时弹窗内部的 focus() 已经执行过了（实测会把焦点
+  // 留在弹窗里的输入框上，而它已经随弹窗一起隐藏）。
+  const back = modalReturnFocus;
+  modalReturnFocus = null;
+  if (back && document.contains(back) && back.getClientRects().length) back.focus();
+}
 
 async function submitLogin() {
   const apiKey = document.getElementById('loginApiKey').value.trim();
   const name = document.getElementById('loginNickname').value.trim();
   const errEl = document.getElementById('loginError');
   if (!apiKey) { errEl.innerText='API Key 不能为空'; errEl.classList.remove('hidden'); return; }
-  const res = await fetch('/api/auth/manual-login', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ apiKey, name }) });
-  const data = await res.json();
-  if (res.ok && data.status === 'success') { hideLoginModal(); document.getElementById('loginApiKey').value=''; loadAccounts(); fetchStatus(); }
-  else { errEl.innerText = data.error || '登录失败'; errEl.classList.remove('hidden'); }
+  const { ok, data, error } = await apiJson('/api/auth/manual-login', { method:'POST', headers: JSON_HDR, body: JSON.stringify({ apiKey, name }) });
+  if (ok && data.status === 'success') { hideLoginModal(); document.getElementById('loginApiKey').value=''; loadAccounts(); fetchStatus(); }
+  else { errEl.innerText = (data && data.error) || error || '登录失败'; errEl.classList.remove('hidden'); }
 }
 
 async function loadAccounts() {
-  const data = await (await fetch('/api/accounts')).json();
+  const { ok, data, error } = await apiJson('/api/accounts');
   const grid = document.getElementById('accountsGrid');
+  if (!ok || !Array.isArray(data.accounts)) {
+    // 后端 500 时 data 形如 {error:...}，照原样 .map 会 TypeError，网格停在旧列表上 ——
+    // 于是"删除账号失败"在界面上的表现是"点了没反应"。
+    grid.innerHTML = '<div class="col-span-full text-amber-400 text-sm">账号列表读取失败：'
+      + esc(error || (data && data.error) || '响应缺少 accounts 字段') + '</div>';
+    return;
+  }
   grid.innerHTML = data.accounts.map(acc =>
     '<div class="bg-slate-900 border ' + (acc.isActive ? 'border-indigo-500 shadow-lg shadow-indigo-500/10' : 'border-slate-800') + ' p-5 rounded-xl space-y-3">' +
       '<div class="flex items-center justify-between">' +
@@ -486,7 +563,7 @@ async function loadAccounts() {
         '</div>' +
         '<div class="flex items-center space-x-2">' +
           (!acc.isActive ? '<button data-action="activate" data-id="' + esc(acc.id) + '" class="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-indigo-400 rounded-lg border border-slate-700">设为当前</button>' : '') +
-          '<button data-action="delete" data-id="' + esc(acc.id) + '" class="p-1.5 text-slate-500 hover:text-rose-400 rounded-lg hover:bg-rose-500/10 transition"><i class="fa-solid fa-trash-can text-xs"></i></button>' +
+          '<button data-action="delete" aria-label="移除该账号" data-id="' + esc(acc.id) + '" class="p-1.5 text-slate-500 hover:text-rose-400 rounded-lg hover:bg-rose-500/10 transition"><i aria-hidden="true" class="fa-solid fa-trash-can text-xs"></i></button>' +
         '</div>' +
       '</div>' +
       '<div class="pt-2 border-t border-slate-800/80 flex items-center justify-between text-xs text-slate-400">' +
@@ -511,18 +588,30 @@ function bindAccountActionsOnce() {
   });
 }
 
-async function setActiveAcc(id){ await fetch('/api/accounts/active',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({accountId:id})}); loadAccounts(); fetchStatus(); }
-async function deleteAcc(id){ if(!(await uiConfirm('确定移除该账号？'))) return; await fetch('/api/accounts/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({accountId:id})}); loadAccounts(); fetchStatus(); }
-async function changeRotationMode(mode){ await fetch('/api/accounts/rotation',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rotationMode:mode})}); fetchStatus(); }
+// 三个写操作都必须看结果：后端现在失败会返回 500，而这里此前把响应整个丢掉、
+// 无条件重载列表，用户看到"已切换/已删除"但其实没写进 config.json。
+async function setActiveAcc(id){ const {ok,error}=await apiJson('/api/accounts/active',{method:'POST',headers:JSON_HDR,body:JSON.stringify({accountId:id})}); if(!ok){ showToast('切换账号失败：'+error,'error'); } loadAccounts(); fetchStatus(); }
+async function deleteAcc(id){ if(!(await uiConfirm('确定移除该账号？'))) return; const {ok,error}=await apiJson('/api/accounts/delete',{method:'POST',headers:JSON_HDR,body:JSON.stringify({accountId:id})}); if(!ok){ showToast('删除账号失败：'+error,'error'); } else { showToast('账号已移除','success'); } loadAccounts(); fetchStatus(); }
+async function changeRotationMode(mode){ const {ok,error}=await apiJson('/api/accounts/rotation',{method:'POST',headers:JSON_HDR,body:JSON.stringify({rotationMode:mode})}); if(!ok){ showToast('保存轮转模式失败：'+error+'（下拉框将在下次轮询被弹回）','error'); } loadAccounts(); fetchStatus(); }
 
 async function loadUsageInit() {
   loadUsageOverview();
-  const data = await (await fetch('/api/usage/aggregate')).json();
-  globalUsageCache = data.accountsUsage || [];
+  const { ok, data, error } = await apiJson('/api/usage/aggregate');
   const select = document.getElementById('usageAccountSelect');
-  select.innerHTML = globalUsageCache.map(u => '<option value="' + esc(u.account.id) + '">' + esc(u.account.name) + ' (' + esc(u.account.apiKeyMasked) + ')' + (u.account.isActive?' [当前]':'') + '</option>').join('');
-  if (!selectedUsageAccountId && globalUsageCache.length > 0) selectedUsageAccountId = globalUsageCache[0].account.id;
-  select.value = selectedUsageAccountId;
+  if (!ok || !Array.isArray(data.accountsUsage)) {
+    globalUsageCache = [];
+    select.innerHTML = '';
+    showToast('额度数据读取失败：' + (error || '响应缺少 accountsUsage'), 'error');
+    return;
+  }
+  globalUsageCache = data.accountsUsage;
+  select.innerHTML = globalUsageCache.map(u => { const a = u.account || {}; return '<option value="' + esc(orDash(a.id)) + '">' + esc(orDash(a.name)) + ' (' + esc(orDash(a.apiKeyMasked)) + ')' + (a.isActive?' [当前]':'') + '</option>'; }).join('');
+  // 选中的账号可能已被删除：不在列表里就回落到第一个，否则下拉框空白而卡片
+  // 还留着上一个账号的数字。
+  if (!globalUsageCache.some(u => u.account && u.account.id === selectedUsageAccountId)) {
+    selectedUsageAccountId = globalUsageCache.length > 0 ? globalUsageCache[0].account.id : null;
+  }
+  select.value = selectedUsageAccountId || '';
   renderUsageForAccount(selectedUsageAccountId);
 }
 
@@ -550,8 +639,16 @@ function paintMeter(id, pct, base){
 async function loadUsageOverview() {
   const accEl = document.getElementById('ovPeriod');
   try {
-    const d = await (await fetch('/api/usage/overview')).json();
-    if (d.error) { accEl.innerText = d.error; return; }
+    const { ok, data: d, error } = await apiJson('/api/usage/overview');
+    if (!ok || (d && d.error)) {
+      const msg = (d && d.error) || error || '未知错误';
+      accEl.innerText = String(msg);
+      // 之前这里 return 但四张卡片留着上一次的成功数值，且没有任何"这是旧数据"的
+      // 标记；出错时至少让卡片显式存疑。
+      ['ovTotalTokens','ovTotalRuns','ovSuccessRate'].forEach(id => { const e=document.getElementById(id); if(e) e.innerText='—'; });
+      const det = document.getElementById('ovTokensDetail'); if (det) det.innerText = '';
+      return;
+    }
     const s = d.summary || {};
     document.getElementById('ovTotalTokens').innerText = ovFmtNum(s.totalTokens);
     document.getElementById('ovTokensDetail').innerText = '输入 ' + ovFmtNum(s.totalTokensIn) + ' · 输出 ' + ovFmtNum(s.totalTokensOut);
@@ -601,25 +698,40 @@ function renderUsageForAccount(accId) {
   document.getElementById('creditFree').innerText = '$' + (credits.freeCredits||0).toFixed(2);
   document.getElementById('creditTotalCost').innerText = '$' + (t.summary?.totalCost||0).toFixed(2);
 
+  // 先全部重置成"无数据"再按分支填充：下面两个窗口块都只有 if 没有 else，
+  // 切到一个没有 windowLimits 的账号时，屏上会留着**上一个账号**的 $x/$y 与进度条。
+  document.getElementById('window5hText').innerText = '无数据';
+  document.getElementById('window5hReset').innerText = '';
+  document.getElementById('windowWeeklyText').innerText = '无数据';
+  document.getElementById('windowWeeklyReset').innerText = '';
+  paintMeter('window5hBar', 0, '#6366f1');
+  paintMeter('windowWeeklyBar', 0, '#8b5cf6');
+
   const w5h = t.credits?.windowLimits?.fiveHour;
   if (w5h) {
-    document.getElementById('window5hText').innerText = '$' + w5h.used.toFixed(2) + ' / $' + w5h.cap.toFixed(2);
-    const ratio = w5h.cap > 0 ? (w5h.used/w5h.cap)*100 : 0;
+    // 上游字段直接来自 /api/usage/aggregate 的原样转发，缺字段或字符串化都要能撑住：
+    // 此前 w5h.used.toFixed(2) 一旦拿到 undefined/字符串就抛错，整个用量标签页留白。
+    const u5 = Number(w5h.used) || 0, c5 = Number(w5h.cap) || 0;
+    document.getElementById('window5hText').innerText = '$' + u5.toFixed(2) + ' / $' + c5.toFixed(2);
+    const ratio = c5 > 0 ? (u5/c5)*100 : 0;
     paintMeter('window5hBar', ratio, '#6366f1');
-    const mins = w5h.resetAt ? Math.max(0,Math.ceil((w5h.resetAt-Date.now())/60000)) : 0;
+    const mins = w5h.resetAt ? Math.max(0,Math.ceil((Number(w5h.resetAt)-Date.now())/60000)) : 0;
     document.getElementById('window5hReset').innerText = '重置时间：'+mins+' 分钟';
     // 燃烧速率预测：由官方 used 的时间差分外推（本地历史只覆盖代理流量，
     // 不能用来预测全账号额度）。
     const proj = usageHistoryCache && usageHistoryCache.quotaProjection;
     const pNote = document.getElementById('window5hProjection');
     if (pNote) {
+      // 四个分支里只有告警分支设 className，导致变过一次红之后
+      // "采样中"/"当前无消耗"这些正常状态仍挂着告警色，看着像长期警报。
+      pNote.className = 'win-note';
       if (!proj || proj.samples < 2 || proj.burnPerHour == null) {
         pNote.innerText = '速率预测：采样中（需 10 分钟以上数据）';
       } else if (proj.burnPerHour <= 0) {
         pNote.innerText = '速率预测：当前无消耗';
       } else if (proj.willHitCapBeforeReset === true) {
         pNote.className = 'win-note warn';
-        pNote.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> 按当前 $' + proj.burnPerHour.toFixed(2) + '/h，约 <b>' + fmtDur(proj.minutesToCap) + '</b>后撞上限额（早于重置）';
+        pNote.innerHTML = '<i aria-hidden="true" class="fa-solid fa-triangle-exclamation"></i> 按当前 $' + proj.burnPerHour.toFixed(2) + '/h，约 <b>' + fmtDur(proj.minutesToCap) + '</b>后撞上限额（早于重置）';
       } else {
         pNote.className = 'win-note';
         pNote.innerText = '按当前 $' + proj.burnPerHour.toFixed(2) + '/h 约需 ' + fmtDur(proj.minutesToCap) + ' 用完 · 重置更早到来';
@@ -628,10 +740,11 @@ function renderUsageForAccount(accId) {
   }
   const wk = t.credits?.windowLimits?.weekly;
   if (wk) {
-    document.getElementById('windowWeeklyText').innerText = '$' + wk.used.toFixed(2) + ' / $' + wk.cap.toFixed(2);
-    const ratio = wk.cap > 0 ? (wk.used/wk.cap)*100 : 0;
+    const uw = Number(wk.used) || 0, cw = Number(wk.cap) || 0;
+    document.getElementById('windowWeeklyText').innerText = '$' + uw.toFixed(2) + ' / $' + cw.toFixed(2);
+    const ratio = cw > 0 ? (uw/cw)*100 : 0;
     paintMeter('windowWeeklyBar', ratio, '#8b5cf6');
-    const hrs = wk.resetAt ? Math.max(0,Math.ceil((wk.resetAt-Date.now())/3600000)) : 0;
+    const hrs = wk.resetAt ? Math.max(0,Math.ceil((Number(wk.resetAt)-Date.now())/3600000)) : 0;
     document.getElementById('windowWeeklyReset').innerText = '重置时间：'+hrs+' 小时';
   }
 }
@@ -677,7 +790,7 @@ function planPill(key, label, on, onTone) {
   const cls = on ? onTone : 'bg-slate-800/40 text-slate-400 border-slate-700/70';
   return '<span class="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border font-semibold ' + cls +
     '" title="' + (PLAN_LABELS[key] || key) + ' 档位：' + (on ? '可用' : '不可用') + '">' +
-    label + '<i class="fa-solid ' + (on ? 'fa-check' : 'fa-xmark') + ' text-[9px] opacity-80"></i></span>';
+    label + '<i aria-hidden="true" class="fa-solid ' + (on ? 'fa-check' : 'fa-xmark') + ' text-[9px] opacity-80"></i></span>';
 }
 function modelMatchesTag(m, tag) {
   const caps = m.caps || {};
@@ -692,7 +805,7 @@ function modelMatchesTag(m, tag) {
 function modelMatchesQuery(m, q) {
   if (!q) return true;
   const hay = ((m.id || '') + ' ' + (m.name || '') + ' ' + (m.owned_by || '')).toLowerCase();
-  return q.split(/s+/).filter(Boolean).every(kw => hay.includes(kw));
+  return q.split(/\s+/).filter(Boolean).every(kw => hay.includes(kw));
 }
 function sortModels(list) {
   const price = (m, k) => { const v = m.pricing && m.pricing[k]; return (v === undefined || v === null) ? Infinity : v; };
@@ -711,7 +824,7 @@ function highlightHit(text, q) {
   const safe = esc(text);
   const kw = (q || '').trim();
   if (!kw) return safe;
-  const words = kw.split(/s+/).filter(Boolean).map(w => w.replace(/[.*+?^${}()|[]\]/g, '\$&'));
+  const words = kw.split(/\s+/).filter(Boolean).map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
   if (!words.length) return safe;
   try { return safe.replace(new RegExp('(' + words.join('|') + ')', 'gi'), '<mark>$1</mark>'); }
   catch { return safe; }
@@ -731,7 +844,7 @@ function applyModelFilter() {
   }
   const c = document.getElementById('modelsList');
   if (!filtered.length) {
-    c.innerHTML = '<div class="col-span-full text-center py-12 text-slate-500 text-xs"><i class="fa-solid fa-magnifying-glass text-2xl mb-3 block text-slate-600"></i>没有匹配的模型，换个关键词或标签试试</div>';
+    c.innerHTML = '<div class="col-span-full text-center py-12 text-slate-500 text-xs"><i aria-hidden="true" class="fa-solid fa-magnifying-glass text-2xl mb-3 block text-slate-600"></i>没有匹配的模型，换个关键词或标签试试</div>';
     return;
   }
   c.innerHTML = filtered.map(m => {
@@ -766,7 +879,7 @@ function applyModelFilter() {
       '<div class="mt-2 pt-2 border-t border-slate-800/70 flex items-center gap-1.5">' +
         '<span class="text-[10px] text-slate-500">档位</span>' +
         planPill('individual-go', 'GO', goOn, 'bg-indigo-500/15 text-indigo-300 border-indigo-500/40') +
-        planPill('individual-goat', goatOn ? '<i class="fa-solid fa-crown text-[9px]"></i>GOAT' : 'GOAT', goatOn, 'bg-amber-500/15 text-amber-300 border-amber-500/40') +
+        planPill('individual-goat', goatOn ? '<i aria-hidden="true" class="fa-solid fa-crown text-[9px]"></i>GOAT' : 'GOAT', goatOn, 'bg-amber-500/15 text-amber-300 border-amber-500/40') +
       '</div>' +
     '</div>';
   }).join('');
@@ -789,11 +902,12 @@ function bindModelQueryOnce() {
 }
 async function loadModels(force) {
   const btn = document.getElementById('modelsRefreshBtn');
-  if (force) { await fetch('/v1/models/refresh', { method: 'POST' }).catch(() => {}); }
+  if (force) { const r = await apiJson('/v1/models/refresh', { method: 'POST' }); if (!r.ok) showToast('刷新模型目录失败：' + r.error, 'error'); }
   if (btn) { btn.disabled = true; btn.classList.add('opacity-60'); }
   try {
-    const data = await (await fetch('/v1/models')).json();
-    allModelsCache = data.data || [];
+    const { ok, data, error } = await apiJson('/v1/models');
+    if (!ok) { showToast('模型列表读取失败：' + error, 'error'); return; }
+    allModelsCache = Array.isArray(data.data) ? data.data : [];
     bindModelQueryOnce();
     applyModelFilter();
   } finally {
@@ -802,16 +916,22 @@ async function loadModels(force) {
 }
 
 async function loadLogs() {
-  const data = await (await fetch('/api/logs')).json();
+  const { ok, data, error } = await apiJson('/api/logs');
   const box = document.getElementById('logsBox');
+  if (!ok || !Array.isArray(data.logs)) {
+    box.innerHTML = '<p class="text-amber-400 font-mono text-[11px]">日志读取失败：' + esc(error || '响应缺少 logs') + '</p>';
+    return;
+  }
   box.innerHTML = data.logs.map(l => {
     const lc = l.level==='error'?'text-rose-400':l.level==='warn'?'text-amber-400':'text-slate-300';
     return '<p class="'+lc+' font-mono text-[11px] py-0.5 break-all"><span class="text-slate-500">['+esc(l.timestamp)+']</span> '+esc(l.message)+'</p>';
   }).join('');
-  box.scrollTop = box.scrollHeight;
+  // 只有本来就在底部时才跟随滚动。此前每 5s 无条件跳到最新一行，
+  // 想往上翻一条旧日志会在 5 秒内被弹回去，实际上没法读。
+  if (box.scrollHeight - box.scrollTop - box.clientHeight < 40) box.scrollTop = box.scrollHeight;
 }
 
-async function clearLogs(){ await fetch('/api/logs/clear',{method:'POST'}); loadLogs(); }
+async function clearLogs(){ const {ok,error}=await apiJson('/api/logs/clear',{method:'POST'}); if(!ok) showToast('清空日志失败：'+error,'error'); loadLogs(); }
 
 // ─── 会话明细 ────────────────────────────────────────────────────────────────
 let usageTrendChart = null;
@@ -832,7 +952,9 @@ function fmtTokS(out, ms){ if(!out||out<=0||!ms||ms<=0) return '<span class="tex
 function fmtTime(ts){ try { const d=new Date(ts); return d.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit'}); } catch { return ts; } }
 
 async function loadUsageHistory(){
-  usageHistoryCache = await (await fetch('/api/usage/history')).json();
+  const { ok, data: hist, error } = await apiJson('/api/usage/history');
+  if (!ok) { showToast('用量历史读取失败：' + error, 'error'); return; }
+  usageHistoryCache = hist;
   const data = usageHistoryCache;
   const s = data.total;
 
@@ -908,7 +1030,7 @@ function renderModelPerf(rows){
     return '<tr class="hover:bg-slate-800/40 transition">' +
       '<td class="px-2 py-2 font-mono text-slate-200 truncate max-w-[260px]" title="' + esc(r.model) + '">' + esc(r.model) + '</td>' +
       '<td class="px-2 py-2 text-right ' + (gated ? 'text-slate-600' : 'text-slate-400') + '" title="' + esc(tip) + '">' + r.samples +
-        (gated ? ' <i class="fa-solid fa-filter text-[9px]"></i>' : '') + '</td>' +
+        (gated ? ' <i aria-hidden="true" class="fa-solid fa-filter text-[9px]"></i>' : '') + '</td>' +
       '<td class="px-2 py-2 text-right text-slate-300">' + t(r.tokSP50) + '</td>' +
       '<td class="px-2 py-2 text-right text-slate-400">' + t(r.tokSP95) + '</td>' +
       '<td class="px-2 py-2 text-right text-slate-300">' + l(r.latencyP50Ms) + '</td>' +
@@ -1032,8 +1154,12 @@ function renderBillingWindow(billing){
     '</div>';
 }
 
-function exportUsageCsv() {
-  const rows = (usageHistoryCache && usageHistoryCache.recent) || [];
+async function exportUsageCsv() {
+  // 表格里的 usageHistoryCache 只有展示用的最近 200 条；导出必须另取全量，否则
+  // "已导出 N 条"报的是被服务端截断之后的数字，拿去对账的人拿到的是残缺文件。
+  const { ok, data, error } = await apiJson('/api/usage/history?limit=50000');
+  if (!ok) { showToast('导出失败：' + error, 'error'); return; }
+  const rows = Array.isArray(data.recent) ? data.recent : [];
   if (!rows.length) { showToast('暂无可导出的记录', 'info'); return; }
   const q = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
   const head = ['timestamp','model','inputTokens','cacheReadTokens','outputTokens','timingMs','costUsd','costSource','status','mode','sessionId','project'];
@@ -1045,7 +1171,10 @@ function exportUsageCsv() {
   a.download = 'commandcode-usage-' + new Date().toISOString().slice(0, 10) + '.csv';
   a.click();
   URL.revokeObjectURL(a.href);
-  showToast('已导出 ' + rows.length + ' 条记录', 'success');
+  const stored = data.storedRecords || rows.length;
+  showToast(rows.length < stored
+    ? '已导出最近 ' + rows.length + ' 条（本地共留存 ' + stored + ' 条，更早的已被轮转清理）'
+    : '已导出 ' + rows.length + ' 条记录', 'success');
 }
 
 function renderUsageTable(recent){
@@ -1127,7 +1256,8 @@ function renderUsageCharts(data){
 
 async function clearUsageHistory(){
   if(!(await uiConfirm('确定清空全部会话历史？此操作不可撤销。'))) return;
-  await fetch('/api/usage/clear',{method:'POST'});
+  const {ok,error}=await apiJson('/api/usage/clear',{method:'POST'});
+  if(!ok){ showToast('清空失败：'+error,'error'); } else { showToast('会话历史已清空','success'); }
   loadUsageHistory();
 }
 
@@ -1142,7 +1272,7 @@ function showToast(msg, type) {
   const icons = { success: 'fa-circle-check', error: 'fa-circle-exclamation', info: 'fa-circle-info' };
   const el = document.createElement('div');
   el.className = 'px-4 py-2.5 rounded-lg border text-xs font-medium shadow-lg backdrop-blur flex items-center gap-2 max-w-sm ' + (tones[type] || tones.info);
-  el.innerHTML = '<i class="fa-solid ' + (icons[type] || icons.info) + '"></i><span>' + esc(msg) + '</span>';
+  el.innerHTML = '<i aria-hidden="true" class="fa-solid ' + (icons[type] || icons.info) + '"></i><span>' + esc(msg) + '</span>';
   document.getElementById('toastBox').appendChild(el);
   setTimeout(() => { el.style.transition = 'opacity .4s'; el.style.opacity = '0'; setTimeout(() => el.remove(), 400); }, 4000);
 }
@@ -1229,6 +1359,54 @@ document.addEventListener('keydown', (e) => {
 document.getElementById('loginApiKey').addEventListener('keydown', (e) => { if (e.key === 'Enter') submitLogin(); });
 document.getElementById('loginNickname').addEventListener('keydown', (e) => { if (e.key === 'Enter') submitLogin(); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !document.getElementById('loginModal').classList.contains('hidden')) hideLoginModal(); });
+
+// ─── 键盘可达性：标签页方向键切换 + 弹窗焦点约束 ─────────────────────────────
+// ARIA tablist 的约定是"只有选中标签可被 Tab 命中，方向键在标签间移动"。
+// 此前五个标签全都可 Tab、且切分区只能用鼠标点。
+document.querySelector('[role="tablist"]').addEventListener('keydown', (e) => {
+  const tabs = Array.from(document.querySelectorAll('.tab-btn'));
+  const i = tabs.indexOf(document.activeElement);
+  if (i < 0) return;
+  let next = null;
+  if (e.key === 'ArrowRight') next = tabs[(i + 1) % tabs.length];
+  else if (e.key === 'ArrowLeft') next = tabs[(i - 1 + tabs.length) % tabs.length];
+  else if (e.key === 'Home') next = tabs[0];
+  else if (e.key === 'End') next = tabs[tabs.length - 1];
+  if (!next) return;
+  e.preventDefault();
+  next.focus();
+  switchTab(next.id.replace(/^tab-/, ''));
+});
+
+const FOCUSABLE_SEL = 'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
+function visibleFocusables(root) {
+  return Array.from(root.querySelectorAll(FOCUSABLE_SEL)).filter(el => el.getClientRects().length > 0);
+}
+// 三个弹窗此前没有任何焦点约束：Tab 能穿到弹窗背后的页面继续操作按钮。
+let modalReturnFocus = null;
+document.querySelectorAll('[role="dialog"]').forEach(m => {
+  new MutationObserver(() => {
+    // 只负责"打开时把焦点移进弹窗"。焦点归还由各弹窗的关闭函数同步做，
+    // 见 hideLoginModal —— 在微任务里读 activeElement 已经太晚了。
+    if (m.classList.contains('hidden')) return;
+    // 调用方已经把焦点放进弹窗就别抢：showLoginModal 刻意聚焦 API Key 输入框，
+    // 而弹窗里第一个可聚焦元素是昵称框。
+    if (m.contains(document.activeElement)) return;
+    const f = visibleFocusables(m);
+    if (f.length) f[0].focus();
+  }).observe(m, { attributes: true, attributeFilter: ['class'] });
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Tab') return;
+  const open = Array.from(document.querySelectorAll('[role="dialog"]')).find(d => !d.classList.contains('hidden'));
+  if (!open) return;
+  const items = visibleFocusables(open);
+  if (!items.length) return;
+  const first = items[0], last = items[items.length - 1];
+  if (!open.contains(document.activeElement)) { e.preventDefault(); first.focus(); return; }
+  if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+}, true);
 
 // 页面在后台时浏览器本会节流定时器，这里显式跳过，省掉无意义的轮询请求。
 setInterval(() => { if (!document.hidden) fetchStatus(); }, 5000);
