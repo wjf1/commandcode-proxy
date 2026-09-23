@@ -14,7 +14,7 @@ import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { createInterface } from 'readline';
 import crypto from 'node:crypto';
 import { CommandCodeAdapter } from '../adapters/commandcode/adapter.js';
-import { sendToCC, isAbortError, estimateTextTokens } from '../adapters/commandcode/upstream.js';
+import { sendToCC, isAbortError, estimateTextTokens, estimateWireInputTokens } from '../adapters/commandcode/upstream.js';
 import { accumulateUsage, createUsageAccumulator } from '../adapters/commandcode/usage.js';
 import { buildRequestContext } from '../utils/request-context.js';
 import { hardenConnectionForLongStream, persistCompletion, writeSSEHeaders, parseEventLine } from './sse-common.js';
@@ -27,9 +27,11 @@ function fmtNum(n: number): string {
   return n.toLocaleString('en-US');
 }
 
-function logCompletion(inputTokens: number, outputTokens: number, startTime: number, model: string): void {
+function logCompletion(inputTokens: number, outputTokens: number, startTime: number, model: string, status: 'COMPLETED' | 'FAILED'): void {
   const timing = ((Date.now() - startTime) / 1000).toFixed(3);
-  logger.info(`Input Tokens ${fmtNum(inputTokens)} | Output Tokens ${fmtNum(outputTokens)} | Timing ${timing}s | Model ${model} | Status COMPLETED`);
+  // 状态必须与落库一致。此前这里恒打 COMPLETED，而同一条请求落库是 FAILED ——
+  // 拿日志排查失败请求时会得出完全相反的结论。
+  logger.info(`Input Tokens ${fmtNum(inputTokens)} | Output Tokens ${fmtNum(outputTokens)} | Timing ${timing}s | Model ${model} | Status ${status}`);
 }
 
 /** 常量时间字符串比较，避免逐字节短路泄露密钥前缀。 */
@@ -101,7 +103,9 @@ export async function chatRoutes(fastify: FastifyInstance) {
 
     const translated = adapter.translateOpenAIRequest(body);
     const modelName = translated.params.model;
-    let inputTokens = estimateTextTokens(JSON.stringify(translated));
+    // 只数真正进上下文的字段：原先 JSON.stringify 整个上行体会把 config 元数据和
+    // 图片 base64 也算成 input_tokens（一张截图能量出几十万个假 token）。
+    let inputTokens = estimateWireInputTokens(translated);
     const usageAcc = createUsageAccumulator();
     // 非流式也预生成 traceId：响应 id、错误日志、用量记录三者对得上。
     const traceId = `chatcmpl-${crypto.randomUUID().slice(0, 8)}`;
@@ -209,7 +213,11 @@ export async function chatRoutes(fastify: FastifyInstance) {
           }
           // 上游未回 usage 时回落到本地估算的输入量，避免记录为 0。
           if (!usageAcc.sawUsage) usageAcc.inputTokens = inputTokens;
-          logCompletion(usageAcc.inputTokens, usageAcc.outputTokens, startTime, modelName);
+          // 输出侧此前漏了：上游不给 usage 时整条按 outputTokens: 0 落库，成本被低估。
+          // 编码器本来就按分片在累加估算值（state.outputTokens），拿它兜底；非流式路径
+          // 早就是这么做的，两条路径此处应当一致。
+          if (!usageAcc.outputTokens) usageAcc.outputTokens = state.outputTokens || 0;
+          logCompletion(usageAcc.inputTokens, usageAcc.outputTokens, startTime, modelName, sawUpstreamError ? 'FAILED' : 'COMPLETED');
           // 上游以 error 事件告知失败时，这条请求不该记成 COMPLETED。
           persistOnce(
             sawUpstreamError ? 'FAILED' : 'COMPLETED',
@@ -262,6 +270,23 @@ export async function chatRoutes(fastify: FastifyInstance) {
       let reasoningContent = '';
       let outputTokens = 0;
       const toolCallsMap = new Map<string, any>();
+      // 分片归属：上游的 tool-call-delta 常常只在首片带 id/name，后续片只给参数片段。
+      let currentToolId = '';
+      let toolCallSeq = 0;
+      // 参数合并：字符串视为片段直接串接，对象按键浅合并后重新序列化。
+      const mergeToolArgs = (prev: string, input: any): string => {
+        if (typeof input === 'string') return prev + input;
+        if (input == null) return prev;
+        let base: any;
+        try {
+          base = prev ? JSON.parse(prev) : {};
+        } catch {
+          return prev + JSON.stringify(input);
+        }
+        const b = base && typeof base === 'object' ? base : {};
+        const i = typeof input === 'object' ? input : {};
+        return JSON.stringify({ ...b, ...i });
+      };
       let finishReason = 'stop';
 
       const rl = createInterface({ input: upstreamStream, crlfDelay: Infinity });
@@ -289,14 +314,32 @@ export async function chatRoutes(fastify: FastifyInstance) {
           outputTokens += estimateTextTokens(txt);
         }
         if (event.type === 'tool-call' || event.type === 'tool-call-delta') {
-          const tcId = ((event.toolCallId || event.data?.toolCallId) as string) || 'call_1';
-          const name = ((event.toolName || event.data?.toolName || event.name || event.data?.name) as string) || 'tool';
-          const input = event.input ?? event.data?.input ?? event.arguments ?? event.data?.arguments ?? {};
-          toolCallsMap.set(tcId, {
-            id: tcId,
-            type: 'function',
-            function: { name, arguments: typeof input === 'string' ? input : JSON.stringify(input) },
-          });
+          const rawId = (event.toolCallId || event.data?.toolCallId) as string | undefined;
+          // 一律回落 'call_1' 会让同一回合内的多个工具调用互相覆盖；无 id 的片段
+          // 归属到当前这个调用。
+          const tcId = rawId || currentToolId || `call_${++toolCallSeq}`;
+          currentToolId = tcId;
+          const name = ((event.toolName || event.data?.toolName || event.name || event.data?.name) as string) || '';
+          // argsText 是 AI-SDK 系 tool-call-delta 的参数片段字段；追加在读取链末尾，
+          // 上游不发这个字段时行为与原先逐字相同（纯增量，不改既有语义）。
+          const raw = event.input ?? event.data?.input ?? event.arguments ?? event.data?.arguments
+            ?? event.argsText ?? event.data?.argsText;
+          const prev = toolCallsMap.get(tcId);
+          if (!prev) {
+            toolCallsMap.set(tcId, {
+              id: tcId,
+              type: 'function',
+              function: {
+                name: name || 'tool',
+                arguments: raw == null ? '{}' : typeof raw === 'string' ? raw : JSON.stringify(raw),
+              },
+            });
+          } else {
+            if (name) prev.function.name = name;
+            // 原来这里是 set 覆盖：多片段流式下 arguments 只剩最后一片，客户端拿到
+            // 的是解析失败的坏 JSON。按 id 合并，与 adapter.ts 非流式路径一致。
+            prev.function.arguments = mergeToolArgs(prev.function.arguments, raw);
+          }
         }
         if (event.type === 'finish' || event.type === 'finish-step') {
           const rawFR = event.finishReason || event.data?.finishReason;
@@ -323,7 +366,7 @@ export async function chatRoutes(fastify: FastifyInstance) {
         finishReason = 'tool_calls';
       }
 
-      logCompletion(inputTokens, outputTokens, startTime, modelName);
+      logCompletion(inputTokens, outputTokens, startTime, modelName, sawUpstreamError ? 'FAILED' : 'COMPLETED');
       // 本地 output 估算仅在上游未给出 usage 时才需要；有 usage 时以 usageAcc 为准。
       if (!usageAcc.sawUsage) {
         usageAcc.inputTokens = inputTokens;

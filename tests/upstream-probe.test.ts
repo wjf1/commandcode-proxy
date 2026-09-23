@@ -28,6 +28,28 @@ describe('isRetryableEventMessage — 只重试瞬时性失败', () => {
     expect(isRetryableEventMessage('This model does not exist')).toBe(false);
   });
 
+  // 否决表此前只覆盖「确定性不可用」，落表的文案一律重试，于是上游校验层拒绝的
+  // 请求也被打满预算：实测 maxRetries=2 时上游被连打 3 次、多花 1.5s 退避，
+  // 换回必然相同的错误（29 万 token 上下文单次 $0.087）。
+  it('请求形态类错误不重试', () => {
+    // 实测出现过的上游校验拒绝原文
+    expect(isRetryableEventMessage('Too big: expected number to be <=200000')).toBe(false);
+    expect(isRetryableEventMessage("Unrecognized key(s) in object: 'cache_control'")).toBe(false);
+    expect(isRetryableEventMessage('unrecognized_keys')).toBe(false);
+    expect(isRetryableEventMessage("Invalid enum value. Expected 'auto' | 'none', received 'turbo'")).toBe(false);
+    expect(isRetryableEventMessage('Prompt is too long')).toBe(false);
+    expect(isRetryableEventMessage('Context length exceeded: 310000 tokens')).toBe(false);
+  });
+
+  // 关键护栏：`Invalid error response format:` 只是网关的**包装前缀**，瞬时与
+  // 确定性错误都带它。谁要是想按这个前缀拉黑，会把本仓库最典型的那次瞬时故障
+  // （Gateway request failed）的重试保护一起关掉。
+  it('包装前缀不作为判据：同前缀下的瞬时失败仍然重试', () => {
+    expect(isRetryableEventMessage('Invalid error response format: Gateway request failed')).toBe(true);
+    expect(isRetryableEventMessage('Invalid error response format: No available providers')).toBe(true);
+    expect(isRetryableEventMessage('Our servers are currently overloaded. Please try again.')).toBe(true);
+  });
+
   it('计费/套餐类终止错误不重试（复用 terminalCodeFor 判定）', () => {
     expect(isRetryableEventMessage('insufficient credits')).toBe(false);
     expect(isRetryableEventMessage('premium_credits_exhausted')).toBe(false);

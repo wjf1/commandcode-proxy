@@ -32,6 +32,61 @@ export function estimateTextTokens(text: string): number {
   return cjk + Math.ceil((text.length - cjk) / 4);
 }
 
+/**
+ * 图片块的估算额度。base64 长度与模型真正消耗的视觉 token 几乎没有关系
+ * （一张 1.5MB 的截图 base64 按字符估会得出几十万 token），所以按块给固定额度。
+ */
+export const IMAGE_TOKEN_ALLOWANCE = 1600;
+
+const safeStringify = (v: unknown): string => {
+  try {
+    return JSON.stringify(v) || '';
+  } catch {
+    return String(v ?? '');
+  }
+};
+
+/**
+ * 估算一次上行请求真正进入模型上下文的输入量。
+ *
+ * 此前两条路由都用 `estimateTextTokens(JSON.stringify(translated))`：把整个上行
+ * 请求体序列化后按字符估，于是 config 等网关元数据、以及**图片的 base64 正文**
+ * 全被当成提示词。这个数会流进 message_start 的 usage 和"上游没回 usage 时的
+ * 成本估算"，粘贴一张截图就能凭空造出几十万个 input_tokens。
+ *
+ * 这里只数真正进上下文的部分：消息文本/推理、工具调用与其结果、system、工具
+ * schema；图片按块给固定额度。
+ */
+export function estimateWireInputTokens(wire: unknown): number {
+  const chunks: string[] = [];
+  let images = 0;
+  const walk = (content: unknown): void => {
+    if (typeof content === 'string') {
+      if (content) chunks.push(content);
+      return;
+    }
+    if (!Array.isArray(content)) return;
+    for (const part of content as any[]) {
+      if (!part || typeof part !== 'object') continue;
+      if (part.type === 'image' || (typeof part.image === 'string' && !part.text)) images++;
+      if (typeof part.text === 'string' && part.text) chunks.push(part.text);
+      if (typeof part.thinking === 'string' && part.thinking) chunks.push(part.thinking);
+      if (part.input !== undefined) chunks.push(safeStringify(part.input));
+      if (part.output !== undefined) {
+        const ov = part.output?.value ?? part.output;
+        chunks.push(typeof ov === 'string' ? ov : safeStringify(ov));
+      }
+    }
+  };
+
+  const params: any = (wire as any)?.params || {};
+  walk(params.system);
+  for (const m of params.messages || []) walk(m?.content);
+  if (Array.isArray(params.tools) && params.tools.length) chunks.push(safeStringify(params.tools));
+
+  return estimateTextTokens(chunks.join('\n')) + images * IMAGE_TOKEN_ALLOWANCE;
+}
+
 /** 判断一个错误是否为"客户端/上游中止"类错误，用于决定是否放弃重试。 */
 export function isAbortError(err: any): boolean {
   if (!err) return false;
@@ -149,7 +204,8 @@ export function isRetryableEventMessage(message: string): boolean {
   if (!m) return false;
   if (terminalCodeFor(m) !== undefined) return false;
   const lower = m.toLowerCase();
-  return !DETERMINISTIC_UNAVAILABLE.some(s => lower.includes(s));
+  return !DETERMINISTIC_UNAVAILABLE.some(s => lower.includes(s))
+    && !DETERMINISTIC_REQUEST_SHAPE.some(s => lower.includes(s));
 }
 
 /** error 事件里代表「确定性不可用」的文本特征（全小写比较）。 */
@@ -161,6 +217,35 @@ const DETERMINISTIC_UNAVAILABLE = [
   'model_not_in_plan',
   'does not exist',
   'invalid api key',
+];
+
+/**
+ * 「请求形态本身不对」的确定性错误特征（全小写比较）。
+ *
+ * 判据此前只有 DETERMINISTIC_UNAVAILABLE 这一张否决表，落在表外的文案一律重试 ——
+ * 于是上游校验层拒绝的请求（实测的 zod 式 `Too big: expected number to be <=200000`）
+ * 会被打满整个重试预算。本机实测 maxRetries=2 时上游被连打 3 次、多花 1.5s 退避，
+ * 换回必然相同的错误；29 万 token 的上下文单次就是 $0.087。
+ *
+ * 只收结构化、几乎不可能出现在瞬时故障里的片段：判错的代价是"用户白等一轮"，
+ * 所以宁可漏收也不要宽收。注意 `Invalid error response format:` 只是网关的**包装前缀**，
+ * 瞬时与确定性错误都带它，绝不能作为特征。
+ */
+const DETERMINISTIC_REQUEST_SHAPE = [
+  'too big:',
+  'too small:',
+  'expected number to be',
+  // 校验器有时吐原始 issue code，有时吐人类可读文案，两种形态都收。
+  'unrecognized_keys',
+  'unrecognized key',
+  'invalid_enum_value',
+  'invalid enum value',
+  'invalid_literal',
+  'received additional arguments',
+  'invalid_type',
+  'context length exceeded',
+  'context window exceeded',
+  'prompt is too long',
 ];
 
 /** 携带内容或会改变客户端流状态、一旦转发就不能再重来的 CC 事件类型。 */
@@ -487,12 +572,25 @@ export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<
       // 自己抛出的 AbortError 到达调用方。错误文案刻意不含 "abort" 子串（isAbortError
       // 的判据之一）。
       timeoutController.signal.addEventListener('abort', () => {
-        if (deadlineFired && !rawStream.destroyed) {
+        if (rawStream.destroyed) return;
+        if (deadlineFired) {
           rawStream.destroy(new UpstreamError(
             `Upstream exceeded ${config.upstreamTimeoutMs / 1000}s total deadline`,
             504,
             false,
             ErrorCode.REQUEST_TIMEOUT,
+          ));
+        } else if (idleFired) {
+          // 空闲看门狗本来就会带一句不含 "abort" 子串的 abort reason，所以它并不会
+          // 像挂钟上限那样被误判成"客户端自己走了"。但裸 Error 到路由里走的是
+          // toProxyError 的兜底分类，会被记成 PROVIDER_PROTOCOL_ERROR（502 语义）。
+          // "上游卡住不吐字节"是超时而不是协议错误：给成 UpstreamError 后客户端能按
+          // STREAM_IDLE_TIMEOUT/504 分支重试，落库的失败原因也随之正确。
+          rawStream.destroy(new UpstreamError(
+            `No data from upstream for ${config.idleTimeoutMs / 1000}s`,
+            504,
+            false,
+            ErrorCode.STREAM_IDLE_TIMEOUT,
           ));
         }
       }, { once: true });

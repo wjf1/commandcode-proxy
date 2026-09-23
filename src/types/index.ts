@@ -228,6 +228,8 @@ export interface CCContentPart {
   type: 'text' | 'image' | 'reasoning' | 'tool-call' | 'tool-result';
   text?: string;
   image?: string;
+  /** 原 CLI 的 wire 字段；此前只靠 as any 塞进去，补进类型以免写错键名。 */
+  mediaType?: string;
   toolCallId?: string;
   toolName?: string;
   input?: Record<string, unknown>;
@@ -312,6 +314,11 @@ export interface CCGatewayBilling {
 export interface CCEvent {
   type: 'start' | 'text-delta' | 'reasoning-delta' | 'tool-call' | 'tool-call-delta' | 'finish' | 'finish-step' | 'error' | 'provider-metadata';
   text?: string;
+  /**
+   * tool-call-delta 的参数片段（AI-SDK 语法的字段名）。上游只在首片给
+   * toolCallId/toolName，后续片靠这个字段续上 JSON 片段。
+   */
+  argsText?: string;
   /** Original CLI: finish events carry totalUsage at the top level. */
   totalUsage?: CCEventUsage;
   /** provider-metadata 事件：权威计费信息（gateway.cost 等）。 */
@@ -324,6 +331,7 @@ export interface CCEvent {
     toolCallId?: string;
     toolName?: string;
     name?: string;
+    argsText?: string;
     input?: unknown;
     arguments?: unknown;
     finishReason?: string;

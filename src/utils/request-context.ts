@@ -247,14 +247,32 @@ export function inferProject(systemText: string): { project: string | null; sour
   return { project: best, source: 'heuristic' };
 }
 
-/** 从 Anthropic 请求的 system 字段（字符串或块数组）取出纯文本。 */
+/**
+ * 取出请求里的系统提示纯文本。两种入口格式都要认：
+ *   - Anthropic Messages：放在 body.system（字符串或块数组）
+ *   - OpenAI Chat：放在 messages 里 role=system / developer 的消息
+ *
+ * 此前只认前者，于是所有 /v1/chat/completions 记录的 project 都是空的 —— 面板
+ * 把它呈现成"推断未识别"，实际是输入压根没读到，与推断规则本身无关。
+ */
 export function systemTextOf(body: any): string {
+  const parts: string[] = [];
   const sys = body?.system;
   if (typeof sys === 'string') return sys;
   if (Array.isArray(sys)) {
-    return sys.map((b: any) => (typeof b?.text === 'string' ? b.text : '')).join('\n');
+    parts.push(...sys.map((b: any) => (typeof b?.text === 'string' ? b.text : '')));
   }
-  return '';
+  if (Array.isArray(body?.messages)) {
+    for (const m of body.messages) {
+      if (m?.role !== 'system' && m?.role !== 'developer') continue;
+      const c = m?.content;
+      if (typeof c === 'string') parts.push(c);
+      else if (Array.isArray(c)) {
+        for (const p of c) if (typeof p?.text === 'string') parts.push(p.text);
+      }
+    }
+  }
+  return parts.join('\n');
 }
 
 /**

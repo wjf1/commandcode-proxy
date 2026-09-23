@@ -13,11 +13,11 @@ import { FastifyInstance } from 'fastify';
 import { createInterface } from 'readline';
 import crypto from 'node:crypto';
 import { CommandCodeAdapter } from '../adapters/commandcode/adapter.js';
-import { sendToCC, isAbortError, estimateTextTokens } from '../adapters/commandcode/upstream.js';
+import { sendToCC, isAbortError, estimateTextTokens, estimateWireInputTokens, IMAGE_TOKEN_ALLOWANCE } from '../adapters/commandcode/upstream.js';
 import { accumulateUsage, createUsageAccumulator, toAnthropicUsage } from '../adapters/commandcode/usage.js';
 import { buildRequestContext, systemTextOf } from '../utils/request-context.js';
 import { hardenConnectionForLongStream, persistCompletion, writeSSEHeaders, parseEventLine } from './sse-common.js';
-import { AnthropicRequest, AnthropicContentBlock, CCEvent } from '../types/index.js';
+import { AnthropicRequest, CCEvent } from '../types/index.js';
 import { getActiveApiKey, getGatewayRunning, checkAndRotateAccountsOnQuota } from '../utils/config.js';
 import { logger } from '../utils/logger.js';
 import { ErrorCode, ProxyError, toProxyError } from '../utils/errors.js';
@@ -39,18 +39,31 @@ export async function messagesRoutes(fastify: FastifyInstance) {
       return reply.status(err.status).send(err.anthropicPayload());
     }
     let text = systemTextOf(body) + '\n';
-    for (const m of body.messages || []) {
-      const blocks: AnthropicContentBlock[] =
-        typeof m.content === 'string' ? [{ type: 'text', text: m.content }] : m.content || [];
-      for (const b of blocks) {
-        if (b.type === 'text') text += b.text + '\n';
-        else if (b.type === 'thinking') text += b.thinking + '\n';
-        else if (b.type === 'tool_use') text += JSON.stringify(b.input ?? {});
-        else if (b.type === 'tool_result' && typeof b.content === 'string') text += b.content + '\n';
+    // 工具 schema 也进上下文，Anthropic 的 count_tokens 口径本来就包含它。
+    if (Array.isArray(body.tools) && body.tools.length) text += JSON.stringify(body.tools) + '\n';
+    let images = 0;
+    // tool_result 的 content 既可以是字符串，也可以是 [{type:'text'|'image'}] 数组 ——
+    // 而**数组形态才是 agent 上下文的主体**（文件内容、命令输出、截图）。此前只认
+    // 字符串，这块被整个漏掉，于是 count_tokens 大幅低报：客户端以为无需压缩上下文，
+    // 最后由上游以 context length 超限报错。
+    const countBlocks = (blocks: any[]): void => {
+      for (const b of blocks || []) {
+        if (!b || typeof b !== 'object') continue;
+        if (b.type === 'text') text += (b.text || '') + '\n';
+        else if (b.type === 'thinking') text += (b.thinking || '') + '\n';
+        else if (b.type === 'image' || b.type === 'image_url') images++;
+        else if (b.type === 'tool_use') text += `${b.name || ''} ${JSON.stringify(b.input ?? {})}\n`;
+        else if (b.type === 'tool_result') {
+          if (typeof b.content === 'string') text += b.content + '\n';
+          else if (Array.isArray(b.content)) countBlocks(b.content);
+        }
       }
+    };
+    for (const m of body.messages || []) {
+      countBlocks(typeof m.content === 'string' ? [{ type: 'text', text: m.content }] : (m.content || []));
       text += '\n';
     }
-    return { input_tokens: estimateTextTokens(text) };
+    return { input_tokens: estimateTextTokens(text) + images * IMAGE_TOKEN_ALLOWANCE };
   });
 
   fastify.post('/v1/messages', async (req, reply) => {
@@ -78,7 +91,9 @@ export async function messagesRoutes(fastify: FastifyInstance) {
     const translated = adapter.translateAnthropicRequest(body);
     const modelName = translated.params.model;
     const msgId = `msg_${crypto.randomUUID().slice(0, 8)}`;
-    let inputTokens = estimateTextTokens(JSON.stringify(translated));
+    // 只数真正进上下文的字段：原先 JSON.stringify 整个上行体会把 config 元数据和
+    // 图片 base64 也算成 input_tokens（一张截图能量出几十万个假 token）。
+    let inputTokens = estimateWireInputTokens(translated);
     const usageAcc = createUsageAccumulator();
     // 会话/项目等归因信息：会话 ID 来自客户端声明，项目为推断（见模块注释）。
     const requestContext = buildRequestContext(req.headers as any, body);
@@ -167,8 +182,25 @@ export async function messagesRoutes(fastify: FastifyInstance) {
         let outputTokens = 0;
         let stopReason: string | null = null;
 
+        // tool_use 按 id 复用同一个块。此前每个 tool-call-delta 分片都各自发一轮
+        // content_block_start/delta/stop 并递增索引：N 个分片就变成 N 个同 id 的块、
+        // 各带一段 JSON 碎片，Anthropic SDK 聚合出来的是坏 input —— 而 adapter.ts
+        // 非流式路径是按 id 合并的，同一份上游流在两条编码路径下结论不同。
+        interface ToolBlock { index: number; name: string; open: boolean }
+        const toolBlocks = new Map<string, ToolBlock>();
+        let currentToolId = '';
+        const closeToolBlocks = () => {
+          for (const b of toolBlocks.values()) {
+            if (!b.open) continue;
+            b.open = false;
+            reply.raw.write(sse('content_block_stop', { type: 'content_block_stop', index: b.index }));
+          }
+        };
+
         const openTextBlock = () => {
           if (textBlockOpen) return;
+          // 块必须先后天闭合：Anthropic 客户端按 start/stop 配对来切内容块。
+          closeToolBlocks();
           textBlockOpen = true;
           reply.raw.write(sse('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }));
         };
@@ -180,6 +212,7 @@ export async function messagesRoutes(fastify: FastifyInstance) {
 
         const openThinkingBlock = () => {
           if (thinkingBlockOpen) return;
+          closeToolBlocks();
           thinkingBlockOpen = true;
           reply.raw.write(sse('content_block_start', { type: 'content_block_start', index: 1, content_block: { type: 'thinking', thinking: '' } }));
         };
@@ -228,25 +261,40 @@ export async function messagesRoutes(fastify: FastifyInstance) {
           } else if (event.type === 'tool-call' || event.type === 'tool-call-delta') {
             closeThinkingBlock();
             closeTextBlock();
-            const toolCallId = ((event.toolCallId || event.data?.toolCallId) as string) || `toolu_${crypto.randomUUID().slice(0, 8)}`;
-            const toolName = ((event.toolName || event.data?.toolName || event.name || event.data?.name) as string) || 'tool';
-            const input = event.input ?? event.data?.input ?? {};
-            reply.raw.write(
-              sse('content_block_start', {
-                type: 'content_block_start',
-                index: toolBlockIndex,
-                content_block: { type: 'tool_use', id: toolCallId, name: toolName, input: {} },
-              })
-            );
-            reply.raw.write(
-              sse('content_block_delta', {
-                type: 'content_block_delta',
-                index: toolBlockIndex,
-                delta: { type: 'input_json_delta', partial_json: typeof input === 'string' ? input : JSON.stringify(input) },
-              })
-            );
-            reply.raw.write(sse('content_block_stop', { type: 'content_block_stop', index: toolBlockIndex }));
-            toolBlockIndex++;
+            const rawId = (event.toolCallId || event.data?.toolCallId) as string | undefined;
+            // 无 id 的分片归属到当前调用；还没有任何调用时才造一个新 id。
+            const toolCallId = rawId || currentToolId || `toolu_${crypto.randomUUID().slice(0, 8)}`;
+            currentToolId = toolCallId;
+            const toolName = ((event.toolName || event.data?.toolName || event.name || event.data?.name) as string) || '';
+            // argsText：AI-SDK 系 tool-call-delta 的参数片段字段。读取链末尾追加，
+            // 上游不发这个字段时行为与原先逐字相同（纯增量）。
+            const raw = event.input ?? event.data?.input ?? event.argsText ?? event.data?.argsText;
+            const partialJson = raw == null
+              ? (event.type === 'tool-call-delta' ? '' : '{}')
+              : (typeof raw === 'string' ? raw : JSON.stringify(raw));
+            let block = toolBlocks.get(toolCallId);
+            if (!block) {
+              block = { index: toolBlockIndex++, name: toolName || 'tool', open: true };
+              toolBlocks.set(toolCallId, block);
+              reply.raw.write(
+                sse('content_block_start', {
+                  type: 'content_block_start',
+                  index: block.index,
+                  content_block: { type: 'tool_use', id: toolCallId, name: block.name, input: {} },
+                })
+              );
+            }
+            // 同一调用只发一次 start，其余分片全部走 input_json_delta 追加，
+            // 客户端按序拼接即是完整 JSON。
+            if (partialJson) {
+              reply.raw.write(
+                sse('content_block_delta', {
+                  type: 'content_block_delta',
+                  index: block.index,
+                  delta: { type: 'input_json_delta', partial_json: partialJson },
+                })
+              );
+            }
             stopReason = 'tool_use';
           } else if (event.type === 'error') {
             const errObj = event.error || event;
@@ -282,6 +330,8 @@ export async function messagesRoutes(fastify: FastifyInstance) {
           cleanupPings();
           closeThinkingBlock();
           closeTextBlock();
+          // 最后一个 tool_use 块只能在这里闭合：流式期间它一直开着等后续分片。
+          closeToolBlocks();
           if (!stopReason) stopReason = 'end_turn';
           // 上游未回 usage 时回落到本地估算，避免记录为 0。
           if (!usageAcc.sawUsage) {
@@ -327,6 +377,7 @@ export async function messagesRoutes(fastify: FastifyInstance) {
           logger.error(`[MESSAGES] Upstream stream error | Trace ${msgId} | ${err.message}`);
           closeThinkingBlock();
           closeTextBlock();
+          closeToolBlocks();
           const proxyErr = toProxyError(err, ErrorCode.PROVIDER_PROTOCOL_ERROR);
           // 流中途失败：带上已累积的 usage 落库（前半段上游很可能已计费，记 0 会低估）。
           persistOnce('FAILED', proxyErr.code);

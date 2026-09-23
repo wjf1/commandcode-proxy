@@ -282,6 +282,10 @@ export class CommandCodeAdapter {
       }
     }
 
+    // 工具结果里带出来的图片：wire 的 image part 只有 user 消息支持，所以先攒着，
+    // 循环结束后作为紧随其后的 user 消息插入。
+    const pendingToolImages: CCContentPart[] = [];
+
     for (const m of req.messages || []) {
       if (m.role === 'system' || m.role === 'developer') {
         const textContent = typeof m.content === 'string' ? m.content : this.contentPartsToText(m.content);
@@ -338,7 +342,7 @@ export class CommandCodeAdapter {
         ccMessages.push({ role: 'assistant', content: parts.length > 0 ? parts : '' });
       } else if (m.role === 'tool' || m.role === 'function') {
         const toolName = toolNameById.get(m.tool_call_id || '') || m.name || 'tool';
-        const outputVal = typeof m.content === 'string' ? m.content : this.contentPartsToText(m.content);
+        const { text: outputVal, images } = this.flattenToolResult(m.content);
         const toolResultPart: CCContentPart = {
           type: 'tool-result',
           toolCallId: m.tool_call_id || '',
@@ -351,7 +355,14 @@ export class CommandCodeAdapter {
         } else {
           ccMessages.push({ role: 'tool', content: [toolResultPart] });
         }
+        pendingToolImages.push(...images);
       }
+    }
+
+    // 工具结果里的图片提升为一条 user 消息（旧实现把它们折成 `[image]` 字面量丢掉）。
+    // 放在工具消息之后而不是之内，是因为上游 wire 只在 user 消息上接受 image part。
+    if (pendingToolImages.length > 0) {
+      ccMessages.push({ role: 'user', content: pendingToolImages });
     }
 
     const finalMessages = this.pruneDanglingTools(ccMessages);
@@ -376,6 +387,11 @@ export class CommandCodeAdapter {
         max_tokens: clampMaxTokens(req.max_completion_tokens ?? req.max_tokens ?? 64000),
         ...(req.temperature != null ? { temperature: req.temperature } : {}),
         ...(req.top_p != null ? { top_p: req.top_p } : {}),
+        // 上游对未知 params 字段是「静默忽略、而非拒绝」—— 已对真实上游实测：带这些
+        // 字段与不带的响应逐字节相同，没有任何 400 / unrecognized_keys。因此转发是
+        // 安全的。但在套餐内模型上是否真的生效**尚未验证**，不要当成已支持的特性宣传。
+        ...(req.stop ? { stop: Array.isArray(req.stop) ? req.stop : [req.stop] } : {}),
+        ...(req.response_format ? { response_format: req.response_format } : {}),
         ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
       },
     };
@@ -416,11 +432,18 @@ export class CommandCodeAdapter {
 
         for (const block of blocks) {
           if (block.type === 'tool_result') {
-            const resultText = this.anthropicResultToText(block);
+            const { text: resultText, images } = this.anthropicResultToParts(block);
+            const body = block.is_error ? `[ERROR] ${resultText}` : resultText;
+            // 图片作为 image_url part 挂在同一条 tool 消息上，由 translateOpenAIRequest
+            // 统一提升成随后的 user 消息 —— 两条入口只保留一份图片处理逻辑。
+            const parts: any[] = [
+              { type: 'text', text: body },
+              ...images.map(url => ({ type: 'image_url', image_url: { url } })),
+            ];
             toolResults.push({
               role: 'tool',
               tool_call_id: block.tool_use_id,
-              content: block.is_error ? `[ERROR] ${resultText}` : resultText,
+              content: images.length ? parts : body,
             });
           } else if (block.type === 'text') {
             (regularParts as any[]).push({ type: 'text', text: block.text });
@@ -475,6 +498,8 @@ export class CommandCodeAdapter {
       max_tokens: req.max_tokens,
       temperature: req.temperature,
       top_p: req.top_p,
+      // Anthropic 的 stop_sequences 归一到 OpenAI 的 stop，下游只有一份转发逻辑。
+      ...(req.stop_sequences?.length ? { stop: req.stop_sequences } : {}),
       stream: req.stream,
       tools: req.tools?.map(t => ({ type: 'function' as const, function: { name: t.name, description: t.description, parameters: t.input_schema } })),
       tool_choice: undefined,
@@ -491,15 +516,26 @@ export class CommandCodeAdapter {
     return wire;
   }
 
-  private anthropicResultToText(block: Extract<AnthropicContentBlock, { type: 'tool_result' }>): string {
-    if (typeof block.content === 'string') return block.content;
-    if (!Array.isArray(block.content)) return '';
-    const out: string[] = [];
+  /**
+   * tool_result 的内容拆成「文本 + 图片」两部分。
+   *
+   * 旧实现把图片压成 base64 的前 64 字符混进文本（`[image: data:image/png;base64,iVBOR…]`），
+   * 于是截图/浏览器类 agent 的观察通道在代理里被静默销毁：模型什么也没看到，
+   * 客户端也收不到任何提示。改成随结果一起带下去，由 translateOpenAIRequest 提升到
+   * 紧随其后的 user 消息里（wire 在 user 消息上支持 image part，这一点已对上游实测）。
+   */
+  private anthropicResultToParts(
+    block: Extract<AnthropicContentBlock, { type: 'tool_result' }>
+  ): { text: string; images: string[] } {
+    if (typeof block.content === 'string') return { text: block.content, images: [] };
+    if (!Array.isArray(block.content)) return { text: '', images: [] };
+    const texts: string[] = [];
+    const images: string[] = [];
     for (const part of block.content) {
-      if (part.type === 'text') out.push(part.text);
-      else if (part.type === 'image') out.push(`[image: ${this.anthropicImageToDataUrl(part).slice(0, 64)}...]`);
+      if (part.type === 'text') texts.push(part.text);
+      else if (part.type === 'image') images.push(this.anthropicImageToDataUrl(part));
     }
-    return out.join('\n');
+    return { text: texts.join('\n'), images };
   }
 
   private anthropicImageToDataUrl(block: Extract<AnthropicContentBlock, { type: 'image' }>): string {
@@ -524,6 +560,39 @@ export class CommandCodeAdapter {
         .join('\n');
     }
     return String(content ?? '');
+  }
+
+  /**
+   * 工具结果内容 → { 文本, 图片 wire part }。
+   *
+   * contentPartsToText 把图片折成字面量 `[image]`，用在 system/assistant 上是合理的
+   * （那里本就不该出现图），但工具结果正是 agent 看截图的唯一通道，必须把图片留住。
+   */
+  private flattenToolResult(content: unknown): { text: string; images: CCContentPart[] } {
+    if (typeof content === 'string') return { text: content, images: [] };
+    if (!Array.isArray(content)) return { text: '', images: [] };
+    const texts: string[] = [];
+    const images: CCContentPart[] = [];
+    for (const p of content as any[]) {
+      if (!p || typeof p !== 'object') continue;
+      if (p.type === 'text') {
+        if (p.text) texts.push(p.text);
+        continue;
+      }
+      if (p.type !== 'image_url' && p.type !== 'image') continue;
+      const url: string = p.image_url?.url ?? (typeof p.image === 'string' ? p.image : '');
+      if (!url) continue;
+      // 与 user 消息同一套 wire 形状：裸 base64 + mediaType，不是 data URL。
+      const dataUrl = /^data:([^;]+);base64,(.*)$/.exec(url);
+      images.push(dataUrl
+        ? { type: 'image', image: dataUrl[2], mediaType: dataUrl[1] }
+        : { type: 'image', image: url, mediaType: 'image/png' });
+    }
+    // 文本里明说图片另行附上，而不是静默替换成一个占位符。
+    const note = images.length
+      ? `\n[本次工具结果包含 ${images.length} 张图片，已作为紧随其后的用户消息单独附上]`
+      : '';
+    return { text: texts.join('\n') + note, images };
   }
 
   // ── wire config（CLI 指纹，伪装成本地 git 仓库以匹配 CLI 行为）────────────────
@@ -729,7 +798,14 @@ export class CommandCodeAdapter {
         }
         if (usage.outputTokens != null) state.outputTokens = usage.outputTokens;
       }
-      const rawFR = event.finishReason || event.data?.finishReason || (state.toolCallIdToIndex.size > 0 ? 'tool-calls' : 'stop');
+      const upstreamFR = event.finishReason || event.data?.finishReason;
+      const hasToolCalls = state.toolCallIdToIndex.size > 0;
+      // 上游明确回 stop/end_turn 时也不能压过**实际已流出**的工具调用：客户端按
+      // finish_reason 判断回合是否结束，被压过时整批 tool_calls 被丢弃、agent 静默卡住。
+      // 只有 length（被 max_tokens 截断）优先级更高。与 chat.ts 非流式路径处置一致。
+      const rawFR = hasToolCalls && upstreamFR !== 'length' && upstreamFR !== 'max_tokens'
+        ? 'tool-calls'
+        : upstreamFR || (hasToolCalls ? 'tool-calls' : 'stop');
       const finishReason =
         rawFR === 'tool-calls' || rawFR === 'tool_calls'
           ? 'tool_calls'
