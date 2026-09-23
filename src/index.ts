@@ -38,7 +38,7 @@ function noteUncaught(kind: string, detail: string): void {
   logger.error(`[CRITICAL] Uncaught ${kind}: ${detail}`);
   if (crashTimes.length >= CRASH_THRESHOLD) {
     logger.error(`[CRITICAL] ${CRASH_THRESHOLD} uncaught ${kind} within 5 minutes; exiting for supervisor restart.`);
-    process.exit(1);
+    exitForCrashBudget(kind);
   }
 }
 
@@ -95,7 +95,7 @@ async function sampleQuotaWindow(): Promise<void> {
 // 优雅退出：SIGINT/SIGTERM 时先冲刷挂起的用量写入（内存写队列）再关闭，
 // 避免 Ctrl+C 丢掉最后一两条会话记录。二次信号直接强制退出。
 let shuttingDown = false;
-async function shutdown(signal: string): Promise<void> {
+async function shutdown(signal: string, exitCode = 0): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   logger.info(`[SERVER] ${signal} received; flushing pending usage writes and closing...`);
@@ -105,10 +105,20 @@ async function shutdown(signal: string): Promise<void> {
   try {
     await fastify.close();
   } catch { /* 尽力而为 */ }
-  process.exit(0);
+  process.exit(exitCode);
 }
 process.on('SIGINT', () => void shutdown('SIGINT'));
 process.on('SIGTERM', () => void shutdown('SIGTERM'));
+
+/**
+ * 崩溃预算用尽时的退出：走与 SIGINT 同一条收尾路径，否则排队的用量记录会随进程
+ * 一起丢掉（这是丢数据，不是丢日志）。冲刷本身可能挂在死掉的上游连接上，所以
+ * 另挂一个不 unref 的 2s 兜底计时器，到点无条件退出交给服务管理器重启。
+ */
+function exitForCrashBudget(kind: string): void {
+  void shutdown(`uncaught-${kind}`, 1);
+  setTimeout(() => process.exit(1), 2000);
+}
 
 const start = async () => {
   try {
@@ -138,23 +148,28 @@ const start = async () => {
     }
 
     // v3 bug 修复：auto-quota 轮换此前是死代码 —— 现在真正被调度执行。
-    if (config.rotationMode === 'auto-quota' && config.accounts.length > 1) {
-      setInterval(() => {
-        checkAndRotateAccountsOnQuota().catch(err => {
-          logger.warn(`[AUTO-QUOTA] Scheduled check failed: ${err.message}`);
-        });
-      }, QUOTA_CHECK_INTERVAL_MS);
-      logger.info('[AUTO-QUOTA] Rotation scheduler active (every 30m).');
-    }
+    //
+    // 但装配条件必须放在 tick 里、且用**新鲜**配置判定。此前是启动时一次性
+    // `if (config.rotationMode === 'auto-quota' && config.accounts.length > 1) setInterval(...)`，
+    // 而 config 是启动期快照：用户在仪表盘把模式切成 auto-quota 或加上第二个账号后，
+    // 设置已持久化、UI 显示"已开启"，调度器却永远不会启动，直到下次重启 ——
+    // 正是"看起来在工作、实际没工作"的那一类。
+    setInterval(() => {
+      const live = loadConfig();
+      if (live.rotationMode !== 'auto-quota' || live.accounts.length <= 1) return;
+      checkAndRotateAccountsOnQuota().catch(err => {
+        logger.warn(`[AUTO-QUOTA] Scheduled check failed: ${err.message}`);
+      });
+    }, QUOTA_CHECK_INTERVAL_MS);
+    logger.info('[AUTO-QUOTA] Rotation scheduler armed (every 30m, gated per tick).');
 
-    // 燃烧速率采样：立即采一次拿到基线，之后定时差分。
-    if (getActiveApiKey()) {
-      sampleQuotaWindow().catch(() => {});
-      setInterval(() => {
-        sampleQuotaWindow().catch(err => logger.warn(`[QUOTA-SAMPLE] ${err?.message || err}`));
-      }, QUOTA_SAMPLE_INTERVAL_MS);
-      logger.info('[QUOTA-SAMPLE] Window usage sampler active (every 5m).');
-    }
+    // 燃烧速率采样：立即采一次拿到基线，之后定时差分。同理不按启动时是否有 Key
+    // 来决定装配 —— sampleQuotaWindow 无 Key 时自己就会返回，中途加账号无需重启。
+    sampleQuotaWindow().catch(() => {});
+    setInterval(() => {
+      sampleQuotaWindow().catch(err => logger.warn(`[QUOTA-SAMPLE] ${err?.message || err}`));
+    }, QUOTA_SAMPLE_INTERVAL_MS);
+    logger.info('[QUOTA-SAMPLE] Window usage sampler active (every 5m).');
 
     // 预注册通知 AUMID：让第一条 toast 就能以 "CommandCode Proxy" 名义显示，
     // 而不是回退到 PowerShell。幂等，且失败只影响显示名，不阻断启动。
