@@ -185,7 +185,7 @@ Anthropic 出口（`/v1/messages`）：
 | `BLOCKED_HOST` | 500 | 上游地址被 SSRF 防护拒绝 |
 | `INTERNAL_ERROR` | 500 | 网关内部异常 |
 
-**重试语义**：`408/409/425/429/500/502/503/504` 按指数退避重试（上限 `upstream.maxRetries`）；一旦命中终止性计费/套餐标记（`model_not_in_plan`、`premium_credits_exhausted`、`insufficient credits`）**立即失败、绝不重试**——重试只会白耗额度。重试耗尽后仍保留上游真实状态码与错误码，不会包装成"网络故障"。
+**重试语义**：`408/409/425/429/500/502/503/504` 按指数退避重试（上限 `upstream.maxRetries`）；一旦命中终止性计费/套餐标记（`model_not_in_plan`、`premium_credits_exhausted`、`insufficient credits`）**立即失败、绝不重试**——重试只会白耗额度。**请求形态本身不合法同样不重试**：上游校验层拒绝的请求（如 `Too big: expected number to be <=200000`、`unrecognized_keys`、`invalid_type`、`context length exceeded`）重试只是把同一份请求再撞一次校验——实测此前会打满 `maxRetries` 次、多花约 1.5s 退避。否决表见 `src/adapters/commandcode/upstream.ts` 的 `DETERMINISTIC_REQUEST_SHAPE`。重试耗尽后仍保留上游真实状态码与错误码，不会包装成"网络故障"。
 
 **上游以 200 报错也会被重试**：上游常把「网关请求失败 / 服务过载 / 无可用 provider」这类失败以 error 事件发在一个 **HTTP 200** 的流里，HTTP 层的重试够不到它——过去它会被并入正文当成模型的回答返回（一轮 16 分钟的工作就以 `[Upstream Error: ...]` 这段文本收场）。现在代理会在把流交给路由**之前**预判流内事件：只要**内容之前**出现可重试的 error 事件，且还有重试预算，就丢弃这次调用并重试（此刻客户端一个字节都没收到，不会重复内容）。**确定性不可用不重试**：区域限制、模型/provider 不认识这类重试只会白耗额度（29 万 token 上下文单次就是 $0.087）。判定细节见 `src/adapters/commandcode/upstream.ts` 的 `classifyProbeEvent`。
 
