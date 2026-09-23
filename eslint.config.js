@@ -5,8 +5,9 @@ import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
   {
-    // 构建产物、前端 SPA（经 tests/dashboard-spa.test.ts 单独守卫）、依赖
-    ignores: ['dist/**', 'node_modules/**', 'public/**', '*.mjs'],
+    // 构建产物、前端 SPA（经 tests/dashboard-spa.test.ts 与 tests/spa-*.test.ts
+    // 单独守卫）、依赖
+    ignores: ['dist/**', 'node_modules/**', 'public/**'],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,
@@ -21,14 +22,20 @@ export default tseslint.config(
     },
   },
   {
-    // CI 会执行 scripts/ 下的工具脚本（.github/workflows/release.yml 就调它），
-    // 所以必须过 lint 而不是 ignore —— 只在 CI 里跑、又没有任何静态检查的文件，
+    // CI 会执行这些工具脚本（.github/workflows/release.yml 就调它），所以必须过
+    // lint 而不是 ignore —— 只在 CI 里跑、又没有任何静态检查的文件，
     // 等于把第一次运行留到线上。
-    // 上面的 `*.mjs` 只匹配仓库根，不会罩住这里；node 全局按文件作用域声明。
-    files: ['scripts/**/*.mjs'],
+    // 仓库根的三个 .mjs（bench-models / purge-test-usage / usage-history-io）同样是
+    // README 让维护者手工运行的工具，理由一致，此前却被根级 `*.mjs` 一条忽略漏掉了。
+    files: ['scripts/**/*.mjs', '*.mjs'],
     languageOptions: {
       sourceType: 'module',
-      globals: { console: 'readonly' },
+      globals: {
+        console: 'readonly', process: 'readonly', Buffer: 'readonly', URL: 'readonly',
+        setTimeout: 'readonly', clearTimeout: 'readonly',
+        // Node 18 起为全局，但 eslint 的默认 ecmaVersion 不会自动带上
+        fetch: 'readonly', AbortSignal: 'readonly', AbortController: 'readonly',
+      },
     },
   },
 );

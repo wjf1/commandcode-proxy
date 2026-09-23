@@ -17,9 +17,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # 22 是同时满足 vitest@5（^22.12 || ^24 || >=26）与 eslint@10
+      # （^20.19 || ^22.13 || >=24）的版本。此前固定在 20：vitest 5 的 engines
+      # 下限是 22.12，CI 一直把测试 Runner 跑在它自己声明的支持范围之下——
+      # engines 只是建议、npm 默认不拦，所以现在是"恰好能跑"，
+      # vitest 补丁版一旦用到 20 没有的 API 就会莫名其妙炸 CI。
+      # 真正交付给用户的 Node 18 由下面的 smoke job 覆盖（那里跑不了 vitest）。
       - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: '22'
           cache: npm
 
       - name: Install dependencies
@@ -38,7 +44,76 @@ jobs:
       - name: Test
         run: npx vitest run
 
-      # 覆盖率只在基线系统跑一份，避免矩阵重复
+      # 覆盖率只在基线系统跑一份，避免矩阵重复。
+      # 带阈值：此前只打印 text-summary，覆盖率全靠人往 CHANGELOG 里手抄，
+      # 跌回去不会有任何人知道。锁在 65（当前 statements 约 67）。
       - name: Coverage
         if: matrix.os == 'ubuntu-latest'
-        run: npx vitest run --coverage --coverage.reporter=text-summary
+        run: npx vitest run --coverage --coverage.reporter=text-summary --coverage.thresholds.statements=65
+
+      # 把构建产物交给 smoke job 用，省掉在 Node 18 上装整套 devDependencies
+      # （vitest/eslint 在 18 上根本装不干净）。
+      - name: Upload dist
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 1
+
+  # 交付运行时冒烟：pkg 打的是 node18-win-x64、package.json 声明 engines >=18.17，
+  # 而主 job 从不执行那个运行时 —— 声明的支持面里唯一没人验证过的就是它。
+  # 这里不跑测试框架，只起真实进程打两个请求：/health 与仪表盘 HTML。
+  smoke-node18:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '18.17'
+
+      # 只装生产依赖：vitest/eslint 在 18 上装不干净，而这里也不需要它们
+      - name: Install production dependencies only
+        run: npm ci --omit=dev
+
+      - name: Download built dist
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Start proxy and probe it
+        shell: bash
+        run: |
+          set -euo pipefail
+          DIR="$(mktemp -d)"
+          printf '%s' '{"port":9099,"host":"127.0.0.1"}' > "$DIR/config.json"
+          : > "$DIR/.env"
+          COMMANDCODE_CONFIG_PATH="$DIR/config.json" \
+          COMMANDCODE_ENV_FILE_PATH="$DIR/.env" \
+          COMMANDCODE_MODELS_CACHE_PATH="$DIR/models.json" \
+          COMMANDCODE_PRICING_CACHE_PATH="$DIR/pricing.json" \
+          COMMANDCODE_LOG_PATH="$DIR/proxy.log" \
+          USAGE_HISTORY_PATH="$DIR/usage.jsonl" \
+          NO_OPEN_BROWSER=1 HOST=127.0.0.1 PORT=9099 \
+          node dist/index.js > "$DIR/stdout.log" 2>&1 &
+          SRV=$!
+          trap 'kill $SRV 2>/dev/null || true' EXIT
+          # 轮询到就绪，而不是 sleep 一个固定值赌调度
+          for i in $(seq 1 40); do
+            if curl -fsS --max-time 3 http://127.0.0.1:9099/health > "$DIR/health.json"; then break; fi
+            sleep 1
+            if [ "$i" = 40 ]; then echo "服务未能在 40s 内就绪"; cat "$DIR/stdout.log"; exit 1; fi
+          done
+          cat "$DIR/health.json"
+          grep -q '"status":"ok"' "$DIR/health.json"
+          # 仪表盘 HTML 必须发得出来（public/ 是 pkg assets，也是运行时依赖）
+          curl -fsS --max-time 5 -o "$DIR/index.html" http://127.0.0.1:9099/
+          grep -qi "<title" "$DIR/index.html"
+          echo "Node 18 smoke OK: $(node -v)"

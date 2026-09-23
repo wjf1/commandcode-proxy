@@ -187,6 +187,9 @@ async function main() {
   if (REPLACE) removePreviousBenchRecords();
 
   const before = await jget(`${PROXY}/api/usage/overview`).then(j => j?.limits?.fiveHour?.used).catch(() => null);
+  // 这个工具会真金白银烧额度：取到的起始 5h 窗口用量必须显出来，
+  // 否则读了没人用（此前正是这个状态），跑的人看不到自己从哪儿起步。
+  if (before != null) console.log(`起始 5h 窗口已用 $${Number(before).toFixed(2)}`);
   console.log(`安全阀：本次会话累计成本超过 $${MAX_USD} 即中止\n`);
 
   const results = [];
