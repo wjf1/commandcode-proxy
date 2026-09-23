@@ -8,14 +8,20 @@ import { fileURLToPath } from 'node:url';
 import { getProjectRootDir } from './paths.js';
 
 function readVersion(): string {
-  const candidates = [
-    // 1) 模块相对路径：无论 cwd 在哪都指向仓库根（dist/utils/version.js → ../../package.json）
-    fileURLToPath(new URL('../../package.json', import.meta.url)),
-    // 2) 打包（pkg）或可执行文件与包同目录的场景
+  const candidates: string[] = [];
+  // CJS 打包（esbuild --format=cjs → bundle.cjs，再由 pkg 包进 exe）下 import.meta.url
+  // 是空字符串，new URL('../../package.json', '') 会抛 ERR_INVALID_URL。
+  // 关键在于抛出点在下面那个 try 之外——它在数组字面量求值时发生，于是整个模块加载
+  // 失败、进程在起监听之前就死了，exe 完全不可用。单独包住这一句，让它降级到兜底候选。
+  try {
+    candidates.push(fileURLToPath(new URL('../../package.json', import.meta.url)));
+  } catch {
+    // 打包运行时没有 import.meta.url，交给下面的路径兜底
+  }
+  candidates.push(
     path.join(getProjectRootDir(), 'package.json'),
-    // 3) 兜底：上一级目录
     path.join(getProjectRootDir(), '..', 'package.json'),
-  ];
+  );
   for (const file of candidates) {
     try {
       const parsed = JSON.parse(fs.readFileSync(file, 'utf-8'));

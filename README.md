@@ -4,7 +4,7 @@
 
 [![version](https://img.shields.io/github/package-json/v/wjf1/commandcode-proxy?style=flat-square&color=6366f1&label=v4)](https://github.com/wjf1/commandcode-proxy/blob/main/package.json)
 [![CI](https://img.shields.io/github/actions/workflow/status/wjf1/commandcode-proxy/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/wjf1/commandcode-proxy/actions/workflows/ci.yml)
-[![node](https://img.shields.io/badge/node-%E2%89%A518.17-339933?style=flat-square)](./package.json)
+[![node](https://img.shields.io/badge/node-%E2%89%A520-339933?style=flat-square)](./package.json)
 [![license](https://img.shields.io/badge/license-MIT-94a3b8?style=flat-square)](./LICENSE)
 
 **本地部署的 OpenAI / Anthropic 双协议网关，透明代理 CommandCode AI**
@@ -113,7 +113,7 @@ npm run build && npm start
 或独立二进制：
 
 ```bash
-npm run build:win    # dist/commandcode-proxy-v4.exe —— 零依赖运行
+npm run build:win    # dist/commandcode-proxy-v4.exe —— 零依赖运行（打包需 Node ≥22）
 ```
 
 > [!TIP]

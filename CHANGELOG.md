@@ -2,6 +2,34 @@
 
 所有主要版本更新都记录在此文件。
 
+## [4.19.1] - 2026-09-24
+
+### 修复
+- **`engines` 从 `>=18.17` 抬到 `>=20`，Node 18 支持结束**。4.19.0 新增的 `smoke-node18` 作业**首跑就红了**：`TypeError: diagnostics.tracingChannel is not a function`——fastify 5 用到的 `diagnostics_channel.tracingChannel` 是 Node 20 才有的 API。
+  这**不是新引入的缺陷**，而是"声明的支持面下限从来没人执行过"：主矩阵跑在 20/22 上，`engines` 只是声明、npm 默认不拦，所以自 dependabot 把 fastify 从 4.29.1 升到 5.12.3 起，Node 18 就已经起不来了，直到这个作业出现才被发现。**该作业本身是对的，不要为了让它变绿而放宽它。**
+- **打包后的 exe 此前在加载期就崩，根本起不来**（`src/utils/version.ts`）。CJS 打包下 `import.meta.url` 是空字符串，`new URL('../../package.json', '')` 抛 `ERR_INVALID_URL`——而抛出点在"为坏候选兜底"的那个 `try` **之外**（它在数组字面量求值时发生，不是读取文件时），于是模块加载失败、进程在起监听之前就死了。改为单独包住这一句、让它降级到下面的兜底路径。
+  实测：修复前 exe 退出码 1、无监听；修复后 exe 正常启动（banner 报 4.19.1、`/health` 200、`netstat` 确认端口归属 `commandcode-proxy-v4.exe`）。
+
+### 构建
+- **打包器 `pkg` → `@yao-pkg/pkg`（6.x），目标 `node18-win-x64` → `node22-win-x64`**。原来那条链是被 vercel/pkg 的天花板钉住的：pkg 已停止维护、最高只支持 node18，`engines >=18.17` 与 `--target node18-win-x64` 都是它的产物，**不是独立的产品决策**。换到维护中的 fork 后 exe 内嵌 node22，"零依赖 exe"这项能力不变（静态资源另有问题，见文末「已知问题」）。
+  注意：打包需要 Node ≥22 来运行 `@yao-pkg/pkg` 自身（其预编译二进制由 `@yao-pkg/pkg-fetch` 提供，覆盖 node22/24/26）。
+
+### CI
+- **`smoke-node18` → `smoke-node20`**，改为验证 `engines` 的**下限本身**。选下限而不是 22：能起在 20 上就蕴含能起在 22 上，一个作业同时覆盖"声明的下限是真的"和"pkg 内嵌的 node22 跑得起来"。
+
+### 安全
+- **`npm audit` 清零（此前 2 高危 + 1 中危）**。曾评估"把 fastify 回退到 4.x 以保住 Node 18"这条路线：技术上可行（`^4.29.1` 下 typecheck/lint/build 0 错误、389 项全绿、零代码改动），但 4.29.1 是 4.x 终点、不会再有安全补丁，`npm audit` 会常驻 fastify 与 find-my-way 两个 **high**（唯一修复是升到 `fastify@5.12.5` 这个 semver-major），**故不采用**——不值得为一个已 EOL 的运行时长期背一组修不掉的公告。顺带把 vercel/pkg 那条 `no fix` 的 moderate 也一并去掉了。
+
+### 测试
+- 全量 **389 项通过**，`tsc --noEmit`、`eslint .` 无错误。
+- 交付运行时冒烟在**真实 Node 20.20.2** 上实测通过（跑的是 `node dist/index.js`，即 CI 里那个作业的形态）：`/health` 返回 `{"status":"ok","version":"4.19.1"}`，`/` 返回 99,986 字节、含 `<title>` 的仪表盘 HTML。
+
+### 已知问题
+- **打包后的 exe 仍不能提供仪表盘**：exe 起得来、`/health` 与 `/v1/*` 正常，但 `GET /` 返回 500 `Dashboard assets missing: public/index.html not found.`。
+  根因是**静态资源的落点与代码读取的路径不一致**，且本次没能定位到正确落点，故不写成"已修复"。实测数据：exe 内 `__dirname` = `C:\snapshot\dist`，而 `C:\snapshot\public\index.html` 不存在（构建日志里连 `Cannot stat` 警告都没有——它既不报缺，也没落在预期位置）。
+  临时办法：把仓库的 `public/` 目录放在 exe 同级再运行（那是代码的第一候选路径）。定位 pkg 的资源落点需要单独一轮，届时再决定是修正 assets 路径还是改成构建期内嵌。
+  > 这条与本次改动无关，是**既存缺陷**：修复前 exe 连启动都到不了，所以从未暴露过。
+
 ## [4.19.0] - 2026-09-23
 
 架构审查（批次 B）修复。取**次版本号**而非修订号：含四处行为变更（下方标 ⚠️）与一处内部契约变更（`saveConfigFile` 的返回值），不是单纯补丁。

@@ -22,7 +22,7 @@ jobs:
       # 下限是 22.12，CI 一直把测试 Runner 跑在它自己声明的支持范围之下——
       # engines 只是建议、npm 默认不拦，所以现在是"恰好能跑"，
       # vitest 补丁版一旦用到 20 没有的 API 就会莫名其妙炸 CI。
-      # 真正交付给用户的 Node 18 由下面的 smoke job 覆盖（那里跑不了 vitest）。
+      # 真正交付给用户的 Node ≥20 下限由下面的 smoke job 覆盖（那里跑不了 vitest）。
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
@@ -51,8 +51,8 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: npx vitest run --coverage --coverage.reporter=text-summary --coverage.thresholds.statements=65
 
-      # 把构建产物交给 smoke job 用，省掉在 Node 18 上装整套 devDependencies
-      # （vitest/eslint 在 18 上根本装不干净）。
+      # 把构建产物交给 smoke job 用，省掉在 Node 20 上装整套 devDependencies
+      # （vitest@5 在 20 上根本装不干净）。
       - name: Upload dist
         if: matrix.os == 'ubuntu-latest'
         uses: actions/upload-artifact@v4
@@ -61,10 +61,12 @@ jobs:
           path: dist/
           retention-days: 1
 
-  # 交付运行时冒烟：pkg 打的是 node18-win-x64、package.json 声明 engines >=18.17，
-  # 而主 job 从不执行那个运行时 —— 声明的支持面里唯一没人验证过的就是它。
-  # 这里不跑测试框架，只起真实进程打两个请求：/health 与仪表盘 HTML。
-  smoke-node18:
+  # 交付运行时冒烟：package.json 声明 engines >=20，而主 job 跑在 22 上
+  # （vitest@5 要求 >=22.12），于是**声明的支持面下限没有任何人验证过**。
+  # 这里验的就是那个下限：能起得来，说明 >=20 这句话是真的，也顺带覆盖了
+  # pkg 打包进去的 node22 运行时（22 只会比 20 更宽）。
+  # 不跑测试框架，只起真实进程打两个请求：/health 与仪表盘 HTML。
+  smoke-node20:
     needs: test
     strategy:
       fail-fast: false
@@ -76,9 +78,10 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: '18.17'
+          node-version: '20'
 
-      # 只装生产依赖：vitest/eslint 在 18 上装不干净，而这里也不需要它们
+      # 只装生产依赖：这里验的是运行时能起来，不需要 vitest/eslint
+      # （vitest@5 在 20 上也装不干净，而本 job 本来也不跑它）
       - name: Install production dependencies only
         run: npm ci --omit=dev
 
@@ -116,4 +119,4 @@ jobs:
           # 仪表盘 HTML 必须发得出来（public/ 是 pkg assets，也是运行时依赖）
           curl -fsS --max-time 5 -o "$DIR/index.html" http://127.0.0.1:9099/
           grep -qi "<title" "$DIR/index.html"
-          echo "Node 18 smoke OK: $(node -v)"
+          echo "Node 20 smoke OK: $(node -v)"
