@@ -2,6 +2,52 @@
 
 所有主要版本更新都记录在此文件。
 
+## [4.19.0] - 2026-09-23
+
+架构审查（批次 B）修复。取**次版本号**而非修订号：含四处行为变更（下方标 ⚠️）与一处内部契约变更（`saveConfigFile` 的返回值），不是单纯补丁。
+
+### 修复
+- **流式 `finish_reason` 不再压过已经流出的工具调用**（`adapter.ts`）。上游明确回 `stop` 时，此前会把 `finish_reason` 定成 `stop` 并盖掉 `tool-calls`，而客户端按它判断回合是否结束——整批 `tool_calls` 被丢弃、agent 静默卡住。现在只有在没有任何工具调用流出时才回 `stop`。
+- **Anthropic 路由的 `tool_use` 分片合并**（`messages.ts`）。此前每个 tool-call-delta 各发一轮 start/delta/stop，N 个分片变成 N 个同 id 的块；现在合并为一块。
+- **OpenAI 非流式工具调用按 id 合并**（`chat.ts`）。此前用 `set` 覆盖，同一调用的后续分片直接丢失；固定回落的 `call_1` 改为唯一 id。
+- **流交还后的空闲超时按真实分类落库**（`upstream.ts`）。此前一律记 `PROVIDER_PROTOCOL_ERROR`，README 承诺的 `STREAM_IDLE_TIMEOUT` 一直没有兑现。
+- **`/api/auth/manual-login` 不再明文回传 `apiKey`**（`dashboard.ts`）。同文件的 accounts / browser-login / aggregate 三个出口早已掩码，这是唯一漏网的一个；四处重复的掩码表达式收口为 `toSafeAccount()` / `maskApiKey()`，新增端点不会再漏。
+- **删掉最后一个账号时同步清除 `.env` 凭据与进程内兜底 Key**（`config.ts`）。`getActiveApiKey()` 在账号表为空时会回落到环境变量，此前被删除的账号仍会继续烧额度。`.env` 也不再固化 `apiBase` / `ccVersion` 的公网默认值。
+- **配置落盘失败不再假成功**（`config.ts` + `dashboard.ts`）。⚠️ `saveConfigFile` 改为返回是否落盘，`setActiveAccount` / `setRotationMode` / `logoutAccount` 传播失败，`loginNewAccount` 落盘失败时抛错，三个仪表盘端点改回 500——配置目录不可写从"假成功"变成显式失败，前端已同步适配。
+- **流式路径上游不给 usage 时用编码器估算兜底 `outputTokens`**（`chat.ts`）。实测 205 条真实请求中 0 条带输出量，成本此前被系统性低估。
+- **`input_tokens` 估算不再把 config 元数据与图片 base64 当提示词**（`messages.ts` + `upstream.ts`）；`count_tokens` 计入数组形态 `tool_result`、图片与 `tools` schema——此前 1200 字符的工具输出只报 1。
+- **`project` 归属不再恒为空**（`request-context.ts`）。`systemTextOf` 此前不认 OpenAI 的 `messages[role=system|developer]`，导致 `/v1/chat/completions` 全部记录 `project: null`。
+- **崩溃预算退出前 flush 排队的用量写入**（`index.ts`）。此前直接 `process.exit`，把已经排队的用量丢掉。
+- **面板的删除/开关失败不再静默**（`public/index.html`）。18 处裸 `fetch` 收敛为一个 `apiJson()` 封装，此前只有 2 处检查 `res.ok`，后端改返回 500 时 UI 会 `TypeError`，表现为"点了删除没反应"；`fetchStatus` 不再整体吞异常，代理挂掉时显式显示"无法连接代理"而非 `Port :undefined`。
+- **额度卡片渲染前统一重置**（`public/index.html`），此前切换账号会留着上一个账号的数字；日志页只在原本贴底时跟随滚动，不再每 5s 强制跳底。
+
+### 新增
+- **`DETERMINISTIC_REQUEST_SHAPE` 否决表**（`upstream.ts`）。请求形态类错误不再重试——实测此前会打满 3 次、多花约 1.5s 退避；瞬时故障的重试保护保持不变，未做策略反转。
+- **`/api/usage/history` 支持 `?limit=`**，导出 CSV 取全量并在截断时如实说明（此前恒 200 条却提示"已导出 N 条"）。
+- **`auto-quota` 轮换与额度采样的装配条件移入 tick 并读新鲜配置**（`index.ts`），面板上开启后无需重启代理即生效。
+- ⚠️ **引擎开关只认严格布尔**（`dashboard.ts`），`"false"` / `0` 此前会被当成"继续运行"。
+- **无障碍基线**（`public/index.html`）：48 个图标补 `aria-hidden`、24 个 `th` 补 `scope`、`tablist`/`tab`/`tabpanel` 配 `aria-selected` 与方向键、三个弹窗补 `role="dialog"` / `aria-modal` / 焦点圈定与归还、live region、`label for`、纯图标按钮补 `aria-label`。
+
+### 性能
+- **`dayKey` 按 `timeZone` 缓存 `Intl.DateTimeFormat`**（`usage-store.ts`）：3 万条带时区记录 1776ms → 140ms。此前逐条构造 formatter，会阻塞事件循环约 2 秒。
+- **`logger` 每行时间戳不再用 `toLocaleTimeString`**，同属逐次构造 formatter 的写法。
+- **原子写的临时文件名加 `pid`**（`config.ts` + `usage-store.ts`），避免多实例互踩。
+
+### 构建
+- **CI 主矩阵 Node 20 → 22**：`vitest@5` 要求 ≥22.12，此前是把测试 Runner 跑在它自己声明的支持面之下。
+- **新增 `smoke-node18` 作业**：只装生产依赖 + 下载 dist 产物，用 Node 18.17 起真实进程断言 `/health` 与仪表盘 HTML，覆盖 pkg 交付的运行时。
+- **覆盖率步骤加 `--coverage.thresholds.statements=65`**。已验证该开关真会拦：阈值 99 时 exit=1，65 时 exit=0。
+- `eslint.config.js` 把仓库根三个 `.mjs` 工具纳入 lint（此前被根级 `*.mjs` 忽略，与配置自己写明的原则矛盾），立刻抓出 `bench-models.mjs` 一个"取了不用"的变量；该工具的起始额度用量改为真的打印出来（它会实际烧额度）。
+
+### 测试
+- 新增 10 个回归防线文件：`tool-call-fragments`、`config-account-lifecycle`、`usage-surfacing`、`dashboard-browser-login-mask`、`token-estimation`、`tool-image-and-params`、`spa-api-json`、`spa-a11y`、`spa-search-functions`、`spa-html-integrity`，并扩充 `attribution`、`upstream-probe`。
+- 全量 **389 项通过**（原 316 + 73），`tsc --noEmit`、`eslint .` 无错误。所有"修复"类改动都先在未改动的 HEAD 上跑出**红**、改后变**绿**才提交结论。
+
+### 已知未做
+- `cache_control` 透传、`tool_result` 内图片的 wire 形状、`stop` / `response_format` 下发：需要真实 Key 且套餐覆盖 Anthropic 系模型才能验证效果。上游对未知字段是静默忽略（已实测），但"不报错"不等于"生效"——**不要当已支持特性宣传**。
+- 流式背压（`write()` 返回值被忽略、不 pause 上游）与 `getUsageStats` 整体记忆化：建议配压测单独一轮。
+- 配置落在 `process.cwd()`（换目录启动会像"账号全丢"）：需迁移策略。
+
 ## [4.18.1] - 2026-09-21
 
 ### 新增
