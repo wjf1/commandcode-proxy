@@ -37,8 +37,30 @@ import { PROXY_VERSION } from '../utils/version.js';
 import { getUsageHistory, getUsageStats, clearUsageHistory, describeBillingWindow, getTimeOfDayModels, USAGE_FILE_PATH, getTodaySpendUsd } from '../utils/usage-store.js';
 import { getQuotaProjection } from '../utils/quota-tracker.js';
 import { notify } from '../utils/notifier.js';
+import type { AccountInfo } from '../types/index.js';
 
 const startTimestamp = Date.now();
+
+/** ?limit= 的封顶值：足够取回轮转窗口内的全部记录，又不至于让单次响应无界。 */
+const HISTORY_EXPORT_MAX = 50000;
+
+/**
+ * apiKey → 展示用掩码。四处出接口（accounts 列表、manual-login、browser-login、
+ * aggregate）此前各自复制同一表达式；漏掉一处就等于把明文 bearer token 发进 HTTP
+ * 响应体（browser-login 正是这么漏的），所以收口成单点。
+ */
+export function maskApiKey(apiKey?: string | null): string {
+  return apiKey ? `${apiKey.slice(0, 8)}...${apiKey.slice(-4)}` : 'None';
+}
+
+/**
+ * AccountInfo → 可安全出接口的形状。凭据是在这里被结构性摘掉的，而不是靠每个
+ * 端点自己记得解构 —— 新增端点不会再复现 browser-login 那类漏口。
+ */
+function toSafeAccount(acc: AccountInfo) {
+  const { apiKey, ...rest } = acc;
+  return { ...rest, apiKeyMasked: maskApiKey(apiKey) };
+}
 
 export async function dashboardRoutes(fastify: FastifyInstance) {
   // 仅对公共 API 表面（/v1/*）开放 CORS。管理 /api/* 路由不发 CORS 头，
@@ -163,10 +185,14 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
   fastify.post('/api/gateway/toggle', async (req: any) => {
     const body = req.body || {};
     if (body.running !== undefined) {
-      setGatewayRunning(body.running);
-      logger.info(`[DASHBOARD] Gateway engine toggled: ${body.running ? 'STARTED' : 'STOPPED'}`);
+      // 只认严格布尔。此前把请求体原样交给 setter，而 getGatewayRunning() 的判据是
+      // `!== false`，于是 {"running":"false"} / 0 这类真值会被当成"继续运行"：
+      // 用户点了暂停但引擎没停，暂停通知也永远不发。SPA 侧发的本就是布尔。
+      const wanted = body.running === true;
+      setGatewayRunning(wanted);
+      logger.info(`[DASHBOARD] Gateway engine toggled: ${wanted ? 'STARTED' : 'STOPPED'}`);
       // 引擎暂停意味着所有经过代理的请求都会被拒，用户多半不在面板前。
-      if (body.running === false) {
+      if (!wanted) {
         notify('engine-paused', 'CommandCode 引擎已暂停', '代理将拒绝新的 /v1/* 请求，直到在面板恢复', 'warn');
       }
     }
@@ -189,7 +215,7 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
       userName: a.userName,
       email: a.email,
       addedAt: a.addedAt,
-      apiKeyMasked: a.apiKey ? `${a.apiKey.slice(0, 8)}...${a.apiKey.slice(-4)}` : 'None',
+      apiKeyMasked: maskApiKey(a.apiKey),
       isActive: a.id === config.activeAccountId,
     }));
     return {
@@ -202,14 +228,18 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
   fastify.post('/api/accounts/active', async (req: any, reply) => {
     const { accountId } = req.body || {};
     if (!accountId) return reply.status(400).send({ error: 'accountId required' });
-    setActiveAccount(accountId);
+    if (!setActiveAccount(accountId)) {
+      return reply.status(500).send({ error: '切换失败：账号不存在或 config.json 写入未成功' });
+    }
     return { status: 'success', activeAccountId: accountId };
   });
 
   fastify.post('/api/accounts/delete', async (req: any, reply) => {
     const { accountId } = req.body || {};
     if (!accountId) return reply.status(400).send({ error: 'accountId required' });
-    logoutAccount(accountId);
+    if (!logoutAccount(accountId)) {
+      return reply.status(500).send({ error: '删除失败：config.json 写入未成功' });
+    }
     return { status: 'success' };
   });
 
@@ -218,7 +248,9 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
     if (rotationMode !== 'manual' && rotationMode !== 'auto-quota') {
       return reply.status(400).send({ error: 'rotationMode must be manual|auto-quota' });
     }
-    setRotationMode(rotationMode);
+    if (!setRotationMode(rotationMode)) {
+      return reply.status(500).send({ error: '保存失败：config.json 写入未成功' });
+    }
     return { status: 'success', rotationMode };
   });
 
@@ -228,12 +260,8 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
     try {
       const acc = await loginNewAccount(String(apiKey), name ? String(name).slice(0, 60) : undefined);
       // 明文 apiKey 绝不出接口：loginNewAccount 的返回类型带完整凭据（内部调用方需要），
-      // 这里是它到 HTTP 响应体的唯一出口。掩码范式与 /api/accounts 一致。
-      const { apiKey: _plaintext, ...safeAccount } = acc;
-      return {
-        status: 'success',
-        account: { ...safeAccount, apiKeyMasked: acc.apiKey ? `${acc.apiKey.slice(0, 8)}...${acc.apiKey.slice(-4)}` : 'None' },
-      };
+      // 收口在 toSafeAccount —— 摘除动作发生在辅助函数里，新增端点不会再漏。
+      return { status: 'success', account: toSafeAccount(acc) };
     } catch (err: any) {
       return reply.status(500).send({ error: err.message });
     }
@@ -243,7 +271,8 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
     try {
       logger.info('[DASHBOARD] Triggering CLI Browser OAuth Login flow...');
       const newAcc = await startBrowserLoginFlow(5959);
-      return { status: 'success', account: newAcc };
+      // OAuth 流程同样透传完整 AccountInfo —— 与 manual-login 共用一个收口。
+      return { status: 'success', account: toSafeAccount(newAcc) };
     } catch (err: any) {
       logger.error(`[DASHBOARD] Browser Login flow error: ${err.message}`);
       return reply.status(500).send({ error: err.message });
@@ -268,7 +297,7 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
             userName: acc.userName || who?.userName || 'system_user',
             email: acc.email || who?.email || 'System Auth Key',
             isActive: acc.id === config.activeAccountId || targetAccounts.length === 1,
-            apiKeyMasked: acc.apiKey ? `${acc.apiKey.slice(0, 8)}...${acc.apiKey.slice(-4)}` : 'None',
+            apiKeyMasked: maskApiKey(acc.apiKey),
           },
           ...stats,
         };
@@ -382,10 +411,15 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
 
   // ─── 会话明细历史 ────────────────────────────────────────────────────────────
 
-  fastify.get('/api/usage/history', async () => {
+  fastify.get('/api/usage/history', async (req: any) => {
     const records = getUsageHistory();
     const stats = getUsageStats();
-    const limit = 200;
+    // 表格展示默认 200 条；导出走 ?limit= 取全量。此前无论调用方要多少都只有 200 条，
+    // 而"导出 CSV"照此拼文件并提示"已导出 N 条"，拿去对账的人拿到的是残缺数据。
+    const requested = Number(req?.query?.limit);
+    const limit = Number.isFinite(requested) && requested > 0
+      ? Math.min(Math.floor(requested), HISTORY_EXPORT_MAX)
+      : 200;
     return {
       total: stats.total,
       today: stats.today,
@@ -398,6 +432,7 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
       bySession: stats.bySession,
       attribution: stats.attribution,
       recent: records.slice(-limit).reverse(),
+      storedRecords: records.length,
       quotaProjection: getQuotaProjection(),
       // 峰谷计费状态：受分时价影响的模型此刻按哪档计费、何时切换。
       billing: {

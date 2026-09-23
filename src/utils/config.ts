@@ -305,8 +305,14 @@ export function loadConfig(): GatewayConfig {
   };
 }
 
-/** 原子化写入 config.json（临时文件 + rename），避免崩溃时截断配置。 */
-export function saveConfigFile(updates: Partial<GatewayConfigFile>): void {
+/**
+ * 原子化写入 config.json（临时文件 + rename），避免崩溃时截断配置。
+ *
+ * 返回是否真的落盘。此前返回 void 且吞掉一切异常，调用方（含全部仪表盘写端点）
+ * 于是无条件向用户报 success —— exe 装在 Program Files、目标盘只读或杀软锁文件时
+ * 写入失败，用户看到"账号已添加"，重启后账号消失且请求仍在用旧 Key。
+ */
+export function saveConfigFile(updates: Partial<GatewayConfigFile>): boolean {
   try {
     let current: Partial<GatewayConfigFile> = {};
     if (fs.existsSync(CONFIG_FILE_PATH)) {
@@ -330,23 +336,43 @@ export function saveConfigFile(updates: Partial<GatewayConfigFile>): void {
       },
     };
 
-    const tmp = `${CONFIG_FILE_PATH}.tmp`;
+    // 临时文件名带 pid：固定名在两个实例共用同一数据目录时会互相踩，且 Windows 上
+    // rename 覆盖被对方打开的文件会 EPERM。
+    const tmp = `${CONFIG_FILE_PATH}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(updated, null, 2), 'utf-8');
     fs.renameSync(tmp, CONFIG_FILE_PATH);
 
     const activeAcc = (updated.accounts || []).find(a => a.id === updated.activeAccountId);
-    if (activeAcc?.apiKey) syncEnvFile(updated.accounts || [], activeAcc.apiKey);
+    // 没有活跃凭据时也必须同步：条件式跳过会让上一个（已删除的）Key 原样留在 .env 里，
+    // 下次启动被重新导入并合成 acc_default。
+    syncEnvFile(
+      updated.accounts || [],
+      activeAcc?.apiKey || '',
+      // 只镜像配置文件里**真正写了**的值，不写 DEFAULTS 兜底后的值：env 优先级高于
+      // config.json，把默认值固化进 .env 等于让自建上游端点在一次账号操作后、于下次
+      // 重启被静默改回公网默认。没有这一行时 loadConfig 自然回落到代码默认，行为不变。
+      updates.upstream?.apiBase ?? current.upstream?.apiBase,
+      updates.upstream?.ccVersion ?? current.upstream?.ccVersion
+    );
+    return true;
   } catch (err: any) {
     logger.error(`[CONFIG] Error saving config.json: ${err.message}`);
+    return false;
   }
 }
 
-function syncEnvFile(accounts: AccountInfo[], activeApiKey: string): void {
+function syncEnvFile(
+  accounts: AccountInfo[],
+  activeApiKey: string,
+  apiBase?: string,
+  ccVersion?: string
+): void {
   try {
     const envLines = [
-      `COMMANDCODE_API_KEY=${activeApiKey}`,
-      `COMMANDCODE_API_BASE=${DEFAULTS.apiBase}`,
-      `COMMANDCODE_VERSION=${DEFAULTS.ccVersion}`,
+      // 无活跃 Key 时整条消失，而不是留着旧值。
+      ...(activeApiKey ? [`COMMANDCODE_API_KEY=${activeApiKey}`] : []),
+      ...(apiBase ? [`COMMANDCODE_API_BASE=${apiBase}`] : []),
+      ...(ccVersion ? [`COMMANDCODE_VERSION=${ccVersion}`] : []),
       `ACCOUNTS_COUNT=${accounts.length}`,
       `UPDATED_AT=${new Date().toISOString()}`,
     ];
@@ -378,18 +404,19 @@ export function getActiveApiKey(): string {
   return acc?.apiKey || loadDefaultApiKeyFromEnvOrSystem().apiKey;
 }
 
-export function setActiveAccount(accountId: string): void {
+export function setActiveAccount(accountId: string): boolean {
   const config = loadConfig();
   const target = config.accounts.find(a => a.id === accountId);
-  if (target) {
-    saveConfigFile({ activeAccountId: accountId });
-    logger.info(`[AUTH] Switched active account to: ${target.name} (${target.id})`);
-  }
+  if (!target) return false;
+  if (!saveConfigFile({ activeAccountId: accountId })) return false;
+  logger.info(`[AUTH] Switched active account to: ${target.name} (${target.id})`);
+  return true;
 }
 
-export function setRotationMode(mode: 'manual' | 'auto-quota'): void {
-  saveConfigFile({ rotationMode: mode });
+export function setRotationMode(mode: 'manual' | 'auto-quota'): boolean {
+  if (!saveConfigFile({ rotationMode: mode })) return false;
   logger.info(`[AUTH] Changed key rotation mode to: ${mode}`);
+  return true;
 }
 
 export async function loginNewAccount(apiKey: string, name?: string): Promise<AccountInfo> {
@@ -398,7 +425,9 @@ export async function loginNewAccount(apiKey: string, name?: string): Promise<Ac
 
   const existing = config.accounts.find(a => a.apiKey === cleanKey);
   if (existing) {
-    setActiveAccount(existing.id);
+    if (!setActiveAccount(existing.id)) {
+      throw new Error('切换已有账号失败：config.json 写入未成功');
+    }
     return existing;
   }
 
@@ -421,10 +450,16 @@ export async function loginNewAccount(apiKey: string, name?: string): Promise<Ac
     addedAt: new Date().toISOString(),
   };
 
-  saveConfigFile({
+  const persisted = saveConfigFile({
     accounts: [...config.accounts, newAcc],
     activeAccountId: id,
   });
+  if (!persisted) {
+    // 上游已确认这条凭据有效，但本地没落盘。若照常返回，UI 会显示"已登录"、
+    // 后续请求继续用旧 Key、重启后账号消失 —— 这种半成功必须作为失败冒出来。
+    throw new Error('凭据校验通过，但 config.json 写入失败：请检查数据目录是否可写'
+      + '（装在 Program Files 下、只读盘或杀软锁定都会触发）');
+  }
 
   logger.info(`[AUTH] Registered new account: ${accName} (${id})`);
   return newAcc;
@@ -462,6 +497,7 @@ export async function enrichDefaultAccountName(): Promise<void> {
 
 export function logoutAccount(accountId: string): boolean {
   const config = loadConfig();
+  const target = config.accounts.find(a => a.id === accountId);
   const updatedAccounts = config.accounts.filter(a => a.id !== accountId);
   let newActiveId = config.activeAccountId;
 
@@ -469,7 +505,19 @@ export function logoutAccount(accountId: string): boolean {
     newActiveId = updatedAccounts.length > 0 ? updatedAccounts[0].id : '';
   }
 
-  saveConfigFile({ accounts: updatedAccounts, activeAccountId: newActiveId });
+  if (!saveConfigFile({ accounts: updatedAccounts, activeAccountId: newActiveId })) return false;
+
+  // 磁盘上的 .env 由 saveConfigFile 收掉了，进程内的兜底还得单独收：
+  // getActiveApiKey() 在账号表为空时回落到 loadDefaultApiKeyFromEnvOrSystem()，
+  // 只清文件挡不住本次运行 —— 删掉的账号会继续用那条 Key 发请求、烧它的额度。
+  // 只在确实与本次删除的是同一条 Key 时清（不碰 shell 里显式设置的、以及
+  // auth.json 系统登录态的来源）。
+  if (target?.apiKey && process.env.COMMANDCODE_API_KEY === target.apiKey
+      && !updatedAccounts.some(a => a.apiKey === target.apiKey)) {
+    delete process.env.COMMANDCODE_API_KEY;
+    logger.info(`[AUTH] Cleared in-process fallback key of removed account '${accountId}'`);
+  }
+
   logger.info(`[AUTH] Removed account '${accountId}'`);
   return true;
 }
