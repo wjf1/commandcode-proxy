@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CommandCode 代理控制器 v4</title>
+<title>CommandCode 代理控制器</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%236366f1'/%3E%3Cpath d='M18 5 8 18h6l-2 9 10-13h-6z' fill='white'/%3E%3C/svg%3E">
 <script src="/assets/vendor/tailwind.js"></script>
 <link rel="stylesheet" href="/assets/vendor/font-awesome.min.css">
@@ -86,7 +86,7 @@ mark{background:var(--c-hl-bg);color:var(--c-hl-text);border-radius:3px;padding:
   <div class="flex items-center space-x-3">
     <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-600 to-violet-500 flex items-center justify-center text-white shadow-lg shadow-indigo-500/20"><i aria-hidden="true" class="fa-solid fa-bolt text-lg"></i></div>
     <div>
-      <h1 class="font-bold text-lg leading-tight text-white flex items-center gap-2">CommandCode 代理 <span class="text-xs font-semibold px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">v4</span><a id="updateBadge" href="https://github.com/wjf1/commandcode-proxy/releases" target="_blank" rel="noopener" class="hidden text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 hover:bg-amber-500/20"><i aria-hidden="true" class="fa-solid fa-arrow-up-right-from-square text-[9px]"></i> 新版本 <span id="updateVer"></span></a></h1>
+      <h1 class="font-bold text-lg leading-tight text-white flex items-center gap-2">CommandCode 代理 <span id="versionBadge" title="代理版本" class="text-xs font-semibold px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">v4</span><a id="updateBadge" href="https://github.com/wjf1/commandcode-proxy/releases" target="_blank" rel="noopener" class="hidden text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 hover:bg-amber-500/20"><i aria-hidden="true" class="fa-solid fa-arrow-up-right-from-square text-[9px]"></i> 新版本 <span id="updateVer"></span></a></h1>
       <p class="text-xs text-slate-400">OpenAI Chat 与 Anthropic Messages 兼容网关</p>
     </div>
   </div>
@@ -557,6 +557,11 @@ async function fetchStatus() {
     lastEngineRunning = !!data.running;
     if (data.running) { dot.className='w-2.5 h-2.5 rounded-full bg-emerald-500'; txt.innerText='引擎运行中'; txt.className='font-medium text-emerald-400'; btn.innerText='停止引擎'; }
     else { dot.className='w-2.5 h-2.5 rounded-full bg-rose-500'; txt.innerText='引擎已停止'; txt.className='font-medium text-rose-400'; btn.innerText='启动引擎'; }
+    // 头部徽标跟随真实版本号（/api/status 返回 PROXY_VERSION）；拿不到就保持占位 "v4"。
+    if (data.version) {
+      const vb = document.getElementById('versionBadge');
+      if (vb) vb.innerText = 'v' + data.version;
+    }
   }
   document.getElementById('statPort').innerText = 'Port :' + orDash(data.port);
   document.getElementById('statUptime').innerText = '运行时间：' + orDash(data.uptime);
