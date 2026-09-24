@@ -22,6 +22,9 @@ import { OpenAIChatRequest } from '../types/index.js';
 import { getActiveApiKey, getGatewayRunning, checkAndRotateAccountsOnQuota } from '../utils/config.js';
 import { logger } from '../utils/logger.js';
 import { ErrorCode, ProxyError, toProxyError } from '../utils/errors.js';
+import { auditRequestStart, auditRequestEnd, accountTail } from '../utils/audit-log.js';
+import { guardRateLimit, recordRequestOutput } from '../utils/rate-limit.js';
+import { guardModelAccess } from '../utils/model-access.js';
 
 function fmtNum(n: number): string {
   return n.toLocaleString('en-US');
@@ -78,6 +81,10 @@ export async function chatRoutes(fastify: FastifyInstance) {
   const adapter = new CommandCodeAdapter();
 
   fastify.post('/v1/chat/completions', async (req, reply) => {
+    // 请求防护三件套（默认关闭/旁路，零配置升级承诺）：审计开始计时 + 限流 + 模型访问控制。
+    const audit = auditRequestStart(req);
+    if (guardRateLimit(req, reply)) return reply;
+    if (guardModelAccess(req, reply)) return reply;
     if (!getGatewayRunning()) {
       const err = new ProxyError(ErrorCode.GATEWAY_PAUSED, 'CommandCode Gateway Engine is currently PAUSED.');
       return reply.status(err.status).send({ error: err.openAIPayload() });
@@ -132,6 +139,9 @@ export async function chatRoutes(fastify: FastifyInstance) {
     const persistOnce = (status: 'COMPLETED' | 'FAILED', errorCode?: string, traceOverride?: string): void => {
       if (recorded) return;
       recorded = true;
+      // 审计落盘与 TPM 出账和用量落库同点收敛：recorded 幂等保证一次请求只记一条。
+      auditRequestEnd(audit, { model: modelName, inputTokens: usageAcc.inputTokens, outputTokens: usageAcc.outputTokens, status, accountId: accountTail(apiKey) });
+      recordRequestOutput(req, usageAcc.outputTokens);
       persistCompletion(modelName, usageAcc, requestContext, startTime, status, traceOverride ?? traceId, 'chat', errorCode);
     };
 
