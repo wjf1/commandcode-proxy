@@ -24,6 +24,7 @@ import { logger } from '../utils/logger.js';
 import { ErrorCode, ProxyError, toProxyError } from '../utils/errors.js';
 import { auditRequestStart, auditRequestEnd, accountTail } from '../utils/audit-log.js';
 import { guardRateLimit, recordRequestOutput } from '../utils/rate-limit.js';
+import { guardModelAccess } from '../utils/model-access.js';
 
 function fmtNum(n: number): string {
   return n.toLocaleString('en-US');
@@ -83,6 +84,7 @@ export async function chatRoutes(fastify: FastifyInstance) {
     // 请求防护三件套（默认关闭/旁路，零配置升级承诺）：审计开始计时 + 限流 + 模型访问控制。
     const audit = auditRequestStart(req);
     if (guardRateLimit(req, reply)) return reply;
+    if (guardModelAccess(req, reply)) return reply;
     if (!getGatewayRunning()) {
       const err = new ProxyError(ErrorCode.GATEWAY_PAUSED, 'CommandCode Gateway Engine is currently PAUSED.');
       return reply.status(err.status).send({ error: err.openAIPayload() });
