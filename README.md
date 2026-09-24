@@ -217,6 +217,13 @@ Anthropic 出口（`/v1/messages`）：
 | `LOG_REDACTION` | `on` | 日志密钥脱敏：对 `Authorization: Bearer`、`api-key`/`x-api-key` 键值、裸 `sk-` 令牌、query 中的 token/key 参数打码为 `[REDACTED]`；设 `off` 回退（仅排查密钥问题时临时使用） |
 | `UPSTREAM_REDIRECT` | `conservative` | 上游 3xx 重定向策略：`conservative` 一律不跟随（按上游错误终止）；`follow` 显式放行（逐跳校验，私网/回环/保留地址——含云元数据——永不跟随且不受 allowlist 影响，跨 host 跳转剥离凭据头，最多 5 跳） |
 | `DNS_REBINDING_GUARD` | `on` | 上游域名请求前解析校验：解析结果含私网/保留地址即拒绝（防 DNS rebinding）；设 `off` 回退；IP 字面量 / localhost / allowlist 命中主机跳过解析校验 |
+| `HEALTH_CHECK_INTERVAL_MS` | `300000` | 通道健康检查探活周期（纯旁路，连续失败仅日志告警）；设 `0` 关闭 |
+| `WEBHOOK_URL` | 未设置=关闭 | 告警 Webhook：当日成本/错误率超阈值时 POST JSON（飞书/钉钉/Slack 机器人通用）；配套 `WEBHOOK_COST_USD`、`WEBHOOK_ERROR_RATE`、`WEBHOOK_TIMEOUT_MS`、`WEBHOOK_CHECK_INTERVAL_MS` |
+| `PROMPT_VERSIONS` | 未设置=关闭 | 设 `on` 启用 Prompt 版本管理（`/api/prompts/*`：保存自动快照、按时间戳回滚；`PROMPTS_DIR` 改存储目录） |
+| `RATE_LIMIT_RPM` / `RATE_LIMIT_TPM` | 未设置=关闭 | 每分钟请求数 / token 数上限（60s 滑动窗口，超限 429 + `Retry-After`） |
+| `MODEL_ALLOWLIST` / `MODEL_BLOCKLIST` | 未设置=关闭 | 模型访问控制（精确 id、大小写不敏感；allowlist 优先，命中拦截 403） |
+| `AUDIT_LOG` | `on` | 审计日志（minimal：只记 ts/route/model/tokens/status/duration 元数据，**绝不记消息正文**）；`off` 关闭，`AUDIT_LOG_PATH` 改落盘路径 |
+| `USAGE_STORAGE_BACKEND` | `jsonl` | 用量存储后端（为 SQLite 预留接口，当前仅支持 `jsonl`） |
 
 持久化配置存于可执行文件旁的 `config.json`。同目录的 `.env`（由仪表盘添加账号时自动维护）也会在启动时加载——**已存在的环境变量优先**，docker/systemd 注入不受影响。
 
@@ -343,6 +350,7 @@ Point any OpenAI-style client (Cursor, Continue, Aider, OpenWebUI, Hermes, your 
 
 - Exponential-backoff retries on 429/5xx/network errors; **retries also cover failures the upstream reports inside an HTTP 200 stream** (gateway failure / overload / no available provider) by probing events before the stream is handed to the route, so an error is no longer returned as if it were the model's answer — deterministic unavailability (region, unknown model) is deliberately not retried; idle-stream watchdog (no infinite hangs); client-disconnect cancellation; clean stream termination with SSE keepalive comments
 - Secure defaults: loopback-only binding; optional `PROXY_API_KEY` covering **both `/v1/*` and the admin surface `/api/*`** (dashboard prompts on first visit); Origin check on `/api/*` mutations; XSS-hardened dashboard; CORS limited to the public API surface; prominent warnings when bound non-loopback without auth
+- **Monitoring & ops (v4.21.0)** — channel health probe (bypass-only, warns on consecutive failures), threshold **webhook alerts** (daily cost / error-rate → any bot endpoint), **prompt version management** (`/api/prompts/*` snapshot & rollback, off by default), per-minute **rate limiting** (RPM/TPM, off by default), **model access control** (allow/block list, off by default), **minimal audit log** (metadata only, never message bodies)
 - **SSRF guard, fail-closed** — strict upstream URL allowlist, **redirect blocking** (`redirect: 'manual'` everywhere; opt-in `UPSTREAM_REDIRECT=follow` re-validates every hop, never follows into private/metadata addresses, strips credentials across hosts), **DNS-rebinding guard** (`DNS_REBINDING_GUARD=on` resolves & validates every upstream hostname per request), **log secret redaction** (`LOG_REDACTION=on` masks Bearer/api-key/sk- tokens in logs) — see the bilingual [Upstream URL safety](#security) section
 - **Structured error codes** — 17 stable codes with actionable hints, surfaced as OpenAI `error.type/code` or Anthropic `error.type` (table below)
 - Windows toast notifications for quota exhaustion / account switch / engine pause — native, zero dependencies, 30-min dedupe, with **self-diagnosis** of the system-wide notification switch; disable via `COMMANDCODE_NOTIFY=0`
