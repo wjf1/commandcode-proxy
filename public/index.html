@@ -62,6 +62,22 @@ mark{background:var(--c-hl-bg);color:var(--c-hl-text);border-radius:3px;padding:
 .win-time{text-align:right}
 .win-note.warn{color:var(--c-danger-2)}
 .win-note.strong{color:var(--c-text-3);font-weight:600}
+/* --- 日志结构化高亮 --- */
+.lg-lv{font-weight:700;font-size:10px;padding:0 4px;border-radius:4px;border:1px solid transparent;white-space:nowrap}
+.lg-lv-info{color:var(--c-text-dim);border-color:var(--c-line);background:var(--c-inset-soft)}
+.lg-lv-warn{color:var(--c-warn);border-color:var(--c-warn)}
+.lg-lv-err{color:var(--c-danger-2);border-color:var(--c-danger-2)}
+.lg-model{color:var(--c-accent-2);font-weight:600}
+.lg-err{color:var(--c-danger-2);font-weight:700}
+/* --- 用量表：列头排序按钮与折叠过滤栏 --- */
+.th-sort{background:none;border:0;padding:0;font:inherit;color:inherit;cursor:pointer;display:inline-flex;align-items:center;gap:2px}
+.th-sort:hover{color:var(--c-text-2)}
+.th-arrow{font-size:9px;min-width:8px;text-align:left;display:inline-block}
+.usage-filter{border-bottom:1px solid var(--c-panel-2)}
+.usage-filter>summary{cursor:pointer;list-style:none;padding:.45rem 1rem;font-size:11px;font-weight:600;color:var(--c-text-dim);display:flex;align-items:center;gap:.4rem;user-select:none}
+.usage-filter>summary::-webkit-details-marker{display:none}
+.usage-filter>summary:hover{color:var(--c-text-2);background:var(--c-inset-soft)}
+.usage-filter-hint{color:var(--c-text-mute);margin-left:auto;font-weight:400}
 </style>
 </head>
 <body class="min-h-screen flex flex-col">
@@ -256,18 +272,28 @@ mark{background:var(--c-hl-bg);color:var(--c-hl-text);border-radius:3px;padding:
         <button onclick="exportUsageCsv()" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] rounded-lg border border-slate-700 flex items-center gap-1.5"><i aria-hidden="true" class="fa-solid fa-file-csv"></i> 导出 CSV</button>
         <span id="usageRecentCount" class="text-[11px] text-slate-400"></span>
       </div>
+      <details id="usageFilterBar" class="usage-filter">
+        <summary><i aria-hidden="true" class="fa-solid fa-filter"></i> 筛选与排序<span class="usage-filter-hint">点击列头排序，再点切换方向；点击行展开详情</span></summary>
+        <div class="px-4 py-2.5 border-b border-slate-800 flex items-center gap-2 flex-wrap">
+          <div class="relative flex-1 min-w-[200px] max-w-[360px]">
+            <i aria-hidden="true" class="fa-solid fa-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-xs pointer-events-none"></i>
+            <input id="usageFilterInput" type="search" aria-label="过滤请求明细" placeholder="过滤：模型 / 状态 / 模式 / 会话 / 项目…" autocomplete="off" class="w-full bg-slate-950 border border-slate-700 text-slate-200 text-xs rounded-lg pl-8 pr-3 py-1.5 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/40 placeholder:text-slate-600">
+          </div>
+          <button id="usageFilterClear" type="button" class="hidden px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] rounded-lg border border-slate-700">清除过滤</button>
+        </div>
+      </details>
       <div class="overflow-x-auto max-h-[360px] overflow-y-auto">
         <table class="w-full text-xs text-left tbl-min">
           <thead class="bg-slate-950/60 text-slate-400 sticky top-0 z-10">
             <tr>
-              <th scope="col" class="px-3 py-2 font-medium">时间</th>
+              <th scope="col" id="usage-th-ts" class="px-3 py-2 font-medium" aria-sort="none"><button type="button" class="th-sort" onclick="toggleUsageSort('ts')" title="点击按时间排序">时间<span class="th-arrow" aria-hidden="true"></span></button></th>
               <th scope="col" class="px-3 py-2 font-medium">模型</th>
-              <th scope="col" class="px-3 py-2 font-medium text-right">输入</th>
-              <th scope="col" class="px-3 py-2 font-medium text-right">缓存命中</th>
-              <th scope="col" class="px-3 py-2 font-medium text-right">输出</th>
+              <th scope="col" id="usage-th-inputTokens" class="px-3 py-2 font-medium text-right" aria-sort="none"><button type="button" class="th-sort" onclick="toggleUsageSort('inputTokens')" title="点击按输入排序">输入<span class="th-arrow" aria-hidden="true"></span></button></th>
+              <th scope="col" id="usage-th-cacheReadTokens" class="px-3 py-2 font-medium text-right" aria-sort="none"><button type="button" class="th-sort" onclick="toggleUsageSort('cacheReadTokens')" title="点击按缓存命中排序">缓存命中<span class="th-arrow" aria-hidden="true"></span></button></th>
+              <th scope="col" id="usage-th-outputTokens" class="px-3 py-2 font-medium text-right" aria-sort="none"><button type="button" class="th-sort" onclick="toggleUsageSort('outputTokens')" title="点击按输出排序">输出<span class="th-arrow" aria-hidden="true"></span></button></th>
               <th scope="col" class="px-3 py-2 font-medium text-right" title="输出 token / 端到端耗时（含上游排队、重试与网络），不等于模型生成速度">吞吐 <i aria-hidden="true" class="fa-solid fa-circle-info text-slate-600"></i></th>
-              <th scope="col" class="px-3 py-2 font-medium text-right">耗时</th>
-              <th scope="col" class="px-3 py-2 font-medium text-right">成本</th>
+              <th scope="col" id="usage-th-timingMs" class="px-3 py-2 font-medium text-right" aria-sort="none"><button type="button" class="th-sort" onclick="toggleUsageSort('timingMs')" title="点击按耗时排序">耗时<span class="th-arrow" aria-hidden="true"></span></button></th>
+              <th scope="col" id="usage-th-costUsd" class="px-3 py-2 font-medium text-right" aria-sort="none"><button type="button" class="th-sort" onclick="toggleUsageSort('costUsd')" title="点击按成本排序">成本<span class="th-arrow" aria-hidden="true"></span></button></th>
               <th scope="col" class="px-3 py-2 font-medium">状态</th>
               <th scope="col" class="px-3 py-2 font-medium">模式</th>
             </tr>
@@ -893,6 +919,22 @@ function planPill(key, label, on, onTone) {
     '" title="' + (PLAN_LABELS[key] || key) + ' 档位：' + (on ? '可用' : '不可用') + '">' +
     label + '<i aria-hidden="true" class="fa-solid ' + (on ? 'fa-check' : 'fa-xmark') + ' text-[9px] opacity-80"></i></span>';
 }
+// 模型家族：category 字段优先，其次按 id/name/提供商关键词推断（纯前端展示用）。
+function modelFamily(m) {
+  if (m && m.category) return String(m.category);
+  const s = (((m && m.id) || '') + ' ' + ((m && m.name) || '') + ' ' + ((m && m.owned_by) || '')).toLowerCase();
+  if (s.indexOf('claude') >= 0) return 'Claude';
+  if (s.indexOf('gpt') >= 0) return 'GPT';
+  if (/(^|[^a-z])o[13]([^a-z]|$)/.test(s)) return 'o 系列';
+  if (s.indexOf('gemini') >= 0) return 'Gemini';
+  if (s.indexOf('deepseek') >= 0) return 'DeepSeek';
+  if (s.indexOf('grok') >= 0) return 'Grok';
+  if (/(^|[^a-z])glm/.test(s)) return 'GLM';
+  if (s.indexOf('qwen') >= 0) return 'Qwen';
+  if (s.indexOf('llama') >= 0) return 'Llama';
+  if (/(mistral|mixtral)/.test(s)) return 'Mistral';
+  return '';
+}
 function modelMatchesTag(m, tag) {
   const caps = m.caps || {};
   if (tag === 'go') return isPlanOn(m, 'individual-go');
@@ -956,6 +998,8 @@ function applyModelFilter() {
     const goatOn = isPlanOn(m, 'individual-goat');
     const higher = higherPlanNames(avail);
     let tags = '';
+    const fam = modelFamily(m);
+    if (fam) tags += badge(fam, 'sky', '模型家族');
     if (m.deal && m.deal.free) tags += badge('FREE', 'rose');
     else if (m.deal && m.deal.discountPercent) tags += badge('DEAL ' + m.deal.discountPercent + '%', 'amber');
     // GO/GOAT 都不可用时，用一枚中性徽章说明它属于更高的付费档位，避免误读成"不可调用"。
@@ -1017,6 +1061,17 @@ async function loadModels(force) {
   }
 }
 
+// 日志结构化高亮：先 esc 再按词法着色（模型名 / 错误码），插入的 span 均为本页自有标签。
+// 单遍 alternation 替换：replace 不会重扫已产出的替换文本，天然避免标签嵌套污染。
+const LOG_TOKEN_RE = /\b(HTTP ?-?\d{3}|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|EACCES|EPIPE)\b|\b([45]\d{2})\b|\b((?:claude|gpt|gemini|deepseek|glm|qwen|grok|mistral|mixtral)[\w.\-]*)/gi;
+function logHighlight(msg) {
+  return esc(msg).replace(LOG_TOKEN_RE, function (m, errTok, code, model) {
+    if (errTok) return '<span class="lg-err">' + errTok + '</span>';
+    if (code) return '<span class="lg-err">' + code + '</span>';
+    return '<span class="lg-model">' + model + '</span>';
+  });
+}
+
 async function loadLogs() {
   const { ok, data, error } = await apiJson('/api/logs');
   const box = document.getElementById('logsBox');
@@ -1027,7 +1082,9 @@ async function loadLogs() {
   if (!data.logs.length) { box.innerHTML = emptyState('fa-terminal', '暂无日志，网关事件会在这里滚动显示'); return; }
   box.innerHTML = data.logs.map(l => {
     const lc = l.level==='error'?'text-rose-400':l.level==='warn'?'text-amber-400':'text-slate-300';
-    return '<p class="'+lc+' font-mono text-[11px] py-0.5 break-all"><span class="text-slate-500">['+esc(l.timestamp)+']</span> '+esc(l.message)+'</p>';
+    const lv = String(l.level || 'info').toUpperCase();
+    const lvCls = l.level==='error'?'lg-lv-err':l.level==='warn'?'lg-lv-warn':'lg-lv-info';
+    return '<p class="'+lc+' font-mono text-[11px] py-0.5 break-all"><span class="text-slate-500">['+esc(l.timestamp)+']</span> <span class="lg-lv '+lvCls+'">'+esc(lv)+'</span> '+logHighlight(l.message)+'</p>';
   }).join('');
   // 只有本来就在底部时才跟随滚动。此前每 5s 无条件跳到最新一行，
   // 想往上翻一条旧日志会在 5 秒内被弹回去，实际上没法读。
@@ -1104,9 +1161,10 @@ async function loadUsageHistory(){
 
   const hasAnyPricing = (data.recent||[]).some(r => r.hasPricing);
   document.getElementById('usagePricingNote').classList.toggle('hidden', hasAnyPricing);
-  document.getElementById('usageRecentCount').innerText = '最近 ' + (data.recent||[]).length + ' 条';
-
-  renderUsageTable(data.recent||[]);
+  usageRows = data.recent || [];
+  bindUsageTableOnce();
+  bindUsageFilterOnce();
+  renderUsageTableCurrent();
   renderUsageCharts(data);
   renderAttribution(data);
   renderModelPerf(data.byModelPerf||[]);
@@ -1284,12 +1342,84 @@ async function exportUsageCsv() {
     : '已导出 ' + rows.length + ' 条记录', 'success');
 }
 
-function renderUsageTable(recent){
+// --- 请求明细：过滤 / 排序 / 行下钻 -------------------------------------------
+// 默认零状态：不过滤、不排序（保持后端时间倒序）、行全部收起 —— 首屏与旧版一致。
+let usageRows = [];
+let usageSortKey = '';
+let usageSortDir = -1;
+let usageFilterQ = '';
+const usageExpanded = new Set();
+// 可排序列与表头 id 后缀；吞吐列口径复杂（输出/端到端耗时计算值），不参与排序。
+const USAGE_SORT_COLS = [
+  ['ts', '时间'], ['inputTokens', '输入'], ['cacheReadTokens', '缓存命中'],
+  ['outputTokens', '输出'], ['timingMs', '耗时'], ['costUsd', '成本'],
+];
+function usageRowKey(r) {
+  return r.timestamp + '|' + r.model + '|' + (r.inputTokens || 0) + '|' + (r.outputTokens || 0) + '|' + (r.timingMs || 0);
+}
+function usageMatchesQuery(r, q) {
+  if (!q) return true;
+  const hay = [(r.model || ''), (r.status || ''), (r.mode || ''), (r.sessionId || ''), (r.project || ''), (r.costSource || '')].join(' ').toLowerCase();
+  return q.split(/\s+/).filter(Boolean).every(kw => hay.includes(kw));
+}
+function sortUsageRows(rows) {
+  if (!usageSortKey) return rows; // 默认：后端顺序（时间倒序）
+  const val = (r) => usageSortKey === 'ts' ? (new Date(r.timestamp).getTime() || 0) : (Number(r[usageSortKey]) || 0);
+  const dir = usageSortDir === 1 ? 1 : -1;
+  return rows.slice().sort((a, b) => (val(a) - val(b)) * dir);
+}
+// 行下钻详情：全部走 esc() / 既有格式化函数，不裸拼上游字段。
+function usageDetailHtml(r) {
+  const dash = '<span class="text-slate-600">—</span>';
+  const item = (k, v) => '<span class="text-slate-500">' + k + '</span><span class="text-slate-300 break-all">' + v + '</span>';
+  return '<div class="grid grid-cols-2 md:grid-cols-3 gap-x-4 gap-y-1 px-4 py-2 text-[11px] bg-slate-950/60">'
+    + item('会话', r.sessionId ? esc(r.sessionId) : dash)
+    + item('项目', r.project ? esc(projectDisplayName(r.project)) + (r.projectSource === 'heuristic' ? ' <span class="text-amber-400">（推测）</span>' : '') : dash)
+    + item('缓存读', fmtTokens(r.cacheReadTokens || 0) + ' token')
+    + item('成本口径', r.costSource === 'official' ? '官方账单' : (r.costSource === 'estimated' ? '本地估算' : '—'))
+    + item('本地估算', r.estimatedCostUsd != null ? '$' + (r.estimatedCostUsd || 0).toFixed(6) : dash)
+    + item('原始时间戳', esc(r.timestamp))
+    + '</div>';
+}
+function toggleUsageDetail(key) {
+  if (usageExpanded.has(key)) usageExpanded.delete(key); else usageExpanded.add(key);
+  renderUsageTableCurrent();
+}
+function toggleUsageSort(key) {
+  if (usageSortKey !== key) { usageSortKey = key; usageSortDir = -1; }
+  else if (usageSortDir === -1) usageSortDir = 1;
+  else { usageSortKey = ''; usageSortDir = -1; }
+  updateUsageSortIndicators();
+  renderUsageTableCurrent();
+}
+function updateUsageSortIndicators() {
+  USAGE_SORT_COLS.forEach(pair => {
+    const th = document.getElementById('usage-th-' + pair[0]);
+    if (!th) return;
+    const arrow = th.querySelector('.th-arrow');
+    if (arrow) arrow.textContent = usageSortKey === pair[0] ? (usageSortDir === 1 ? '\u2191' : '\u2193') : '';
+    th.setAttribute('aria-sort', usageSortKey === pair[0] ? (usageSortDir === 1 ? 'ascending' : 'descending') : 'none');
+  });
+}
+function renderUsageTableCurrent() {
+  const q = usageFilterQ.trim().toLowerCase();
+  renderUsageTable(sortUsageRows(usageRows.filter(r => usageMatchesQuery(r, q))), usageRows.length);
+}
+function renderUsageTable(rows, totalCount) {
   const body = document.getElementById('usageTableBody');
   const empty = document.getElementById('usageEmpty');
-  if (!recent.length) { body.innerHTML = ''; empty.classList.remove('hidden'); return; }
+  const countEl = document.getElementById('usageRecentCount');
+  if (countEl) countEl.innerText = '最近 ' + totalCount + ' 条' + (rows.length !== totalCount ? ' · 命中 ' + rows.length + ' 条' : '');
+  if (!rows.length) {
+    // 有数据但被过滤光 → 过滤空态；真没数据 → 原静态空提示。
+    body.innerHTML = totalCount ? '<tr><td colspan="10">' + emptyState('fa-magnifying-glass', '没有匹配的请求，试试清除过滤条件') + '</td></tr>' : '';
+    empty.classList.toggle('hidden', !!totalCount);
+    return;
+  }
   empty.classList.add('hidden');
-  body.innerHTML = recent.map(r => {
+  body.innerHTML = rows.map(r => {
+    const key = usageRowKey(r);
+    const open = usageExpanded.has(key);
     const badge = r.status === 'FAILED'
       ? '<span class="px-2 py-0.5 rounded-full bg-rose-500/10 text-rose-400 border border-rose-500/20">失败</span>'
       : '<span class="px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">完成</span>';
@@ -1305,7 +1435,7 @@ function renderUsageTable(recent){
       ? '<span class="text-sky-400" title="缓存命中 ' + cache.toLocaleString('en-US') + ' / 输入 ' + (r.inputTokens || 0).toLocaleString('en-US') + '">' +
           fmtTokens(cache) + ' <span class="text-slate-500">(' + Math.round(cache / Math.max(1, r.inputTokens || 1) * 100) + '%)</span></span>'
       : '<span class="text-slate-600">—</span>';
-    return '<tr class="hover:bg-slate-800/40 transition">' +
+    return '<tr class="hover:bg-slate-800/40 transition cursor-pointer" data-key="' + esc(key) + '" tabindex="0" aria-expanded="' + (open ? 'true' : 'false') + '" title="点击展开/收起详情">' +
       '<td class="px-4 py-2.5 whitespace-nowrap text-slate-300">' + esc(fmtTime(r.timestamp)) + '</td>' +
       '<td class="px-4 py-2.5 text-slate-200 font-mono">' + esc(r.model) + '</td>' +
       '<td class="px-4 py-2.5 text-right text-slate-300">' + fmtTokens(r.inputTokens) + '</td>' +
@@ -1316,8 +1446,45 @@ function renderUsageTable(recent){
       '<td class="px-4 py-2.5 text-right text-emerald-400"' + costTip + '>' + src + fmtUsd(r.costUsd) + pc + '</td>' +
       '<td class="px-4 py-2.5">' + badge + '</td>' +
       '<td class="px-4 py-2.5 text-slate-400">' + mode + '</td>' +
-    '</tr>';
+    '</tr>' + (open ? '<tr class="usage-detail"><td colspan="10">' + usageDetailHtml(r) + '</td></tr>' : '');
   }).join('');
+}
+// 行点击/回车下钻：事件委托绑一次；tr 自身聚焦时才响应键盘，避免吃掉行内控件事件。
+function bindUsageTableOnce() {
+  const body = document.getElementById('usageTableBody');
+  if (!body || body.dataset.bound) return;
+  body.dataset.bound = '1';
+  body.addEventListener('click', (e) => {
+    const tr = e.target instanceof Element ? e.target.closest('tr[data-key]') : null;
+    if (tr) toggleUsageDetail(tr.dataset.key);
+  });
+  body.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const tr = e.target instanceof Element ? e.target.closest('tr[data-key]') : null;
+    // 仅行自身聚焦时响应；closest 往上找是为了不受未来行内控件影响。
+    if (!tr || tr !== e.target) return;
+    e.preventDefault();
+    toggleUsageDetail(tr.dataset.key);
+  });
+}
+function bindUsageFilterOnce() {
+  const input = document.getElementById('usageFilterInput');
+  const clearBtn = document.getElementById('usageFilterClear');
+  if (!input || input.dataset.bound) return;
+  input.dataset.bound = '1';
+  let timer = null;
+  input.addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      usageFilterQ = input.value;
+      if (clearBtn) clearBtn.classList.toggle('hidden', !usageFilterQ);
+      renderUsageTableCurrent();
+    }, 150);
+  });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { input.value = ''; usageFilterQ = ''; if (clearBtn) clearBtn.classList.add('hidden'); renderUsageTableCurrent(); }
+  });
+  if (clearBtn) clearBtn.onclick = () => { input.value = ''; usageFilterQ = ''; clearBtn.classList.add('hidden'); input.focus(); renderUsageTableCurrent(); };
 }
 
 function renderUsageCharts(data){
