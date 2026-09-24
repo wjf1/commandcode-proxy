@@ -214,6 +214,9 @@ Anthropic 出口（`/v1/messages`）：
 | `DAILY_BUDGET_USD` | 未设置（关） | 每日预算告警：当日累计成本（服务器本地日）达到阈值时弹一次 toast；进程重启会从历史回填当日已计费金额 |
 | `MAX_UPSTREAM_CONCURRENCY` | 不限制 | 上游并发上限；超限请求以 `GATEWAY_BUSY`(503) 快速失败，防失控客户端压起大量长流 |
 | `COMMANDCODE_NOTIFY` | 开 | 设 `0/false/off` 关闭桌面通知 |
+| `LOG_REDACTION` | `on` | 日志密钥脱敏：对 `Authorization: Bearer`、`api-key`/`x-api-key` 键值、裸 `sk-` 令牌、query 中的 token/key 参数打码为 `[REDACTED]`；设 `off` 回退（仅排查密钥问题时临时使用） |
+| `UPSTREAM_REDIRECT` | `conservative` | 上游 3xx 重定向策略：`conservative` 一律不跟随（按上游错误终止）；`follow` 显式放行（逐跳校验，私网/回环/保留地址——含云元数据——永不跟随且不受 allowlist 影响，跨 host 跳转剥离凭据头，最多 5 跳） |
+| `DNS_REBINDING_GUARD` | `on` | 上游域名请求前解析校验：解析结果含私网/保留地址即拒绝（防 DNS rebinding）；设 `off` 回退；IP 字面量 / localhost / allowlist 命中主机跳过解析校验 |
 
 持久化配置存于可执行文件旁的 `config.json`。同目录的 `.env`（由仪表盘添加账号时自动维护）也会在启动时加载——**已存在的环境变量优先**，docker/systemd 注入不受影响。
 
@@ -299,6 +302,9 @@ public/
 - **默认只允许** `commandcode.ai` 及其子域；环回（localhost、127.x、::1）、私有（10.x、172.16-31.x、192.168.x、100.64/10 CGNAT）、保留/链路本地（169.254.x、IPv6 ULA/链路本地、198.18/15）及任意公网地址默认一律拒绝，除非运维显式加入允许清单。
 - **环回/私有受控例外**：本地 mock 上游、自建网关/镜像需通过 `COMMANDCODE_UPSTREAM_ALLOWED_HOSTS` **显式**加入才放行。这是**运维显式配置**的受控例外——上游地址只由 `COMMANDCODE_API_BASE` 等运维环境变量决定，不随客户端请求参数变化，因此不存在把客户端输入导向内网的 SSRF 路径。
 - **配套校验**：拒绝非 `http(s)` 协议（防 `file:`、`gopher:` 协议混淆）、拒绝内嵌凭据（`user:pass@host`）、非回环 host 强制 `https`（防降级明文；回环且显式放行时允许 http，供本地 mock）。
+- **重定向阻断（v4.20.0）**：所有上游请求一律 `redirect: 'manual'`。默认 `conservative`：上游返回 3xx 即按错误终止，永不跟随；`UPSTREAM_REDIRECT=follow` 显式放行后逐跳复检目标——私网/回环/保留地址（含 169.254.169.254 等云元数据）**永不跟随且不受 allowlist 影响**，同 host 跳转保留 POST 与请求体，跨 host 跳转剥离 `Authorization` 凭据头，链条最多 5 跳。
+- **DNS rebinding 防护（v4.20.0）**：`DNS_REBINDING_GUARD=on`（默认）在每个上游请求出口做"请求前解析 + 校验"，域名解析结果含私网/保留地址即拒绝（fail-closed）；`off` 显式回退。IP 字面量、localhost、allowlist 命中主机跳过解析校验。已知残余：lookup 与建连之间存在 TOCTOU 窗口，彻底封闭需固定解析结果建连。
+- **日志密钥脱敏（v4.20.0）**：`LOG_REDACTION=on`（默认）对落盘/环形缓冲/仪表盘的日志行按密钥形态打码（`Bearer`、`api-key`、`sk-` 令牌、query token），防止密钥经 proxy.log 与日志页外泄；`off` 显式回退。
 
 ## 📄 免责声明与许可证
 <a id="license"></a>
@@ -337,7 +343,7 @@ Point any OpenAI-style client (Cursor, Continue, Aider, OpenWebUI, Hermes, your 
 
 - Exponential-backoff retries on 429/5xx/network errors; **retries also cover failures the upstream reports inside an HTTP 200 stream** (gateway failure / overload / no available provider) by probing events before the stream is handed to the route, so an error is no longer returned as if it were the model's answer — deterministic unavailability (region, unknown model) is deliberately not retried; idle-stream watchdog (no infinite hangs); client-disconnect cancellation; clean stream termination with SSE keepalive comments
 - Secure defaults: loopback-only binding; optional `PROXY_API_KEY` covering **both `/v1/*` and the admin surface `/api/*`** (dashboard prompts on first visit); Origin check on `/api/*` mutations; XSS-hardened dashboard; CORS limited to the public API surface; prominent warnings when bound non-loopback without auth
-- **SSRF guard, fail-closed** — see the bilingual [Upstream URL safety](#security) section
+- **SSRF guard, fail-closed** — strict upstream URL allowlist, **redirect blocking** (`redirect: 'manual'` everywhere; opt-in `UPSTREAM_REDIRECT=follow` re-validates every hop, never follows into private/metadata addresses, strips credentials across hosts), **DNS-rebinding guard** (`DNS_REBINDING_GUARD=on` resolves & validates every upstream hostname per request), **log secret redaction** (`LOG_REDACTION=on` masks Bearer/api-key/sk- tokens in logs) — see the bilingual [Upstream URL safety](#security) section
 - **Structured error codes** — 17 stable codes with actionable hints, surfaced as OpenAI `error.type/code` or Anthropic `error.type` (table below)
 - Windows toast notifications for quota exhaustion / account switch / engine pause — native, zero dependencies, 30-min dedupe, with **self-diagnosis** of the system-wide notification switch; disable via `COMMANDCODE_NOTIFY=0`
 
