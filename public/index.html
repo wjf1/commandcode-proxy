@@ -94,11 +94,20 @@ mark{background:var(--c-hl-bg);color:var(--c-hl-text);border-radius:3px;padding:
 <main class="flex-1 p-6 max-w-7xl w-full mx-auto space-y-6">
 
 <section id="content-overview" role="tabpanel" tabindex="0" aria-labelledby="tab-overview" class="space-y-6">
-  <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+  <div class="flex items-center justify-between flex-wrap gap-3">
+    <div>
+      <h2 class="text-lg font-bold text-white">面板概览</h2>
+      <p class="text-xs text-slate-400">网关运行状态与今日用量速览</p>
+    </div>
+    <button onclick="refreshOverview()" id="overviewRefreshBtn" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs rounded-lg flex items-center gap-1.5 border border-slate-700 transition"><i aria-hidden="true" class="fa-solid fa-rotate"></i> 刷新状态</button>
+  </div>
+  <div class="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-6 gap-4">
     <div class="card p-5 rounded-xl"><p class="text-xs text-slate-400 font-medium">网关服务</p><h3 id="statPort" class="text-xl font-bold text-white mt-1">Port :9090</h3><p id="statUptime" class="text-xs text-indigo-400 mt-2">运行时间：0s</p></div>
     <div class="card p-5 rounded-xl"><p class="text-xs text-slate-400 font-medium">当前账号</p><h3 id="statAccount" class="text-xl font-bold text-white mt-1">None</h3><p id="statAccountsCount" class="text-xs text-slate-400 mt-2">0 个账号已注册</p></div>
     <div class="card p-5 rounded-xl"><p class="text-xs text-slate-400 font-medium">安全</p><h3 id="statBind" class="text-xl font-bold text-emerald-400 mt-1">127.0.0.1</h3><p id="statAuth" class="text-xs text-slate-400 mt-2">API 鉴权：关闭</p></div>
     <div class="card p-5 rounded-xl"><p class="text-xs text-slate-400 font-medium">可用模型</p><h3 id="statModels" class="text-xl font-bold text-white mt-1">0</h3><p class="text-xs text-emerald-400 mt-2"><i aria-hidden="true" class="fa-solid fa-check"></i> 可用于对话</p></div>
+    <div class="card p-5 rounded-xl"><p class="text-xs text-slate-400 font-medium">今日请求</p><h3 id="statTodayRuns" class="text-xl font-bold text-white mt-1">--</h3><p id="statTodayCost" class="text-xs text-emerald-400 mt-2">成本 --</p></div>
+    <div class="card p-5 rounded-xl"><p class="text-xs text-slate-400 font-medium">活跃账号</p><h3 id="statActiveAccounts" class="text-xl font-bold text-white mt-1">--</h3><p id="statActiveDetail" class="text-xs text-slate-400 mt-2">当前：--</p></div>
   </div>
   <div class="card rounded-xl p-6">
     <h2 class="text-md font-semibold text-white mb-4 flex items-center gap-2"><i aria-hidden="true" class="fa-solid fa-link text-indigo-400"></i> 已启用的 API 接口</h2>
@@ -544,8 +553,23 @@ async function fetchStatus() {
     document.getElementById('updateVer').innerText = data.update.latest;
   }
   document.getElementById('statModels').innerText = orDash(data.modelsCount);
+  document.getElementById('statActiveAccounts').innerText = orDash(data.accountsCount);
+  document.getElementById('statActiveDetail').innerText = '当前：' + (data.activeAccountName || '无');
   // 轮转模式下拉只在后端真的给了值时回写，否则会把用户刚选的选择框重置成 undefined。
   if (data.rotationMode) document.getElementById('rotationSelect').value = data.rotationMode;
+}
+
+// 概览页「今日请求 / 今日成本」速览：复用既有 /api/usage/history 的 today 汇总，
+// 不新增后端端点。静默失败：概览页 30s 轮询，弹 toast 会刷屏。
+async function loadOverviewUsage() {
+  const { ok, data } = await apiJson('/api/usage/history');
+  if (!ok || !data || !data.today) return;
+  document.getElementById('statTodayRuns').innerText = ovFmtNum(data.today.runs);
+  document.getElementById('statTodayCost').innerText = '成本 ' + fmtUsdShort(data.today.cost || 0);
+}
+async function refreshOverview() {
+  await Promise.all([fetchStatus(), loadOverviewUsage()]);
+  showToast('状态已刷新', 'success');
 }
 
 async function toggleEngine() {
@@ -599,7 +623,9 @@ async function submitLogin() {
 async function loadAccounts() {
   const grid = document.getElementById('accountsGrid');
   showSkeletonIfEmpty(grid, skeletonCards(2, 60));
-  const { ok, data, error } = await apiJson('/api/accounts');
+  // 账号列表与额度并行取：额度失败只降级（不显示额度徽标），不阻塞账号卡片。
+  const [accRes, usageRes] = await Promise.all([apiJson('/api/accounts'), apiJson('/api/usage/aggregate')]);
+  const { ok, data, error } = accRes;
   if (!ok || !Array.isArray(data.accounts)) {
     // 后端 500 时 data 形如 {error:...}，照原样 .map 会 TypeError，网格停在旧列表上 ——
     // 于是"删除账号失败"在界面上的表现是"点了没反应"。
@@ -608,6 +634,11 @@ async function loadAccounts() {
     return;
   }
   if (!data.accounts.length) { grid.innerHTML = emptyState('fa-users-gear', '暂无账号，用右上角按钮添加第一个账号'); return; }
+  // account.id -> 额度数据映射，供卡片渲染额度徽标。
+  const usageById = {};
+  if (usageRes.ok && usageRes.data && Array.isArray(usageRes.data.accountsUsage)) {
+    usageRes.data.accountsUsage.forEach(u => { if (u.account && u.account.id) usageById[u.account.id] = u; });
+  }
   grid.innerHTML = data.accounts.map(acc =>
     '<div class="bg-slate-900 border ' + (acc.isActive ? 'border-indigo-500 shadow-lg shadow-indigo-500/10' : 'border-slate-800') + ' p-5 rounded-xl space-y-3">' +
       '<div class="flex items-center justify-between">' +
@@ -615,6 +646,7 @@ async function loadAccounts() {
           '<div class="w-8 h-8 rounded-lg bg-indigo-500/10 text-indigo-400 flex items-center justify-center font-bold text-xs">' + esc((acc.name||'?').charAt(0).toUpperCase()) + '</div>' +
           '<div><h4 class="font-bold text-sm text-white flex items-center gap-2">' + esc(acc.name) +
           (acc.isActive ? ' <span class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 font-semibold border border-emerald-500/20">当前</span>' : '') +
+          ' ' + (acc.userName || acc.email ? badge('OAuth', 'sky', '浏览器授权登录的账号') : badge('API Key', 'slate', '手动粘贴 API Key 的账号')) +
           '</h4><p class="text-xs text-slate-400">' + esc(acc.userName ? '@'+acc.userName : (acc.email || 'API Key')) + '</p></div>' +
         '</div>' +
         '<div class="flex items-center space-x-2">' +
@@ -624,7 +656,7 @@ async function loadAccounts() {
       '</div>' +
       '<div class="pt-2 border-t border-slate-800/80 flex items-center justify-between text-xs text-slate-400">' +
         '<span>Key：<code class="font-mono text-slate-300">' + esc(acc.apiKeyMasked) + '</code></span>' +
-        '<span>添加于：' + esc(new Date(acc.addedAt).toLocaleDateString()) + '</span>' +
+        '<span class="flex items-center gap-1.5">' + quotaBadge(usageById[acc.id]) + '<span>添加于：' + esc(new Date(acc.addedAt).toLocaleDateString()) + '</span></span>' +
       '</div>' +
     '</div>'
   ).join('');
@@ -835,6 +867,8 @@ const BADGE_TONES = {
   rose: 'bg-rose-500/15 text-rose-300 border-rose-500/30',
   amber: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
   slate: 'bg-slate-500/15 text-slate-300 border-slate-500/30',
+  emerald: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
+  sky: 'bg-sky-500/15 text-sky-300 border-sky-500/30',
 };
 function badge(text, tone, title) {
   return '<span class="text-[10px] px-2 py-0.5 rounded border font-semibold ' + BADGE_TONES[tone] + '"' +
@@ -842,6 +876,17 @@ function badge(text, tone, title) {
 }
 // 档位药丸：可用=实心强调色，不可用=灰底。两枚固定占位，卡片高度一致，
 // 整列纵向对齐后即可一眼比较 GO / GOAT 的差别。
+// 账号额度徽标：5h 窗口使用率，数据来自 /api/usage/aggregate 的原样转发。
+// credits 缺失或无上限（cap<=0）时不显示，避免把「未知」画成「正常」。
+function quotaBadge(u) {
+  const w = u && u.credits && u.credits.windowLimits && u.credits.windowLimits.fiveHour;
+  const cap = w ? Number(w.cap) || 0 : 0;
+  if (!w || cap <= 0) return '';
+  const pct = Math.round((Number(w.used) || 0) / cap * 100);
+  if (pct >= 90) return badge('额度告急', 'rose', '5 小时窗口已用 ' + pct + '%');
+  if (pct >= 70) return badge('额度偏高', 'amber', '5 小时窗口已用 ' + pct + '%');
+  return badge('额度正常', 'emerald', '5 小时窗口已用 ' + pct + '%');
+}
 function planPill(key, label, on, onTone) {
   const cls = on ? onTone : 'bg-slate-800/40 text-slate-400 border-slate-700/70';
   return '<span class="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border font-semibold ' + cls +
@@ -1407,6 +1452,7 @@ window.fetch = async function (input, init) {
 };
 
 fetchStatus();
+loadOverviewUsage();
 bindAccountActionsOnce();
 // 管理密钥模态：Enter 提交、Esc 取消。
 document.getElementById('adminKeyInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') submitAdminKey(); });
@@ -1473,6 +1519,7 @@ document.addEventListener('keydown', (e) => {
 // 页面在后台时浏览器本会节流定时器，这里显式跳过，省掉无意义的轮询请求。
 setInterval(() => { if (!document.hidden) fetchStatus(); }, 5000);
 setInterval(() => { if (!document.hidden && currentTab === 'usage') loadUsageHistory(); }, 30000);
+setInterval(() => { if (!document.hidden && currentTab === 'overview') loadOverviewUsage(); }, 30000);
 // 实时日志：日志页激活时每 5s 轮询一次（无新日志时渲染成本可忽略）。
 setInterval(() => { if (!document.hidden && currentTab === 'logs') loadLogs(); }, 5000);
 </script>
