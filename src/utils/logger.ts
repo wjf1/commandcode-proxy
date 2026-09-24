@@ -41,6 +41,28 @@ function sanitize(message: string): string {
     .replace(/\u001B\[[0-9;]*[A-Za-z]/g, '');
 }
 
+const REDACTED = '[REDACTED]';
+
+/**
+ * 按密钥形态脱敏：Authorization: Bearer/Basic、api-key/x-api-key 键值、裸 sk- 令牌、
+ * query 里的 token/key 参数。安全默认（LOG_REDACTION 未设即 on），设为 off 可显式回退，
+ * 供依赖日志原文排查密钥问题的场景临时使用。
+ */
+export function redactSecrets(message: string): string {
+  if ((process.env.LOG_REDACTION || '').trim().toLowerCase() === 'off') return message;
+  return message
+    // Authorization: Bearer xxx / Basic xxx（值至少 8 字符，避免误伤普通语句）
+    .replace(/(authorization\s*[:=]\s*)(bearer|basic|token)\s+[A-Za-z0-9._~+/=-]{8,}/gi,
+      (_m, p1: string, p2: string) => `${p1}${p2} ${REDACTED}`)
+    // api-key / x-api-key / apikey 键值对（header、JSON、query 通用；key/value 均允许引号包裹）
+    .replace(/((?:["']?(?:x-)?api-?key["']?\s*[:=]\s*))("[^"]{8,}"|[^\s,;{}]{8,})/gi,
+      (_m, p1: string) => `${p1}${REDACTED}`)
+    // 裸 sk- 风格令牌
+    .replace(/\bsk-[A-Za-z0-9_-]{16,}\b/g, REDACTED)
+    // query 参数：token / key / access_token
+    .replace(/([?&](?:access_)?(?:token|key|apikey|api_key)=)[^&\s]+/gi, (_m, p1: string) => `${p1}${REDACTED}`);
+}
+
 function appendFileSink(entry: LogEntry): void {
   try {
     fs.mkdirSync(path.dirname(LOG_FILE_PATH), { recursive: true });
@@ -56,7 +78,8 @@ function appendFileSink(entry: LogEntry): void {
 }
 
 function push(level: LogEntry['level'], message: string): void {
-  const entry: LogEntry = { timestamp: timestamp(), level, message: sanitize(message) };
+  // 先 sanitize 清掉控制字符（防止用 \x00 拆分 "Bearer" 绕过正则），再做密钥脱敏。
+  const entry: LogEntry = { timestamp: timestamp(), level, message: redactSecrets(sanitize(message)) };
   logBuffer.push(entry);
   if (logBuffer.length > MAX_LOGS) logBuffer.shift();
   const prefix = `[${entry.timestamp}] [${level.toUpperCase()}]`;
