@@ -10,6 +10,8 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import http from 'http';
+import net from 'net';
+import dns from 'dns';
 import crypto from 'crypto';
 import { spawn } from 'child_process';
 import { GatewayConfig, GatewayConfigFile, AccountInfo } from '../types/index.js';
@@ -144,11 +146,12 @@ export function isAllowedUpstreamHost(hostname: string): boolean {
 /**
  * 校验并返回一个可安全用于服务端 fetch 的 URL。
  * 不满足条件时抛错（fail-closed），调用方应据此拒绝请求而不是降级执行。
+ * base 用于解析相对 URL（重定向 Location 场景）。
  */
-export function assertSafeUpstreamUrl(rawUrl: string): URL {
+export function assertSafeUpstreamUrl(rawUrl: string, base?: string | URL): URL {
   let url: URL;
   try {
-    url = new URL(String(rawUrl));
+    url = new URL(String(rawUrl), base);
   } catch (e: any) {
     throw new Error(`[NET] Invalid upstream URL: ${e?.message || 'parse error'}`, { cause: e });
   }
@@ -176,6 +179,46 @@ export function assertSafeUpstreamUrl(rawUrl: string): URL {
     throw new Error(`[NET] Upstream host is not allowed: ${host}`);
   }
   return url;
+}
+
+/**
+ * 校验重定向目标（Wave 3 SSRF）：在 assertSafeUpstreamUrl 基线之上，强制拒绝
+ * 私网/回环/保留地址（含 169.254.169.254 等云元数据）。重定向是唯一能绕过
+ * "初始 URL 校验"的通道——即使主机被 COMMANDCODE_UPSTREAM_ALLOWED_HOSTS 显式
+ * 放行，也不得作为重定向目标。本规则 fail-closed 且不提供任何开关。
+ */
+export function assertSafeUpstreamRedirectTarget(rawUrl: string, base?: string | URL): URL {
+  const url = assertSafeUpstreamUrl(rawUrl, base);
+  if (isPrivateOrReserved(normalizeHost(url.hostname))) {
+    throw new Error(`[NET] Redirect target is private/loopback/reserved and can never be followed: ${url.hostname}`);
+  }
+  return url;
+}
+
+/**
+ * Wave 3（DNS rebinding）：请求前解析上游域名并校验解析结果。assertSafeUpstreamUrl
+ * 只能校验 URL 字面里的 host——攻击者控制的域名可以先解析到公网 IP 通过校验，实际
+ * 请求时再解析到内网地址（DNS rebinding）。默认 on；DNS_REBINDING_GUARD=off 显式回退。
+ * 跳过解析校验的三类 host（无 rebinding 可能或已显式信任）：
+ *   - IP 字面量（安全性由 assertSafeUpstreamUrl + allowlist 决定）
+ *   - localhost 等回环主机（恒解析为回环，是本地 mock / 自建网关的合法形态）
+ *   - COMMANDCODE_UPSTREAM_ALLOWED_HOSTS 命中的主机（运维显式信任即显式放行）
+ * 残余风险（已知且刻意接受）：lookup 与 fetch 真正建连之间存在 TOCTOU 窗口，彻底
+ * 封闭需要固定解析结果建连（自定义 undici Agent），当前按"请求前校验"档位实现。
+ */
+export async function assertSafeUpstreamDns(rawUrl: string): Promise<void> {
+  if ((process.env.DNS_REBINDING_GUARD || '').trim().toLowerCase() === 'off') return;
+  const url = new URL(String(rawUrl));
+  const host = normalizeHost(url.hostname);
+  if (!host || net.isIP(host) || isLoopback(host) || hostInExtraAllowlist(host)) return;
+  const addresses = await dns.promises.lookup(host, { all: true });
+  const bad = addresses.find(a => isPrivateOrReserved(normalizeHost(a.address)));
+  if (bad) {
+    throw new Error(
+      `Upstream host '${host}' resolves to private/reserved address ${bad.address} ` +
+      `(DNS rebinding guard; set DNS_REBINDING_GUARD=off to skip)`,
+    );
+  }
 }
 
 /** 从环境变量或用户级 auth.json 加载默认 API Key（作为无账号配置时的兜底）。 */
@@ -580,12 +623,14 @@ async function fetchJson(url: string, headers: Record<string, string>, timeoutMs
   let safeUrl: string;
   try {
     safeUrl = assertSafeUpstreamUrl(url).toString();
+    await assertSafeUpstreamDns(safeUrl);
   } catch (err: any) {
     logger.warn(`[USAGE] Blocked unsafe upstream URL: ${err.message}`);
     return null;
   }
   try {
-    const res = await fetch(safeUrl, { headers, signal: AbortSignal.timeout(timeoutMs) });
+    // Wave 3（SSRF）：3xx 不跟随，res.ok 为 false 走下方返回 null 的失败分支
+    const res = await fetch(safeUrl, { headers, signal: AbortSignal.timeout(timeoutMs), redirect: 'manual' } as RequestInit);
     if (res.ok) return await res.json();
   } catch (err: any) {
     logger.warn(`[USAGE] ${safeUrl} fetch error: ${err.message}`);

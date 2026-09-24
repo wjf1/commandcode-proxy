@@ -10,7 +10,7 @@
 // =============================================================================
 import fs from 'fs';
 import path from 'path';
-import { loadConfig, assertSafeUpstreamUrl } from './config.js';
+import { loadConfig, assertSafeUpstreamUrl, assertSafeUpstreamDns } from './config.js';
 import { getProjectRootDir } from './paths.js';
 import { logger } from './logger.js';
 import { buildAvailabilityMap } from './plans.js';
@@ -259,6 +259,7 @@ export async function fetchPricingCatalog(force = false): Promise<Map<string, Pr
   let safePricingUrl: string;
   try {
     safePricingUrl = assertSafeUpstreamUrl(PRICING_PLAN_URL).toString();
+    await assertSafeUpstreamDns(safePricingUrl);
   } catch (err: any) {
     logger.warn(`[MODELS] Blocked unsafe pricing URL: ${err.message}`);
     return cache ? new Map(cache.entries.map(e => [normalizeId(e.id), e])) : new Map();
@@ -270,7 +271,9 @@ export async function fetchPricingCatalog(force = false): Promise<Map<string, Pr
       const res = await fetch(safePricingUrl, {
         headers: { 'User-Agent': 'Mozilla/5.0 (compatible; commandcode-proxy/4)' },
         signal: controller.signal,
-      });
+        // Wave 3（SSRF）：3xx 不跟随，落入下方 !ok 分支按失败处理
+        redirect: 'manual',
+      } as RequestInit);
       clearTimeout(timer);
       if (!res.ok) {
         logger.warn(`[MODELS] Pricing page fetch failed: HTTP ${res.status} (attempt ${attempt}/${attempts})`);
@@ -340,11 +343,13 @@ export async function fetchUpstreamModels(apiKey: string, ccVersion: string, ref
     let safeModelsUrl: string;
     try {
       safeModelsUrl = assertSafeUpstreamUrl(`${config.ccApiBase}/provider/v1/models`).toString();
+      await assertSafeUpstreamDns(safeModelsUrl);
     } catch (err: any) {
       logger.warn(`[MODELS] Blocked unsafe upstream URL: ${err.message}`);
       safeModelsUrl = '';
     }
-    const res = safeModelsUrl ? await fetch(safeModelsUrl, { method: 'GET', headers }) : null;
+    // Wave 3（SSRF）：3xx 不跟随，落入下方 !ok 分支按失败处理
+    const res = safeModelsUrl ? await fetch(safeModelsUrl, { method: 'GET', headers, redirect: 'manual' } as RequestInit) : null;
     if (res && res.ok) {
       const data: any = await res.json();
       let rawList: any[] = [];

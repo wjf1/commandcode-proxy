@@ -11,7 +11,7 @@
 // =============================================================================
 import { Readable, PassThrough } from 'node:stream';
 import { CCRequestBody } from '../../types/index.js';
-import { loadConfig, assertSafeUpstreamUrl } from '../../utils/config.js';
+import { loadConfig, assertSafeUpstreamUrl, assertSafeUpstreamRedirectTarget, assertSafeUpstreamDns } from '../../utils/config.js';
 import { logger } from '../../utils/logger.js';
 import { ErrorCode, ProxyError, codeForStatus, terminalCodeFor, type ErrorCodeName } from '../../utils/errors.js';
 
@@ -407,6 +407,8 @@ export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<
   let url: string;
   try {
     url = assertSafeUpstreamUrl(`${config.ccApiBase}/alpha/generate`).toString();
+    // Wave 3（DNS rebinding）：域名解析结果校验，防"字面公网域名实际解析进内网"。
+    await assertSafeUpstreamDns(url);
   } catch (err: any) {
     logger.error(`[UPSTREAM] Blocked unsafe upstream URL: ${err.message}`);
     throw new UpstreamError(`Unsafe upstream URL: ${err.message}`, undefined, false, ErrorCode.BLOCKED_HOST);
@@ -459,7 +461,7 @@ export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<
   // 循环内任何 throw 都先释放并发槽位；成功路径的释放挂在返回流的 close/error 上。
   try {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const headers = buildHeaders(currentApiKey, config.ccVersion, body);
+    let headers = buildHeaders(currentApiKey, config.ccVersion, body);
     const timeoutController = new AbortController();
     let idleTimer: NodeJS.Timeout | null = null;
     let idleFired = false;
@@ -509,12 +511,58 @@ export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<
 
       armIdleWatchdog();
 
-      const response = await fetch(url, {
-        method: 'POST',
-        headers,
-        body: reqData,
-        signal: combinedSignal,
-      });
+      // Wave 3（SSRF）：一律 redirect:'manual'。Node fetch 默认 follow，被攻击者控制的
+      // 上游可用 302 把带凭据的请求引向 169.254.169.254 等内网/元数据地址，绕过对初始
+      // URL 的校验。默认 conservative：3xx 按上游错误终止；UPSTREAM_REDIRECT=follow
+      // 显式放行后逐跳校验目标（私网/保留地址永不跟随，不受 allowlist 影响），同 host
+      // 跳转保留 POST 与请求体（API 重定向唯一合理场景是网关迁移，body 不可丢），跨
+      // host 跳转剥离凭据头，防止 Authorization 被引到第三方。
+      const redirectMode = (process.env.UPSTREAM_REDIRECT || '').trim().toLowerCase() === 'follow' ? 'follow' : 'conservative';
+      const MAX_REDIRECT_HOPS = 5;
+      let currentUrl = url;
+      let res: Response | undefined;
+      for (let hop = 0; ; hop++) {
+        res = await fetch(currentUrl, {
+          method: 'POST',
+          headers,
+          body: reqData,
+          signal: combinedSignal,
+          redirect: 'manual',
+        } as RequestInit);
+        if (res.status < 300 || res.status >= 400) break;
+        const location = res.headers.get('location');
+        try { await res.body?.cancel(); } catch { /* 3xx 响应体释放失败不影响主流程 */ }
+        if (redirectMode !== 'follow' || !location || hop >= MAX_REDIRECT_HOPS) {
+          logger.error(
+            `[UPSTREAM] Model: ${body.params.model} | Thread ${body.threadId} | ` +
+            `Redirect ${res.status} to ${location || '<no Location>'} blocked (UPSTREAM_REDIRECT=${redirectMode})`,
+          );
+          throw new UpstreamError(
+            `Upstream redirect ${res.status} blocked (UPSTREAM_REDIRECT=${redirectMode})`,
+            res.status,
+            false,
+            ErrorCode.PROVIDER_PROTOCOL_ERROR,
+          );
+        }
+        const prevHost = new URL(currentUrl).host;
+        let nextUrl: URL;
+        try {
+          nextUrl = assertSafeUpstreamRedirectTarget(location, currentUrl);
+          await assertSafeUpstreamDns(nextUrl.toString());
+        } catch (err: any) {
+          // 不可重试的 BLOCKED_HOST：私网/元数据目标与 rebinding 域名没有重试价值。
+          throw new UpstreamError(`Blocked redirect target: ${err.message}`, undefined, false, ErrorCode.BLOCKED_HOST);
+        }
+        if (nextUrl.host !== prevHost) {
+          const hopHeaders: Record<string, string> = { ...headers };
+          for (const k of Object.keys(hopHeaders)) {
+            if (k.toLowerCase() === 'authorization') delete hopHeaders[k];
+          }
+          headers = hopHeaders;
+        }
+        currentUrl = nextUrl.toString();
+      }
+      const response = res as Response;
 
       if (!response.ok) {
         const errorText = await response.text();
