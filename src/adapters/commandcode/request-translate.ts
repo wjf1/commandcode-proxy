@@ -393,14 +393,6 @@ function anthropicImageToDataUrl(block: Extract<AnthropicContentBlock, { type: '
   return `data:${block.source.media_type};base64,${block.source.data}`;
 }
 
-/** Anthropic base64 image → raw wire shape (original CLI format). */
-function anthropicImageToWire(block: Extract<AnthropicContentBlock, { type: 'image' }>): CCContentPart {
-  if (block.source.type === 'url') {
-    return { type: 'image', image: block.source.url, mediaType: 'image/png' } as any;
-  }
-  return { type: 'image', image: block.source.data, mediaType: block.source.media_type } as any;
-}
-
 function contentPartsToText(content: any): string {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {

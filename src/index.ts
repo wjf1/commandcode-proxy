@@ -19,10 +19,13 @@ import { chatRoutes, verifyProxyAuth } from './routes/chat.js';
 import { messagesRoutes } from './routes/messages.js';
 import { modelsRoutes } from './routes/models.js';
 import { dashboardRoutes } from './routes/dashboard.js';
+import { registerPromptRoutes } from './routes/prompts.js';
 import { recordQuotaSample, getQuotaProjection } from './utils/quota-tracker.js';
 import { flushPendingWrites } from './utils/usage-store.js';
 import { scheduleUpdateChecks } from './utils/update-check.js';
 import { notify, ensureAumidRegistered, isGlobalToastEnabled } from './utils/notifier.js';
+import { startHealthChecks } from './utils/health-check.js';
+import { startWebhookAlerts } from './utils/webhook-alerts.js';
 
 // 未捕获异常/拒绝：单次只记日志（代理要尽量活着）。
 // 但短时间连续出现说明进程已进入不可信状态（可能挂着僵死的上游连接、
@@ -129,6 +132,8 @@ const start = async () => {
     await fastify.register(chatRoutes);
     await fastify.register(messagesRoutes);
     await fastify.register(modelsRoutes);
+    // Prompt 版本管理（默认关闭）：PROMPT_VERSIONS=on 时 plugin 内部才会注册路由。
+    await fastify.register(registerPromptRoutes);
 
     fastify.get('/health', async () => {
       return { status: 'ok', version: PROXY_VERSION, time: new Date().toISOString() };
@@ -170,6 +175,13 @@ const start = async () => {
       sampleQuotaWindow().catch(err => logger.warn(`[QUOTA-SAMPLE] ${err?.message || err}`));
     }, QUOTA_SAMPLE_INTERVAL_MS);
     logger.info('[QUOTA-SAMPLE] Window usage sampler active (every 5m).');
+
+    // 通道健康检查 + Webhook 告警（均为纯旁路，不影响任何请求路径）。
+    // 健康检查默认 5 分钟一次仅告警；WEBHOOK_URL 未设置时 webhook 完全不启动。
+    const healthTimer = startHealthChecks();
+    if (healthTimer) logger.info('[HEALTH] Channel health probe armed.');
+    const webhookTimer = startWebhookAlerts();
+    if (webhookTimer) logger.info('[WEBHOOK] Alert scheduler armed.');
 
     // 预注册通知 AUMID：让第一条 toast 就能以 "CommandCode Proxy" 名义显示，
     // 而不是回退到 PowerShell。幂等，且失败只影响显示名，不阻断启动。

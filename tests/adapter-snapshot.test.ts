@@ -15,9 +15,21 @@
 //   - wire.config 的日期/平台/工作目录归一化，快照跨机器跨日期稳定。
 // 拆分后本文件必须逐字节一致 —— 任何快照 diff 都意味着行为变化。
 // =============================================================================
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
 import { CommandCodeAdapter } from '../src/adapters/commandcode/adapter.js';
+import { setCachedModelsForTest } from '../src/utils/models.js';
 import { OpenAIChatRequest, AnthropicRequest, CCEvent, StreamEncoderState } from '../src/types/index.js';
+
+// 快照必须跨环境稳定：resolveModelName 依赖内存模型缓存（生产环境从 models.json /
+// 上游加载，各机器不同），这里注入固定目录，让所有用例的模型解析都有确定输入。
+// 用例里的 model 均精确命中（resolveModelName 原样返回），不触发模糊解析。
+beforeAll(() => {
+  setCachedModelsForTest(
+    ['claude-sonnet-5', 'gpt-5.6-sol', 'deepseek/deepseek-v4.1-flash', 'google/gemini-3.6-flash'].map(id => ({
+      id, object: 'model', created: 0, owned_by: 'command-code',
+    })),
+  );
+});
 
 const adapter = new CommandCodeAdapter();
 
