@@ -13,13 +13,32 @@
 //   对高缓存命中（agent 场景常见 90%+）的请求会虚高约 7 倍。
 // - 读取时按天、按模型、按总计做聚合，供面板趋势图/分布图/成本卡片使用。
 // =============================================================================
-import fs from 'fs';
-import path from 'path';
-import os from 'os';
 import { getCachedModels } from './models.js';
 import { notify } from './notifier.js';
 import { logger } from './logger.js';
 import { ModelItem, ModelPricing } from '../types/index.js';
+import {
+  JsonlUsageBackend,
+  resolveStorageBackendName,
+  resolveUsageFilePath,
+  type UsageStorageBackend,
+  type UsageStorageBackendName,
+} from './storage-backend.js';
+
+// 存储后端接口与默认 JSONL 实现的对外再导出（既有 import 面不变，见 storage-backend.ts）。
+export { JsonlUsageBackend, resolveStorageBackendName, resolveUsageFilePath } from './storage-backend.js';
+export type { UsageStorageBackend, UsageStorageBackendName } from './storage-backend.js';
+
+/** 用量历史文件路径（解析逻辑收敛在 storage-backend，保持既有 USAGE_HISTORY_PATH 语义）。 */
+export const USAGE_FILE_PATH = resolveUsageFilePath();
+
+/**
+ * 存储后端装配：env USAGE_STORAGE_BACKEND 默认且目前仅支持 'jsonl'，其他值在
+ * 模块加载期直接抛错（fail fast）。SQLite 等未来后端只补实现、不改调用侧。
+ */
+export const USAGE_STORAGE_BACKEND: UsageStorageBackendName =
+  resolveStorageBackendName(process.env.USAGE_STORAGE_BACKEND);
+const storage: UsageStorageBackend = new JsonlUsageBackend(USAGE_FILE_PATH);
 
 export interface UsageRecord {
   /** ISO 时间戳 */
@@ -67,10 +86,6 @@ export interface UsageRecord {
   /** 客户端时区（IANA），用于按调用方本地日期分组。 */
   timezone?: string;
 }
-
-export const USAGE_FILE_PATH = process.env.USAGE_HISTORY_PATH
-  ? path.resolve(process.env.USAGE_HISTORY_PATH)
-  : path.join(os.homedir(), '.commandcode', 'usage-history.jsonl');
 
 /** 从 /v1/models 缓存中取模型的完整条目（定价 + 峰谷分时价）。 */
 function getModelForPricing(modelId: string): ModelItem | undefined {
@@ -257,37 +272,6 @@ export function estimateCostUsd(
 
 let writeQueue: Promise<void> = Promise.resolve();
 
-/**
- * 历史文件大小上限（字节）。默认 20MB，可用环境变量 USAGE_HISTORY_MAX_MB 调整。
- * 只追加不轮转的话，文件会随使用无限增长，而 /api/usage/history 每次都全量
- * 读取 + 聚合，几十万行后仪表盘会明显变慢。
- */
-const USAGE_MAX_BYTES = (() => {
-  const mb = parseInt(process.env.USAGE_HISTORY_MAX_MB || '', 10);
-  return Number.isFinite(mb) && mb > 0 ? mb * 1024 * 1024 : 20 * 1024 * 1024;
-})();
-
-/** 超限时保留文件后半（从中点后的第一条完整行起），整写替换。 */
-function rotateUsageFile(): void {
-  try {
-    if (!fs.existsSync(USAGE_FILE_PATH)) return;
-    const size = fs.statSync(USAGE_FILE_PATH).size;
-    if (size < USAGE_MAX_BYTES) return;
-    const raw = fs.readFileSync(USAGE_FILE_PATH, 'utf-8');
-    const nl = raw.indexOf('\n', Math.floor(raw.length / 2));
-    const kept = nl >= 0 ? raw.slice(nl + 1) : raw;
-    // 临时文件名带 pid：固定名在两个实例共用同一数据目录时会互相踩，且 Windows 上
-    // rename 覆盖被对方打开的文件会 EPERM（仓库自带的 usage-history-io.mjs 早就
-    // 用了 pid 唯一 + 哨兵的写法，生产代码这里却漏了）。
-    const tmp = `${USAGE_FILE_PATH}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, kept, 'utf-8');
-    fs.renameSync(tmp, USAGE_FILE_PATH);
-    logger.info(`[USAGE] Rotated usage history: ${(size / 1048576).toFixed(1)}MB -> ${(kept.length / 1048576).toFixed(1)}MB`);
-  } catch (err: any) {
-    logger.warn(`[USAGE] History rotation failed: ${err.message}`);
-  }
-}
-
 let lastRotationCheck = 0;
 
 /** 追加一条记录到 JSONL（串行写，避免并发交错）；周期性检查是否需要轮转。 */
@@ -299,11 +283,9 @@ export function recordCompletion(entry: UsageRecord): void {
   // 串行化写入：避免并发请求同时写同一行而交错。
   writeQueue = writeQueue.then(() => {
     try {
-      if (shouldCheckRotation) rotateUsageFile();
-      const dir = path.dirname(USAGE_FILE_PATH);
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      fs.appendFileSync(USAGE_FILE_PATH, line + '\n', 'utf-8');
-      // 每 2s 最多 flush 一次（appendFileSync 本身立即落盘，此为保守节流说明）
+      // 轮转与追加都委托存储后端；节流与串行化调度留在 store 层（行为不变）。
+      if (shouldCheckRotation) storage.rotateIfNeeded();
+      storage.append([line]);
 
       // 今日花费增量累计（跨日归零）；首条记录时从历史回填，重启不误报
       const now = new Date();
@@ -376,9 +358,8 @@ export function flushPendingWrites(): Promise<void> {
 /** 清空全部历史。 */
 export function clearUsageHistory(): void {
   try {
-    if (fs.existsSync(USAGE_FILE_PATH)) {
-      fs.writeFileSync(USAGE_FILE_PATH, '', 'utf-8');
-      historyCache = null;
+    // 文件清空与读取缓存失效在后端内完成；今日累计状态归零留在 store 层。
+    if (storage.clear()) {
       todaySpend = 0;
       todayInitialized = true;
       logger.info('[USAGE] Usage history file cleared.');
@@ -389,40 +370,8 @@ export function clearUsageHistory(): void {
 }
 
 /** 读取全部会话历史（JSONL 逐行解析，容错跳过损坏行）。 */
-/** 历史文件缓存：mtime+size 未变时复用上次解析结果（仪表盘 30s 轮询复用）。 */
-let historyCache: { mtimeMs: number; size: number; records: UsageRecord[] } | null = null;
-
-/** 读取全部会话历史（JSONL 逐行解析，容错跳过损坏行）。 */
 export function getUsageHistory(): UsageRecord[] {
-  try {
-    if (!fs.existsSync(USAGE_FILE_PATH)) {
-      historyCache = null;
-      return [];
-    }
-    const st = fs.statSync(USAGE_FILE_PATH);
-    if (historyCache && historyCache.mtimeMs === st.mtimeMs && historyCache.size === st.size) {
-      return historyCache.records;
-    }
-    const raw = fs.readFileSync(USAGE_FILE_PATH, 'utf-8');
-    const out: UsageRecord[] = [];
-    for (const line of raw.split('\n')) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      try {
-        const obj = JSON.parse(trimmed);
-        if (obj && typeof obj === 'object' && typeof obj.timestamp === 'string') {
-          out.push(obj as UsageRecord);
-        }
-      } catch {
-        // 跳过损坏行
-      }
-    }
-    historyCache = { mtimeMs: st.mtimeMs, size: st.size, records: out };
-    return out;
-  } catch (err: any) {
-    logger.warn(`[USAGE] Error reading usage history: ${err.message}`);
-    return [];
-  }
+  return storage.loadAll();
 }
 
 interface DayBucket {
