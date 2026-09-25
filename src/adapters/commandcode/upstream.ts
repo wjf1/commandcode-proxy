@@ -13,7 +13,12 @@ import { Readable, PassThrough } from 'node:stream';
 import { CCRequestBody } from '../../types/index.js';
 import { loadConfig, assertSafeUpstreamUrl, assertSafeUpstreamRedirectTarget, assertSafeUpstreamDns } from '../../utils/config.js';
 import { logger } from '../../utils/logger.js';
-import { ErrorCode, ProxyError, codeForStatus, terminalCodeFor, type ErrorCodeName } from '../../utils/errors.js';
+import { ErrorCode, codeForStatus, terminalCodeFor } from '../../utils/errors.js';
+import { UpstreamError, isAbortError } from './pipeline/errors.js';
+import { createAttemptTimeouts } from './pipeline/timeouts.js';
+
+// 流水线共享基础件：定义在 pipeline/errors.ts，这里 re-export 保持既有导入路径。
+export { UpstreamError, isAbortError };
 
 /** 去除 token 前的 Bearer 前缀（大小写不敏感）。 */
 export function stripBearerPrefix(token: string): string {
@@ -85,33 +90,6 @@ export function estimateWireInputTokens(wire: unknown): number {
   if (Array.isArray(params.tools) && params.tools.length) chunks.push(safeStringify(params.tools));
 
   return estimateTextTokens(chunks.join('\n')) + images * IMAGE_TOKEN_ALLOWANCE;
-}
-
-/** 判断一个错误是否为"客户端/上游中止"类错误，用于决定是否放弃重试。 */
-export function isAbortError(err: any): boolean {
-  if (!err) return false;
-  if (err.isAbort) return true;
-  if (err.name === 'AbortError' || err.code === 'ABORT_ERR' || err.code === 20) return true;
-  if (err.message && (err.message === 'This operation was aborted' || err.message === '__ABORT__' || String(err.message).toLowerCase().includes('abort'))) {
-    return true;
-  }
-  if (err.cause) {
-    const c = err.cause;
-    if (c.name === 'AbortError' || c.code === 'ABORT_ERR' || c.code === 20) return true;
-    if (c.message && String(c.message).toLowerCase().includes('abort')) return true;
-  }
-  return false;
-}
-
-/**
- * 上游失败。继承 ProxyError，因此在原有的 status / retryable 之上，
- * 还带一个稳定错误码与可执行提示（OpenAI / Anthropic 出口共用）。
- */
-export class UpstreamError extends ProxyError {
-  constructor(message: string, status?: number, retryable = false, code?: ErrorCodeName) {
-    super(code ?? codeForStatus(status), message, { status, retryable });
-    this.name = 'UpstreamError';
-  }
 }
 
 /**
@@ -462,54 +440,13 @@ export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<
   try {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     let headers = buildHeaders(currentApiKey, config.ccVersion, body);
-    const timeoutController = new AbortController();
-    let idleTimer: NodeJS.Timeout | null = null;
-    let idleFired = false;
-    let deadlineTimer: NodeJS.Timeout | null = null;
-    let deadlineFired = false;
 
-    // 挂钟总时限（upstream.timeoutMs）。与空闲看门狗的本质区别：看门狗每收到一个字节
-    // 就会重置，所以一个持续 trickle 的上游可以无限期挂住连接；这个上限跨"等响应头"
-    // 与"读流"两个阶段一次性生效，直到流结束才撤销。
-    //
-    // 注意：这是一次**行为变更**——修复前该配置完全不起作用，任何长度超过 timeoutMs
-    // 的长推理请求都是靠它不被执行才活下来的。
-    const armDeadline = () => {
-      if (deadlineTimer) clearTimeout(deadlineTimer);
-      deadlineTimer = setTimeout(() => {
-        deadlineFired = true;
-        timeoutController.abort(new Error(`Upstream exceeded ${config.upstreamTimeoutMs / 1000}s total deadline`));
-      }, config.upstreamTimeoutMs);
-      deadlineTimer.unref?.();
-    };
-    armDeadline();
-
-    const disarmDeadline = () => {
-      if (deadlineTimer) { clearTimeout(deadlineTimer); deadlineTimer = null; }
-    };
-
-    // 空闲看门狗：每次被调用都会重置计时器。一旦上游超过 idleTimeoutMs 无数据，
-    // 主动 abort 本次请求并标记 idleFired，抛"上游卡死"错误。
-    const armIdleWatchdog = () => {
-      if (idleTimer) clearTimeout(idleTimer);
-      idleTimer = setTimeout(() => {
-        idleFired = true;
-        timeoutController.abort(new Error(`No data from upstream for ${config.idleTimeoutMs / 1000}s`));
-      }, config.idleTimeoutMs);
-    };
+    // 阶段 1：超时与信号装配（pipeline/timeouts.ts）。返回时挂钟总时限已武装，
+    // 空闲看门狗由编排层在关键节点（请求前 / 流包装后 / 探测放行后）武装。
+    const timeouts = createAttemptTimeouts(config, opts.abortSignal);
 
     try {
-      const combinedSignal = opts.abortSignal
-        ? (AbortSignal as any).any
-          ? (AbortSignal as any).any([opts.abortSignal, timeoutController.signal])
-          : timeoutController.signal
-        : timeoutController.signal;
-
-      if (opts.abortSignal && !(AbortSignal as any).any) {
-        opts.abortSignal.addEventListener('abort', () => timeoutController.abort(), { once: true });
-      }
-
-      armIdleWatchdog();
+      timeouts.armIdleWatchdog();
 
       // Wave 3（SSRF）：一律 redirect:'manual'。Node fetch 默认 follow，被攻击者控制的
       // 上游可用 302 把带凭据的请求引向 169.254.169.254 等内网/元数据地址，绕过对初始
@@ -526,7 +463,7 @@ export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<
           method: 'POST',
           headers,
           body: reqData,
-          signal: combinedSignal,
+          signal: timeouts.signal,
           redirect: 'manual',
         } as RequestInit);
         if (res.status < 300 || res.status >= 400) break;
@@ -599,14 +536,13 @@ export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<
 
       // 把 web stream 包装成 Node 流：每收到一个 chunk 都重置空闲看门狗。
       const rawStream = Readable.fromWeb(response.body as any);
-      armIdleWatchdog();
-      rawStream.on('data', () => armIdleWatchdog());
+      timeouts.armIdleWatchdog();
+      rawStream.on('data', () => timeouts.armIdleWatchdog());
       // 被首事件探测判定为「上游以 200 报错」而丢弃的流，不要把并发槽位还回去 ——
       // 槽位要留给紧随其后的那次重试（槽位在整个 sendToCC 调用里只申请一次）。
       let discarded = false;
       const onStreamGone = () => {
-        if (idleTimer) clearTimeout(idleTimer);
-        disarmDeadline();
+        timeouts.dispose();
         if (!discarded) releaseSlot();
       };
       rawStream.on('close', onStreamGone);
@@ -619,16 +555,16 @@ export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<
       // AbortSignal 的 abort 监听器是同步派发的，因此这里 destroy(err) 会先于 fetch
       // 自己抛出的 AbortError 到达调用方。错误文案刻意不含 "abort" 子串（isAbortError
       // 的判据之一）。
-      timeoutController.signal.addEventListener('abort', () => {
+      timeouts.signal.addEventListener('abort', () => {
         if (rawStream.destroyed) return;
-        if (deadlineFired) {
+        if (timeouts.deadlineFired) {
           rawStream.destroy(new UpstreamError(
             `Upstream exceeded ${config.upstreamTimeoutMs / 1000}s total deadline`,
             504,
             false,
             ErrorCode.REQUEST_TIMEOUT,
           ));
-        } else if (idleFired) {
+        } else if (timeouts.idleFired) {
           // 空闲看门狗本来就会带一句不含 "abort" 子串的 abort reason，所以它并不会
           // 像挂钟上限那样被误判成"客户端自己走了"。但裸 Error 到路由里走的是
           // toProxyError 的兜底分类，会被记成 PROVIDER_PROTOCOL_ERROR（502 语义）。
@@ -660,17 +596,16 @@ export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<
             ErrorCode.PROVIDER_PROTOCOL_ERROR,
           );
         }
-        armIdleWatchdog();
+        timeouts.armIdleWatchdog();
         return probe.stream;
       }
 
       return rawStream;
     } catch (err: any) {
-      if (idleTimer) clearTimeout(idleTimer);
-      disarmDeadline();
+      timeouts.dispose();
 
       // 挂钟上限先于空闲判定：两者的 abort 都走 isAbortError，但成因与错误码不同。
-      if (deadlineFired) {
+      if (timeouts.deadlineFired) {
         throw new UpstreamError(
           `Upstream exceeded ${config.upstreamTimeoutMs / 1000}s total deadline`,
           504,
@@ -680,7 +615,7 @@ export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<
       }
 
       if (isAbortError(err)) {
-        if (idleFired) {
+        if (timeouts.idleFired) {
           throw new UpstreamError(`Upstream stalled: no data for ${config.idleTimeoutMs / 1000}s`, undefined, true, ErrorCode.STREAM_IDLE_TIMEOUT);
         }
         throw Object.assign(new Error('__ABORT__'), { isAbort: true });
