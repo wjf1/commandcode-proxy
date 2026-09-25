@@ -13,10 +13,21 @@ import { Readable, PassThrough } from 'node:stream';
 import { CCRequestBody } from '../../types/index.js';
 import { loadConfig } from '../../utils/config.js';
 import { logger } from '../../utils/logger.js';
-import { ErrorCode, codeForStatus, terminalCodeFor } from '../../utils/errors.js';
+import { ErrorCode, terminalCodeFor } from '../../utils/errors.js';
 import { UpstreamError, isAbortError } from './pipeline/errors.js';
 import { createAttemptTimeouts } from './pipeline/timeouts.js';
 import { resolveUpstreamEntryUrl, fetchWithRedirectGuard } from './pipeline/request.js';
+import {
+  isRetryableFailure,
+  backoffMsFor,
+  handleUpstreamErrorStatus,
+  classifyCaughtError,
+  finalizeAttemptFailure,
+} from './pipeline/response-error.js';
+
+// 响应错误判定（isRetryableFailure 等）定义在 pipeline/response-error.ts，
+// 这里 re-export 保持既有导入路径。
+export { isRetryableFailure };
 
 // 流水线共享基础件：定义在 pipeline/errors.ts，这里 re-export 保持既有导入路径。
 export { UpstreamError, isAbortError };
@@ -117,8 +128,6 @@ export function buildHeaders(apiKey: string, ccVersion: string, body: CCRequestB
   };
 }
 
-const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
-
 // ─── 上游并发上限 ────────────────────────────────────────────────────────────
 // 防止失控客户端同时压起大量长流拖垮进程/额度。默认 0 = 不限制（兼容既有
 // 部署）；MAX_UPSTREAM_CONCURRENCY 设为正整数后，超限请求立即以
@@ -128,16 +137,6 @@ const MAX_UPSTREAM_CONCURRENCY = (() => {
   return Number.isFinite(n) && n > 0 ? n : 0;
 })();
 let activeUpstreamRequests = 0;
-
-/**
- * 是否允许重试：状态码可重试，且错误文本未命中终止性（计费/套餐）标记
- * —— premium_credits_exhausted / model_not_in_plan / insufficient credits
- * 重试只会白耗额度，应当快速失败（原版 CLI 行为）。
- * 判定集中在此处，便于单测锁定该契约。
- */
-export function isRetryableFailure(status: number, message: string): boolean {
-  return terminalCodeFor(message) === undefined && RETRYABLE_STATUS.has(status);
-}
 
 function sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
@@ -455,33 +454,24 @@ export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<
         threadId: body.threadId,
       });
 
+      // 阶段 3：响应处理 —— 非 2xx 的错误分类与重试/换号决策（pipeline/response-error.ts）。
       if (!response.ok) {
-        const errorText = await response.text();
-        let parsedMsg = '';
-        try {
-          parsedMsg = JSON.parse(errorText).message || JSON.parse(errorText)?.error?.message || '';
-        } catch {}
-        const displayMsg = parsedMsg || errorText.slice(0, 200);
-        logger.error(`[UPSTREAM] Model: ${body.params.model} | Thread ${body.threadId} | Error ${response.status}: ${displayMsg}`);
-
-        // 终止性计费/套餐错误：永不重试（原版 CLI 行为）。
-        const retryable = isRetryableFailure(response.status, displayMsg);
-        const err = new UpstreamError(
-          `Upstream error ${response.status}: ${displayMsg}`,
-          response.status,
-          retryable,
-          terminalCodeFor(displayMsg) ?? codeForStatus(response.status),
-        );
-        if (retryable && attempt < maxAttempts) {
-          lastError = err;
-          await maybeSwitchAccount(attempt, err);
-          // 指数退避：500ms * 2^(attempt-1)，封顶 8s。
-          const backoffMs = Math.min(8000, 500 * Math.pow(2, attempt - 1));
-          logger.warn(`[UPSTREAM] Retryable ${response.status}, retry ${attempt}/${maxAttempts - 1} in ${backoffMs}ms`);
-          await sleep(backoffMs);
+        const verdict = await handleUpstreamErrorStatus({
+          response,
+          attempt,
+          maxAttempts,
+          model: body.params.model,
+          threadId: body.threadId,
+        });
+        if (verdict.action === 'retry') {
+          lastError = verdict.error;
+          await maybeSwitchAccount(attempt, verdict.error);
+          // 指数退避：500ms * 2^(attempt-1)，封顶 8s（backoffMsFor）。
+          logger.warn(`[UPSTREAM] Retryable ${verdict.status}, retry ${attempt}/${maxAttempts - 1} in ${verdict.backoffMs}ms`);
+          await sleep(verdict.backoffMs!);
           continue;
         }
-        throw err;
+        throw verdict.error;
       }
 
       if (!response.body) {
@@ -558,48 +548,35 @@ export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<
     } catch (err: any) {
       timeouts.dispose();
 
+      // 阶段 3b：catch 错误分类（pipeline/response-error.ts）。
       // 挂钟上限先于空闲判定：两者的 abort 都走 isAbortError，但成因与错误码不同。
-      if (timeouts.deadlineFired) {
-        throw new UpstreamError(
-          `Upstream exceeded ${config.upstreamTimeoutMs / 1000}s total deadline`,
-          504,
-          false,
-          ErrorCode.REQUEST_TIMEOUT,
-        );
-      }
-
-      if (isAbortError(err)) {
-        if (timeouts.idleFired) {
-          throw new UpstreamError(`Upstream stalled: no data for ${config.idleTimeoutMs / 1000}s`, undefined, true, ErrorCode.STREAM_IDLE_TIMEOUT);
-        }
-        throw Object.assign(new Error('__ABORT__'), { isAbort: true });
+      const caught = classifyCaughtError(err, {
+        deadlineFired: timeouts.deadlineFired,
+        idleFired: timeouts.idleFired,
+        upstreamTimeoutMs: config.upstreamTimeoutMs,
+        idleTimeoutMs: config.idleTimeoutMs,
+        clientAborted: opts.abortSignal?.aborted === true,
+      });
+      if (caught.kind !== 'failure') {
+        throw caught.error;
       }
 
       lastError = err;
 
-      // 网络级失败值得再试一次，除非客户端已离开。
-      if (opts.abortSignal?.aborted) {
-        throw Object.assign(new Error('__ABORT__'), { isAbort: true });
-      }
       if (err instanceof UpstreamError && !err.retryable) {
         // Terminal errors (e.g. MODEL_NOT_IN_PLAN / premium_credits_exhausted): fail fast, do not retry.
         throw err;
       }
       if (attempt < maxAttempts) {
-        const backoffMs = Math.min(8000, 500 * Math.pow(2, attempt - 1));
+        const backoffMs = backoffMsFor(attempt);
         logger.warn(`[UPSTREAM] Thread ${body.threadId} | Upstream failure (${err.message}), retry ${attempt}/${maxAttempts - 1} in ${backoffMs}ms`);
         await maybeSwitchAccount(attempt, err);
         await sleep(backoffMs);
         continue;
       }
 
-      if (err instanceof UpstreamError) {
-        // 重试次数用尽：保留上游真实状态码与错误码。若一律包装成
-        // "connection failed"，客户端会把 3 次 503 误判成网络故障。
-        throw new UpstreamError(err.message, err.status, false, err.code);
-      }
-      const detailedMsg = err?.cause?.message ? `${err.message} (${err.cause.message})` : err.message;
-      throw new UpstreamError(`Upstream connection failed: ${detailedMsg}`, undefined, false, ErrorCode.NETWORK_ERROR);
+      // 阶段 3c：重试预算用尽时的终态包装（pipeline/response-error.ts）。
+      throw finalizeAttemptFailure(err);
     }
   }
 
