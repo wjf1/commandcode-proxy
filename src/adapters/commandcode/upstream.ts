@@ -185,6 +185,30 @@ export interface SendOptions {
  *  - 超时现在通过"空闲看门狗"覆盖整个请求生命周期：每收到一个 chunk 就重置
  *    计时器，而不是收到 header 后就清除（v3 的 bug：中途静默卡死会无限挂起）。
  *  - 客户端中止通过 AbortSignal.any 立即传播。
+ *
+ * ─── 流水线阶段总览（本函数是编排层）─────────────────────────────────
+ * 具体逻辑已按阶段拆分到 pipeline/ 下各模块，阶段间经显式参数/返回值传递
+ * 状态，不共享可变闭包变量：
+ *  0. pipeline/errors.ts —— 共享错误基础件：UpstreamError / isAbortError
+ *     （本文件 re-export 保持导入路径）。
+ *  1. pipeline/timeouts.ts —— 超时与信号装配：每次 attempt 构造挂钟总时限 +
+ *     空闲看门狗 + 合并 AbortSignal（createAttemptTimeouts），计时器状态封装
+ *     在返回对象内，由编排层在关键节点武装/撤销。
+ *  2. pipeline/request.ts —— 受控请求：入口 URL/DNS 安全检查
+ *     （resolveUpstreamEntryUrl，循环外一次）与 redirect:'manual' 的 SSRF
+ *     逐跳校验循环（fetchWithRedirectGuard，每次 attempt 一次）。
+ *  3. pipeline/response-error.ts —— 响应处理：非 2xx 错误分类与重试决策
+ *     （handleUpstreamErrorStatus）、catch 错误成因分类（classifyCaughtError，
+ *     挂钟 → 空闲 → 客户端中止的判定顺序不可变）、退避公式（backoffMsFor）
+ *     与重试预算用尽的终态包装（finalizeAttemptFailure）。
+ *  4. pipeline/stream.ts —— 流包装：web→Node 流、逐 chunk 空闲重置、挂钟/
+ *     空闲超时的错误注入（wrapUpstreamStream）与首事件探测（probeUpstream）。
+ *
+ * 编排层保留的部分（与其他阶段耦合在重试控制流上，拆出反而引入风险）：
+ * 并发槽位管理（activeUpstreamRequests / releaseSlot）、账号切换回调
+ * （currentApiKey / maybeSwitchAccount）、重试循环控制流（continue / throw
+ * 与日志顺序——Retryable 日志在换号回调之后，一般失败日志在其之前）以及
+ * lastError 终态兜底。
  */
 export async function sendToCC(body: CCRequestBody, opts: SendOptions): Promise<Readable> {
   const config = loadConfig();
