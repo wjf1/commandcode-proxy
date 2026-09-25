@@ -37,6 +37,9 @@ import { PROXY_VERSION } from '../utils/version.js';
 import { getUsageHistory, getUsageStats, clearUsageHistory, describeBillingWindow, getTimeOfDayModels, USAGE_FILE_PATH, getTodaySpendUsd } from '../utils/usage-store.js';
 import { getQuotaProjection } from '../utils/quota-tracker.js';
 import { notify } from '../utils/notifier.js';
+import { getChannelHealth } from '../utils/health-check.js';
+import { webhookEnabled } from '../utils/webhook-alerts.js';
+import { resolvePromptsDir } from '../utils/prompt-versions.js';
 import type { AccountInfo } from '../types/index.js';
 
 const startTimestamp = Date.now();
@@ -60,6 +63,48 @@ export function maskApiKey(apiKey?: string | null): string {
 function toSafeAccount(acc: AccountInfo) {
   const { apiKey, ...rest } = acc;
   return { ...rest, apiKeyMasked: maskApiKey(apiKey) };
+}
+
+// ─── 运行能力开关只读视图（/api/features）────────────────────────────────────
+// 4.21.0 引入的一批默认关闭/旁路运行能力（健康检查、webhook 告警、prompt 版本、
+// 限流、模型访问控制、审计日志）此前只在日志里可见；本端点把它们的当前判定集中
+// 成一个只读快照供概览页展示。判定逻辑与各能力模块"调用时读 env"的写法逐条对齐
+// （各辅助函数注明来源模块），同样不做缓存 —— env 改了即生效。
+//
+// 安全边界：绝不返回 WEBHOOK_URL 本身（内含内网地址与 token 参数），只回 enabled；
+// API key、账号凭据等敏感值本端点不触碰。模型名单（allowlist/blocklist）非敏感，
+// 原样回显生效名单。
+
+/** 读取非负整数 env；未设置/非法回退默认值（与 utils/health-check.ts 的 readEnvInt 保持一致）。 */
+function readEnvIntDefault(name: string, fallback: number): number {
+  const raw = (process.env[name] || '').trim();
+  if (!raw) return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+/** 读取正整数 env；未设置/非法返回 undefined（与 utils/rate-limit.ts 的 intEnv 保持一致）。 */
+function readEnvIntStrict(name: string): number | undefined {
+  const raw = (process.env[name] ?? '').trim();
+  if (!raw) return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
+}
+
+/** 读取浮点 env；未设置/非法返回 NaN（与 utils/webhook-alerts.ts 的 readEnvFloat 保持一致）。 */
+function readEnvFloatLike(name: string): number {
+  const raw = (process.env[name] || '').trim();
+  if (!raw) return NaN;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : NaN;
+}
+
+/** 逗号分隔名单：trim + 小写化 + 去空项（与 utils/model-access.ts 的 parseList 保持一致）。 */
+function parseEnvList(name: string): string[] {
+  return (process.env[name] ?? '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
 }
 
 export async function dashboardRoutes(fastify: FastifyInstance) {
@@ -179,6 +224,62 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
         modelsCache: MODELS_FILE_PATH,
       },
       update: getUpdateState(),
+    };
+  });
+
+  // 运行能力开关快照（只读）：概览页"通道健康 / 运行开关"两张卡片的数据源。
+  fastify.get('/api/features', async () => {
+    // 健康检查：默认 300000ms，设 0 整体关闭（与 health-check.ts 的 startHealthChecks 一致）。
+    const healthIntervalMs = readEnvIntDefault('HEALTH_CHECK_INTERVAL_MS', 300_000);
+    // Webhook：配置了 WEBHOOK_URL 才启用（webhookEnabled 原样复用）；阈值
+    // Number.isFinite 才算配置（与 webhook-alerts.ts 的 checkThresholds 一致）。
+    const costThreshold = readEnvFloatLike('WEBHOOK_COST_USD');
+    const errorRateThreshold = readEnvFloatLike('WEBHOOK_ERROR_RATE');
+    // 模型访问：allowlist 优先于 blocklist（与 model-access.ts 的 checkModelAccess 一致）。
+    const allow = parseEnvList('MODEL_ALLOWLIST');
+    const block = parseEnvList('MODEL_BLOCKLIST');
+    const accessMode = allow.length > 0 ? 'allowlist' : block.length > 0 ? 'blocklist' : 'off';
+    // 审计日志：AUDIT_LOG 默认 on，'off' 关闭；路径惰性求值（与 audit-log.ts 的
+    // auditEnabled/auditFilePath 保持一致，那两个函数未导出，这里照抄判定）。
+    const auditOn = (process.env.AUDIT_LOG ?? 'on').trim().toLowerCase() !== 'off';
+    const auditPath = process.env.AUDIT_LOG_PATH
+      ? path.resolve(process.env.AUDIT_LOG_PATH)
+      : path.join(getProjectRootDir(), 'logs', 'audit.log');
+    // Prompt 版本：PROMPT_VERSIONS === 'on' 才装配路由（与 routes/prompts.ts 一致）；
+    // 目录解析直接复用导出的 resolvePromptsDir。
+    const promptFlag = String(process.env.PROMPT_VERSIONS ?? '').trim().toLowerCase();
+    const rpm = readEnvIntStrict('RATE_LIMIT_RPM');
+    const tpm = readEnvIntStrict('RATE_LIMIT_TPM');
+
+    return {
+      healthCheck: {
+        enabled: healthIntervalMs > 0,
+        intervalMs: healthIntervalMs,
+        // 从未探活（启动 <1 周期）时 lastResult 为 null，前端显示"等待首次探活"。
+        channel: getChannelHealth(),
+      },
+      webhook: {
+        enabled: webhookEnabled(),
+        costThreshold: Number.isFinite(costThreshold) ? costThreshold : null,
+        errorRateThreshold: Number.isFinite(errorRateThreshold) ? errorRateThreshold : null,
+      },
+      promptVersions: {
+        enabled: promptFlag === 'on',
+        dir: resolvePromptsDir(),
+      },
+      rateLimit: {
+        rpm: rpm ?? null,
+        tpm: tpm ?? null,
+      },
+      modelAccess: {
+        mode: accessMode,
+        // 回显生效名单：allowlist 模式返回 allowlist，否则返回 blocklist（off 时为空）。
+        list: accessMode === 'allowlist' ? allow : block,
+      },
+      auditLog: {
+        enabled: auditOn,
+        path: auditPath,
+      },
     };
   });
 
