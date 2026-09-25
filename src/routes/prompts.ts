@@ -36,7 +36,7 @@ export async function registerPromptRoutes(fastify: FastifyInstance) {
   // 与 dashboard.ts 管理面同款防护：写操作要求同源 Origin；/api/* 禁用缓存。
   fastify.addHook('onRequest', async (req, reply) => {
     if (req.url.startsWith(PROMPTS_PREFIX) && !IDENTITY_METHODS.includes(req.method)) {
-      if (!isSameOriginIfPresent(req.headers.origin as string | undefined, req.headers.host as string | undefined)) {
+      if (!isSameOriginIfPresent(req.headers.origin as string | undefined, req.headers.host as string | undefined, req.protocol)) {
         return reply.status(403).send({ error: 'Cross-origin admin request rejected' });
       }
     }

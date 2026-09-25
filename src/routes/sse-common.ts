@@ -15,14 +15,28 @@ import { estimateCostUsd, recordCompletion } from '../utils/usage-store.js';
  * 管理面防跨站驱动：浏览器发起的跨站写请求会带 Origin 头，其 host 必须与
  * 请求的 host 一致；非浏览器客户端（curl/SDK）不带 Origin，直接放行。
  * 纯函数便于单测锁定。
+ *
+ * Wave 4（scheme 收紧）：传入 requestProtocol 时（生产调用方传 req.protocol），
+ * Origin 的 scheme 还必须与请求协议一致——默认收紧（ORIGIN_SCHEME_CHECK=off 显式
+ * 回退，供反代 TLS 终止等页面协议与后端协议不一致的部署）。不传第三参保持旧语义，
+ * 既有两参调用方零破坏。
  */
-export function isSameOriginIfPresent(origin: string | undefined, host: string | undefined): boolean {
+export function isSameOriginIfPresent(origin: string | undefined, host: string | undefined, requestProtocol?: string): boolean {
   if (!origin) return true;
+  let parsed: URL;
   try {
-    return new URL(origin).host === host;
+    parsed = new URL(origin);
   } catch {
     return false; // 非法 Origin 一律拒绝
   }
+  if (parsed.host !== host) return false;
+  if (requestProtocol !== undefined) {
+    const flag = (process.env.ORIGIN_SCHEME_CHECK || '').trim().toLowerCase();
+    if (flag !== 'off' && parsed.protocol.replace(':', '') !== requestProtocol) {
+      return false;
+    }
+  }
+  return true;
 }
 
 export function writeSSEHeaders(reply: any): void {

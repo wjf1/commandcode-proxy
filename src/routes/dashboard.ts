@@ -117,7 +117,7 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
     // 防跨站驱动管理操作：CORS 只能阻止"读响应"，阻止不了"发请求"。
     // 校验逻辑见 isSameOriginIfPresent（纯函数，tests/guard.test.ts 锁定）。
     if (req.url.startsWith('/api/') && !['GET', 'OPTIONS', 'HEAD'].includes(req.method)) {
-      if (!isSameOriginIfPresent(req.headers.origin as string | undefined, req.headers.host as string | undefined)) {
+      if (!isSameOriginIfPresent(req.headers.origin as string | undefined, req.headers.host as string | undefined, req.protocol)) {
         return reply.status(403).send({ error: 'Cross-origin admin request rejected' });
       }
     }
