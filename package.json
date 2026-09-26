@@ -47,14 +47,14 @@
   "license": "MIT",
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@types/node": "^26.5.1",
-    "@vitest/coverage-v8": "^5.0.0",
+    "@types/node": "^26.6.2",
+    "@vitest/coverage-v8": "^5.0.1",
     "@yao-pkg/pkg": "^6.22.0",
     "esbuild": "^0.28.2",
-    "eslint": "^10.10.0",
-    "tsx": "^4.11.0",
+    "eslint": "^10.11.0",
+    "tsx": "^4.23.15",
     "typescript": "^5.5.0",
-    "typescript-eslint": "^8.70.0",
+    "typescript-eslint": "^8.70.1",
     "vitest": "^5.0.0"
   },
   "dependencies": {
