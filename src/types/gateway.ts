@@ -22,6 +22,7 @@ export interface UpstreamConfig {
   timeoutMs?: number;
   idleTimeoutMs?: number;
   maxRetries?: number;
+  proxy?: string;
 }
 
 export interface GatewayConfigFile {
@@ -44,6 +45,7 @@ export interface GatewayConfig {
   upstreamTimeoutMs: number;
   idleTimeoutMs: number;
   maxRetries: number;
+  proxy?: string;
 }
 
 // ─── Logger ───────────────────────────────────────────────────────────────────

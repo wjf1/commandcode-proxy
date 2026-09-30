@@ -178,6 +178,14 @@ export function loadConfig(): GatewayConfig {
     upstreamTimeoutMs: fileConfig.upstream?.timeoutMs || DEFAULTS.upstreamTimeoutMs,
     idleTimeoutMs: fileConfig.upstream?.idleTimeoutMs || DEFAULTS.idleTimeoutMs,
     maxRetries: fileConfig.upstream?.maxRetries ?? DEFAULTS.maxRetries,
+    proxy:
+      process.env.HTTPS_PROXY ||
+      process.env.https_proxy ||
+      process.env.HTTP_PROXY ||
+      process.env.http_proxy ||
+      process.env.ALL_PROXY ||
+      process.env.all_proxy ||
+      fileConfig.upstream?.proxy,
   };
 }
 
@@ -203,12 +211,13 @@ export function saveConfigFile(updates: Partial<GatewayConfigFile>): boolean {
       activeAccountId: updates.activeAccountId ?? current.activeAccountId ?? '',
       rotationMode: updates.rotationMode ?? current.rotationMode ?? 'manual',
       accounts: updates.accounts ?? current.accounts ?? [],
-      upstream: {
+        upstream: {
         apiBase: updates.upstream?.apiBase ?? current.upstream?.apiBase ?? DEFAULTS.apiBase,
         ccVersion: updates.upstream?.ccVersion ?? current.upstream?.ccVersion ?? DEFAULTS.ccVersion,
         timeoutMs: updates.upstream?.timeoutMs ?? current.upstream?.timeoutMs ?? DEFAULTS.upstreamTimeoutMs,
         idleTimeoutMs: updates.upstream?.idleTimeoutMs ?? current.upstream?.idleTimeoutMs ?? DEFAULTS.idleTimeoutMs,
         maxRetries: updates.upstream?.maxRetries ?? current.upstream?.maxRetries ?? DEFAULTS.maxRetries,
+        proxy: updates.upstream?.proxy ?? current.upstream?.proxy,
       },
     };
 

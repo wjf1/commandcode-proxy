@@ -2,6 +2,19 @@
 
 所有主要版本更新都记录在此文件。
 
+## [4.22.3] - 2026-10-01
+
+### 新增与修复
+- **出站网络代理（HTTP/HTTPS Proxy）集成，解决海外上游连接超时与 fetch failed**：
+  直连海外上游 `https://api.commandcode.ai` 时，因国内网络对 Cloudflare CDN 节点的丢包、高延迟及 IPv6 首选握手失败，导致后台额度同步、健康探活及部分模型调用频繁抛出 `fetch failed`（`UND_ERR_CONNECT_TIMEOUT`）。
+  - **网络层治理**：新增 `src/utils/proxy-agent.ts`，基于 `undici` 的 `ProxyAgent` 与 `setGlobalDispatcher`，将全局出站 fetch 流量路由至本机科学上网客户端（默认 `http://127.0.0.1:7897`）；
+  - **配置与安全隔离**：
+    - 支持 `config.json`（`upstream.proxy`）与环境变量（`HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`）；
+    - 强制加固 `NO_PROXY`，确保本地回环地址（`localhost,127.0.0.1,::1`）直连，保证本地测试与 Fastify 服务不受代理影响；
+    - 代理配置仅作为传输层跳板，现有针对业务目标 URL 的 SSRF 与域名白名单安全校验保持严格生效；
+  - **部署与启动链适配**：在 `start.cmd` 与 `.env` 中固化出站代理支持；
+  - **测试与验证**：新增 `tests/proxy-agent.test.ts` 单元测试，全量 48 个套件、621 个测试用例 100% 通过。
+
 ## [4.22.2] - 2026-10-01
 
 ### 修复

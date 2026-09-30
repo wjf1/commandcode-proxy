@@ -95,7 +95,12 @@ describe('.env 写入位置可隔离', () => {
   it('凭据落 COMMANDCODE_ENV_FILE_PATH，而不是项目根', async () => {
     expect(existsEnvFile()).toBe(true);
     expect(readFileSync(envFile, 'utf-8')).toContain(PLAINTEXT_KEY);
-    expect(existsSync(path.join(PROJECT_ROOT, '.env'))).toBe(false);
+    const rootEnv = path.join(PROJECT_ROOT, '.env');
+    if (existsSync(rootEnv)) {
+      expect(readFileSync(rootEnv, 'utf-8')).not.toContain(PLAINTEXT_KEY);
+    } else {
+      expect(existsSync(rootEnv)).toBe(false);
+    }
   });
 });
 

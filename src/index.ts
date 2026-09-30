@@ -26,6 +26,7 @@ import { scheduleUpdateChecks } from './utils/update-check.js';
 import { notify, ensureAumidRegistered, isGlobalToastEnabled } from './utils/notifier.js';
 import { startHealthChecks } from './utils/health-check.js';
 import { startWebhookAlerts } from './utils/webhook-alerts.js';
+import { initOutboundProxy } from './utils/proxy-agent.js';
 
 // 未捕获异常/拒绝：单次只记日志（代理要尽量活着）。
 // 但短时间连续出现说明进程已进入不可信状态（可能挂着僵死的上游连接、
@@ -54,6 +55,7 @@ process.on('unhandledRejection', (reason: any) => {
 });
 
 const config = loadConfig();
+initOutboundProxy(config);
 
 const fastify = Fastify({
   logger: false,
