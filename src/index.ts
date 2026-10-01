@@ -55,7 +55,7 @@ process.on('unhandledRejection', (reason: any) => {
 });
 
 const config = loadConfig();
-initOutboundProxy(config);
+await initOutboundProxy(config);
 
 const fastify = Fastify({
   logger: false,

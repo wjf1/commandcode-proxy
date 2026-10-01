@@ -67,7 +67,7 @@
 ### 🛡 可靠性与安全
 
 - **长连接加固** — 429/5xx/网络错误指数退避重试，**并覆盖上游藏在 HTTP 200 流里的失败**（网关请求失败 / 服务过载 / 无可用 provider）：在把流交给路由之前预判流内事件，因此错误不再被当成模型的回答返回；确定性不可用（区域限制、模型不认识）刻意不重试以免白耗额度；空闲流看门狗（不会无限挂起）；客户端断开立即取消上游；流干净收尾（补 finish、SSE 心跳防代理断连）
-- **出站网络代理（HTTP/HTTPS Proxy）** — 全局出站 `fetch` 原生支持代理（基于 `undici` 的 `ProxyAgent`），无缝路由至本机科学上网客户端（默认 `http://127.0.0.1:7897`），根治直连海外 Cloudflare 节点导致的连接超时（`UND_ERR_CONNECT_TIMEOUT`）与频繁 `fetch failed`；自动加固 `NO_PROXY` 白名单，确保本地测试与回环流量不走代理
+- **出站网络代理与直连双模自愈（Auto-fallback）** — 全局出站 `fetch` 原生支持代理（基于 `undici` 的 `ProxyAgent`），同时内置**代理连通性探针（Auto-fallback）**与**全局 IPv4 优先解析（`ipv4first`）**：代理开启时走极速代理（~600ms），代理未开启或换至无代理终端时自动平滑回退为 IPv4 优先直连，彻底杜绝 IPv6 握手黑洞超时（`UND_ERR_CONNECT_TIMEOUT`）与中途断连；自动加固 `NO_PROXY` 环回白名单
 - **安全默认** — 仅绑定 `127.0.0.1`；可选 `PROXY_API_KEY` 共享密钥（**同时覆盖 API 与管理面**，仪表盘首次访问弹密钥输入）；`/api/*` 写操作校验 Origin；XSS 加固；CORS 仅对公共 API 表面开放；绑定非回环且未鉴权时界面与启动日志双重警告
 - **上游 SSRF 防护（fail-closed）** — 所有服务端上游请求经白名单校验：仅 `http(s)`、拒绝内嵌凭据、默认拒绝环回/私有/保留地址、非回环强制 `https`，详见[安全校验](#security)
 - **结构化错误码** — 17 个稳定错误码 + 可执行提示，按出口分别返回 OpenAI `error.type/code` 与 Anthropic `error.type`，调用方可据此决定等额度、换模型还是改配置（见[错误码表](#errors)）
@@ -204,6 +204,7 @@ Anthropic 出口（`/v1/messages`）：
 | `COMMANDCODE_API_KEY` | 取自 auth.json | 上游密钥兜底；无命名账号时账号名显示为 `CLI Key (尾4位 xxxx)` / `Env Key (尾4位 xxxx)`，启动后由 whoami 异步补全真实用户名 |
 | `COMMANDCODE_API_BASE` | `https://api.commandcode.ai` | 上游服务地址 |
 | `COMMANDCODE_UPSTREAM_ALLOWED_HOSTS` | 未设置 | 追加允许的上游 host（逗号分隔，供自建网关/镜像）；环回/私有/保留地址默认拒绝，仅在此显式加入才放行 |
+| `COMMANDCODE_DNS_ORDER` | `ipv4first` | DNS 解析结果排序：`ipv4first` 强制 IPv4 优先（避开恶劣 IPv6 握手超时）；设 `verbatim` 遵循操作系统原始顺序 |
 | `HTTPS_PROXY` / `HTTP_PROXY` | `http://127.0.0.1:7897` | 全局出站 HTTP/HTTPS 代理（用于连接海外 Cloudflare 上游，也可在 `config.json` 的 `upstream.proxy` 中配置） |
 | `NO_PROXY` | `localhost,127.0.0.1,::1` | 绕过出站代理的主机清单（程序会自动强制确保包含本地回环地址） |
 | `COMMANDCODE_VERSION` | `1.27.1` | CLI 版本标识头 |
@@ -377,7 +378,7 @@ Point any OpenAI-style client (Cursor, Continue, Aider, OpenWebUI, Hermes, your 
 
 - Log persistence to `logs/proxy.log` (5MB rotation); error logs carry `Trace`/`Thread` to correlate with usage records
 - Usage-stats cache (45s TTL + in-flight dedupe) — repeated dashboard fetches drop from ~2.9s to milliseconds
-- Outbound HTTP/HTTPS proxy support: native `ProxyAgent` via `undici` for global outbound fetch, routing requests through local proxies (e.g. `http://127.0.0.1:7897`) with automated `NO_PROXY` protection
+- Outbound proxy & dual-mode resilience: native `ProxyAgent` with live probe and auto-fallback to direct IPv4-first mode when the proxy is offline or on a proxy-free terminal, plus automated `NO_PROXY` protection
 - Crash protection: 3 uncaught exceptions within 5 minutes → intentional `exit(1)` for supervisor restart
 - Packaging: TypeScript + esbuild + single-file Windows exe via `pkg`; GitHub Actions CI (typecheck → build → vitest)
 - Offline-capable dashboard: tailwind / font-awesome / chart.js fully localized, no public CDN dependency

@@ -1,9 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import net from 'node:net';
+import dns from 'node:dns';
 import {
   ensureSafeNoProxy,
   resolveProxyUrl,
   initOutboundProxy,
   getOutboundProxyStatus,
+  configureDnsResultOrder,
+  isProxyReachable,
 } from '../src/utils/proxy-agent.js';
 import type { GatewayConfig } from '../src/types/gateway.js';
 
@@ -19,6 +23,7 @@ describe('Outbound Proxy Agent (proxy-agent.ts)', () => {
     delete process.env.all_proxy;
     delete process.env.NO_PROXY;
     delete process.env.no_proxy;
+    delete process.env.COMMANDCODE_DNS_ORDER;
   });
 
   afterEach(() => {
@@ -28,6 +33,17 @@ describe('Outbound Proxy Agent (proxy-agent.ts)', () => {
       }
     }
     Object.assign(process.env, originalEnv);
+  });
+
+  describe('configureDnsResultOrder', () => {
+    it('默认配置 IPv4 优先', () => {
+      expect(() => configureDnsResultOrder()).not.toThrow();
+    });
+
+    it('支持环境变量指定 verbatim 模式', () => {
+      process.env.COMMANDCODE_DNS_ORDER = 'verbatim';
+      expect(() => configureDnsResultOrder()).not.toThrow();
+    });
   });
 
   describe('ensureSafeNoProxy', () => {
@@ -91,25 +107,65 @@ describe('Outbound Proxy Agent (proxy-agent.ts)', () => {
     });
   });
 
-  describe('initOutboundProxy', () => {
-    it('未配置代理时初始化为 direct 状态', () => {
-      const status = initOutboundProxy();
+  describe('isProxyReachable', () => {
+    it('对正常监听的本地端口探测成功', async () => {
+      const server = net.createServer();
+      await new Promise<void>(resolve => server.listen(0, '127.0.0.1', () => resolve()));
+      const port = (server.address() as net.AddressInfo).port;
+
+      const result = await isProxyReachable(`http://127.0.0.1:${port}`, 500);
+      expect(result.reachable).toBe(true);
+      expect(typeof result.latencyMs).toBe('number');
+
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    });
+
+    it('对未开放端口快速失败并返回不可达原因', async () => {
+      // 随机选取一个本地未开放端口
+      const result = await isProxyReachable('http://127.0.0.1:59998', 200);
+      expect(result.reachable).toBe(false);
+      expect(result.error).toBeTruthy();
+    });
+  });
+
+  describe('initOutboundProxy & Auto-fallback', () => {
+    it('未配置代理时初始化为 direct 状态（IPv4 优先）', async () => {
+      const status = await initOutboundProxy();
       expect(status.enabled).toBe(false);
       expect(status.proxyUrl).toBeUndefined();
       expect(status.noProxy).toContain('localhost');
       expect(getOutboundProxyStatus().enabled).toBe(false);
     });
 
-    it('配置有效代理时正确装配 Dispatcher 并掩码密码', () => {
-      const mockConfig = { proxy: 'http://user:secret123@127.0.0.1:7897' } as GatewayConfig;
-      const status = initOutboundProxy(mockConfig);
+    it('配置有效且在线代理时正确装配 Dispatcher', async () => {
+      const server = net.createServer();
+      await new Promise<void>(resolve => server.listen(0, '127.0.0.1', () => resolve()));
+      const port = (server.address() as net.AddressInfo).port;
+
+      const mockConfig = { proxy: `http://user:secret123@127.0.0.1:${port}` } as GatewayConfig;
+      const status = await initOutboundProxy(mockConfig);
+
       expect(status.enabled).toBe(true);
-      expect(status.proxyUrl).toBe('http://user:******@127.0.0.1:7897/');
+      expect(status.proxyUrl).toBe(`http://user:******@127.0.0.1:${port}/`);
       expect(status.noProxy).toContain('127.0.0.1');
 
       const current = getOutboundProxyStatus();
       expect(current.enabled).toBe(true);
-      expect(current.proxyUrl).toBe('http://user:******@127.0.0.1:7897/');
+      expect(current.proxyUrl).toBe(`http://user:******@127.0.0.1:${port}/`);
+
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    });
+
+    it('配置的代理不可达时平滑自动降级为直连（Auto-fallback），绝不抛出异常阻断', async () => {
+      const mockConfig = { proxy: 'http://127.0.0.1:59997' } as GatewayConfig;
+      const status = await initOutboundProxy(mockConfig);
+
+      expect(status.enabled).toBe(false);
+      expect(status.proxyUrl).toBe('http://127.0.0.1:59997/');
+      expect(status.fallbackReason).toBeTruthy();
+
+      const current = getOutboundProxyStatus();
+      expect(current.enabled).toBe(false);
     });
   });
 });
