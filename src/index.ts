@@ -219,13 +219,20 @@ const start = async () => {
     logger.info(`[SERVER] CommandCode Proxy v4 running on ${dashboardUrl}`);
     scheduleUpdateChecks();
 
-    // 绑定到非回环地址 = API 与管理面对整个局域网可见。未设共享密钥时必须讲清楚后果。
-    if (!['127.0.0.1', 'localhost', '::1'].includes(config.host) && !process.env.PROXY_API_KEY) {
-      logger.warn(
-        '[SECURITY] 绑定在非回环地址且未设置 PROXY_API_KEY：局域网内任何人都可以调用 API ' +
-        '并管理本网关（增删账号、切换 Key、清空历史）。建议设置 PROXY_API_KEY，或改回 127.0.0.1。'
-      );
-      console.warn('\n⚠️  局域网暴露且未鉴权：请设置 PROXY_API_KEY（见 README）或改回 127.0.0.1。\n');
+    // 绑定到非回环地址 = API 与管理面对整个局域网可见。未设共享密钥时拒绝启动，
+    // 与同源仓 multi-upstream-gateway 的安全默认对齐；ALLOW_INSECURE_BIND=1 显式豁免。
+    if (
+      !['127.0.0.1', 'localhost', '::1'].includes(config.host) &&
+      !process.env.PROXY_API_KEY?.trim() &&
+      process.env.ALLOW_INSECURE_BIND !== '1'
+    ) {
+      const reason =
+        '[STARTUP] 拒绝启动：绑定到非回环地址 ' + config.host + ' 却未设置 PROXY_API_KEY。' +
+        '局域网内任何主机都能调用 API 并完整操作管理面（增删账号、切换 Key、清空历史）。' +
+        '三选一：HOST 改回 127.0.0.1；设置 PROXY_API_KEY；确实要开放则设 ALLOW_INSECURE_BIND=1。';
+      logger.error(reason);
+      console.error(reason);
+      process.exit(1);
     }
 
     if (process.env.NODE_ENV !== 'test' && !process.env.NO_OPEN_BROWSER) {

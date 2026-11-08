@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### 安全
+
+- **非回环绑定且未设 PROXY_API_KEY 时拒绝启动**（原为仅告警），与同源仓 multi-upstream-gateway 安全默认对齐；`ALLOW_INSECURE_BIND=1` 显式豁免。同批：补 `pretest:coverage` 钩子（test:coverage 先 build，防集成用例 spawn 过期 dist）；新增 gitleaks 扫描 workflow；修复 `tests/proxy-agent.test.ts` 未使用的 dns import（此前连续挂 CI）。
+
 ### 文档
 - **新增仓库版接力开发文档 `HANDOFF.md`**：面向 GitHub 协同的六模块接力文档（概况 / 技术栈 / 架构拓扑 / 最近变更 / 待办 / 避坑），覆盖 4.22.2-4.22.4 三轮网络链路演进；机器专属的部署运维细节拆分至本地 `HANDOFF.local.md`（`.git/info/exclude` 排除，不入库）。
 

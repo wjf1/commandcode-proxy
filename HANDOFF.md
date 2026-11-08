@@ -29,6 +29,7 @@
 - 运行期文件（仓库根，均被 `.gitignore` 忽略）：`.env`、`config.json`、`models.json` / `pricing.json`（启动自动同步）、`logs/`（`proxy.log` 程序日志、`audit.log` 审计、`proxy.out.log` / `proxy.err.log` 控制台链日志——OEM 代码页中文可能乱码，不影响功能）。
 
 ## 4. 最近一轮变更与交付成果
+- **同日（安全批次）**：非回环+空 key 拒启落地（ALLOW_INSECURE_BIND=1 豁免）；pretest:coverage 钩子补齐；gitleaks workflow 新增；proxy-agent.test.ts lint 修复。
 
 - **4.22.2**：修复 fake-ip DNS 误拦上游（`BLOCKED_HOST` allowlist + `COMMANDCODE_UPSTREAM_ALLOWED_HOSTS` 白名单）。
 - **4.22.3**：集成出站 HTTP/HTTPS 代理，修复 `fetch failed` 超时。
