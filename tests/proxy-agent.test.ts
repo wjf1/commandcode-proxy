@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import net from 'node:net';
-import dns from 'node:dns';
 import {
   ensureSafeNoProxy,
   resolveProxyUrl,
