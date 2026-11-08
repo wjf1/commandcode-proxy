@@ -29,7 +29,8 @@
     "pretest": "npm run build",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "pretest:coverage": "npm run build"
   },
   "pkg": {
     "assets": [
