@@ -9,6 +9,7 @@
 // 只 mock 上游 OAuth 流程本身（要真起 5959 回调端口），路由与掩码逻辑全走真实代码。
 // =============================================================================
 import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
+import { ADMIN_TOKEN } from '../src/utils/admin-guard.js';
 import Fastify from 'fastify';
 import type { FastifyInstance } from 'fastify';
 import { mkdtempSync } from 'node:fs';
@@ -56,13 +57,13 @@ afterAll(async () => {
 
 describe('POST /api/auth/browser-login 凭据外泄', () => {
   it('响应体任何位置都不出现明文 apiKey', async () => {
-    const res = await app.inject({ method: 'POST', url: '/api/auth/browser-login' });
+    const res = await app.inject({ method: 'POST', url: '/api/auth/browser-login', headers: { 'x-admin-token': ADMIN_TOKEN } });
     expect(res.statusCode).toBe(200);
     expect(res.body, 'OAuth 端点把 bearer token 原样发给了浏览器').not.toContain(hoisted.key);
   });
 
   it('账号以掩码回传，且 SPA 要读的字段还在', async () => {
-    const res = await app.inject({ method: 'POST', url: '/api/auth/browser-login' });
+    const res = await app.inject({ method: 'POST', url: '/api/auth/browser-login', headers: { 'x-admin-token': ADMIN_TOKEN } });
     const account = res.json().account;
 
     expect(account.apiKey).toBeUndefined();

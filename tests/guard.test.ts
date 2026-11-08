@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import Fastify from 'fastify';
 import { isSameOriginIfPresent } from '../src/routes/sse-common.js';
+import { ADMIN_TOKEN } from '../src/utils/admin-guard.js';
 import { dashboardRoutes } from '../src/routes/dashboard.js';
 
 describe('isSameOriginIfPresent', () => {
@@ -84,7 +85,7 @@ describe('dashboard admin routes — cross-origin guard', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/gateway/toggle',
-      headers: { origin: 'http://127.0.0.1', host: '127.0.0.1', 'content-type': 'application/json' },
+      headers: { origin: 'http://127.0.0.1', host: '127.0.0.1', 'content-type': 'application/json', 'x-admin-token': ADMIN_TOKEN },
       body: JSON.stringify({ running: true }),
     });
     expect(res.statusCode).toBe(200);
@@ -94,7 +95,17 @@ describe('dashboard admin routes — cross-origin guard', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/logs/clear',
+      headers: { 'x-admin-token': ADMIN_TOKEN },
     });
     expect(res.statusCode).toBe(200);
+  });
+
+  it('rejects same-origin POST without admin token (B1)', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/logs/clear',
+      headers: { origin: 'http://127.0.0.1', host: '127.0.0.1' },
+    });
+    expect(res.statusCode).toBe(401);
   });
 });

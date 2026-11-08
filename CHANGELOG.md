@@ -6,6 +6,10 @@
 
 ### 安全
 
+- **管理面写操作一次性凭据（批次 B 回移植）**：`/api/*` 的写请求凭 `x-admin-token`（401 拦截），与 `PROXY_API_KEY` 权限分离——数据面密钥泄露不再等于管理面失守；token 由服务端注入 dashboard 页 `<head>` meta（前端 `apiJson` 自动携带），可用 `ADMIN_API_TOKEN` 固定供脚本使用。配套 **B2 Host 回环白名单**（防 DNS rebinding 页面连 token 一起读走，`ADMIN_ALLOWED_HOSTS` 可追加）；新增 `src/utils/admin-guard.ts` 与纯函数测试，新增「无 token 401」守卫用例，既有集成/掩码测试同步带凭据。
+
+### 安全
+
 - **非回环绑定且未设 PROXY_API_KEY 时拒绝启动**（原为仅告警），与同源仓 multi-upstream-gateway 安全默认对齐；`ALLOW_INSECURE_BIND=1` 显式豁免。同批：补 `pretest:coverage` 钩子（test:coverage 先 build，防集成用例 spawn 过期 dist）；新增 gitleaks 扫描 workflow；修复 `tests/proxy-agent.test.ts` 未使用的 dns import（此前连续挂 CI）。
 
 ### 文档

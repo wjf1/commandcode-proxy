@@ -483,6 +483,11 @@ const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').repl
  * 永不抛异常，因此调用点也不会产生未处理的 rejection。
  */
 async function apiJson(url, opts) {
+  // 管理面写操作凭据：dashboard 页 <head> 里由服务端注入的 meta（批次 B 回移植）。
+  // typeof 守卫：spa-api-json 测试在 Node 裸环境抽取本函数执行，无 document。
+  const meta = (typeof document !== 'undefined') ? document.querySelector('meta[name="ccproxy-admin-token"]') : null;
+  opts = opts || {};
+  opts.headers = Object.assign({ 'x-admin-token': meta ? meta.content : '' }, opts.headers);
   let res;
   try { res = await fetch(url, opts); }
   catch (e) { return { ok: false, data: null, error: '无法连接代理：' + ((e && e.message) || e) }; }

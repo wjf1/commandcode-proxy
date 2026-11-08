@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify from 'fastify';
 import type { FastifyInstance } from 'fastify';
+import { ADMIN_TOKEN } from '../src/utils/admin-guard.js';
 import http from 'node:http';
 import { mkdtempSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -67,6 +68,7 @@ describe('POST /api/auth/manual-login 凭据外泄（P1-4）', () => {
       method: 'POST',
       url: '/api/auth/manual-login',
       payload: { apiKey: PLAINTEXT_KEY, name: 'manual' },
+      headers: { 'x-admin-token': ADMIN_TOKEN },
     });
 
     expect(res.statusCode).toBe(200);
@@ -78,6 +80,7 @@ describe('POST /api/auth/manual-login 凭据外泄（P1-4）', () => {
       method: 'POST',
       url: '/api/auth/manual-login',
       payload: { apiKey: PLAINTEXT_KEY },
+      headers: { 'x-admin-token': ADMIN_TOKEN },
     });
     const json = res.json();
     const account = json.account ?? json;

@@ -316,6 +316,8 @@ beforeAll(async () => {
       ...process.env,
       PORT: String(PROXY_PORT),
       HOST: '127.0.0.1',
+      // 管理面写操作凭据（批次 B）：固定值让 toggle 辅助可预测地通过 B1 校验。
+      ADMIN_API_TOKEN: 'it-admin-token',
       COMMANDCODE_API_BASE: `http://127.0.0.1:${MOCK_PORT}`,
       // 回环/私有地址默认被拒绝；此处显式允许本机 mock 上游（本地自建网关/sandbox 场景）。
       COMMANDCODE_UPSTREAM_ALLOWED_HOSTS: '127.0.0.1',
@@ -997,7 +999,7 @@ describe.skipIf(!distReady)('structured error contract', () => {
     const toggle = (running: boolean) =>
       fetch(`${PROXY_BASE}/api/gateway/toggle`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-admin-token': 'it-admin-token' },
         body: JSON.stringify({ running }),
       });
 

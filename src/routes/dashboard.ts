@@ -16,6 +16,7 @@ import { logger, LOG_FILE_PATH } from '../utils/logger.js';
 import { getUpdateState } from '../utils/update-check.js';
 import { getProjectRootDir } from '../utils/config.js';
 import { isSameOriginIfPresent } from './sse-common.js';
+import { adminTokenOk, injectAdminTokenMeta, isLoopbackHostHeader } from '../utils/admin-guard.js';
 import {
   loadConfig,
   resolveBodyLimit,
@@ -119,6 +120,18 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
     if (req.url.startsWith('/api/') && !['GET', 'OPTIONS', 'HEAD'].includes(req.method)) {
       if (!isSameOriginIfPresent(req.headers.origin as string | undefined, req.headers.host as string | undefined, req.protocol)) {
         return reply.status(403).send({ error: 'Cross-origin admin request rejected' });
+      }
+      // B2：token 注入进页面 HTML，依赖 Host 白名单防 rebinding 页面连 token 一起读走。
+      if (!isLoopbackHostHeader(req.headers.host as string | undefined)) {
+        return reply.status(403).send({ error: 'Host not allowed for admin surface' });
+      }
+      // B1（回移植批次 B）：管理面写操作凭 x-admin-token。PROXY_API_KEY 从此只管
+      // /v1/*——两把凭据混用意味着数据面密钥泄露即可改配置、删账号。只卡写不卡读。
+      if (!adminTokenOk(req.headers['x-admin-token'] as string | undefined)) {
+        return reply.status(401).send({
+          error: 'Missing or invalid x-admin-token. It is served in the dashboard page '
+            + '(<meta name="ccproxy-admin-token">); pin it with ADMIN_API_TOKEN for scripts.',
+        });
       }
     }
     // 仪表盘 HTML 与管理 API 禁用缓存：升级后浏览器不会再用旧页面调新接口。
@@ -557,7 +570,7 @@ export async function dashboardRoutes(fastify: FastifyInstance) {
   fastify.get('/', async (_req, reply) => {
     try {
       const html = await fs.promises.readFile(DASHBOARD_HTML_PATH, 'utf-8');
-      return reply.header('Content-Type', 'text/html; charset=utf-8').header('Cache-Control', 'no-cache').send(html);
+      return reply.header('Content-Type', 'text/html; charset=utf-8').header('Cache-Control', 'no-cache').send(injectAdminTokenMeta(html));
     } catch (err: any) {
       logger.error(`[DASHBOARD] Failed to load public/index.html: ${err.message}`);
       return reply.status(500).send('Dashboard assets missing: public/index.html not found.');
