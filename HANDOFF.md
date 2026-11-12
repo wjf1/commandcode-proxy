@@ -29,6 +29,7 @@
 - 运行期文件（仓库根，均被 `.gitignore` 忽略）：`.env`、`config.json`、`models.json` / `pricing.json`（启动自动同步）、`logs/`（`proxy.log` 程序日志、`audit.log` 审计、`proxy.out.log` / `proxy.err.log` 控制台链日志——OEM 代码页中文可能乱码，不影响功能）。
 
 ## 4. 最近一轮变更与交付成果
+- **2026-11-12：本机 9090 部署 v4.23.0 并验收通过**（详见 §5 第 2 条）：重建 dist → 停旧 node → `start_hidden.ps1` 独立拉起 → 401 守卫 / meta 注入 / 数据面三查全过。
 - **2026-11-12：发布 v4.23.0**（管理面独立凭据 + 不安全绑定拒启）。版本号 `package.json` / `package-lock.json` → 4.23.0（顺带把 lock 里长期停留在 4.19.1 的版本号纠正为一致），CHANGELOG `[Unreleased]` 转正为 `[4.23.0] - 2026-11-12` 并补「升级注意（脚本调用方）」段，README 中英双语安全段与环境变量表补齐 `ADMIN_API_TOKEN` / `ADMIN_ALLOWED_HOSTS` / `ALLOW_INSECURE_BIND`。发版前门禁：`npm test`（49 文件 / 633 用例全绿）、`typecheck` 0 错误、`lint` 零输出。
   - 顺带修掉 `CHANGELOG.md` 里一个历史遗留的 **NUL 字节**（4.20.0 段落「用 `\x00` 拆分关键字」被写成了真零字节），导致各类文本工具无法读取该文件；现改为字面转义文本。
 - **同日（B1/B2 回移植）**：管理面 one-time token + Host 白名单落地（admin-guard.ts），前端 apiJson 自动带凭据，633 测试全绿（49 文件，含新增纯函数锁定与 401 守卫用例）。
@@ -42,7 +43,7 @@
 ## 5. 接力开发指引与待办（Next Steps / Backlog）
 
 1. **✅ 已解决（2026-11-08）**：`start.cmd` 出站代理端口漂移问题已根除——原写死端口两次漂移失效（7897 → 7900 → 实际 7901），现改为启动时依次探测 7901/7900/7897 取首个实际监听者（全部未监听回落 7901），netstat 探测片段已本机实测（DETECTED=7901）。改动已提交推送（`797c484`）；**已于 v4.23.0 随版本发布**。
-2. **升级到 v4.23.0 后需重新部署本机 9090**：本机当前运行的是 `5a9bd1a` 之前构建的副本（含 admin token 逻辑但无本次版本号）；换装要点见 `HANDOFF.local.md`。**脚本调用方**：`/api/*` 写接口现在必须带 `x-admin-token`（或设 `ADMIN_API_TOKEN` 固定值），否则 401。
+2. **✅ 本机 9090 已升级到 v4.23.0（2026-11-12 23:27，验收通过）**：`npm run build`（tsc，dist 基于 `53e22a4`）→ 停旧 node（PID 26716）→ `start_hidden.ps1` 拉起独立实例（PID 14796，**父进程已退出、脱离 ZCode 会话进程树**）。验收：`/health` 200、97 模型同步、`POST /api/gateway/toggle` 无 token **401**（admin-guard 生效，错误文案含「pin it with ADMIN_API_TOKEN for scripts」）、dashboard 页含 `ccproxy-admin-token` meta 注入、`/v1/models` 200（数据面不受影响）。**脚本调用方**：`/api/*` 写接口现在必须带 `x-admin-token`（或设 `ADMIN_API_TOKEN` 固定值），否则 401。
 3. **免费验证模型会退役**：个别 `:free` 模型上游会下线（403），用量异常时先换其他 `:free` 模型验证再排查网关本身。
 4. **账号轮换与配额**：账号池状态、计费周期与 5h/周上限以面板 `/api/usage/overview` 为准；排查「额度不对」先看该接口再动配置。
 
