@@ -4,11 +4,13 @@
 
 ## [Unreleased]
 
+## [4.23.0] - 2026-11-12
+
 ### 安全
 
 - **管理面写操作一次性凭据（批次 B 回移植）**：`/api/*` 的写请求凭 `x-admin-token`（401 拦截），与 `PROXY_API_KEY` 权限分离——数据面密钥泄露不再等于管理面失守；token 由服务端注入 dashboard 页 `<head>` meta（前端 `apiJson` 自动携带），可用 `ADMIN_API_TOKEN` 固定供脚本使用。配套 **B2 Host 回环白名单**（防 DNS rebinding 页面连 token 一起读走，`ADMIN_ALLOWED_HOSTS` 可追加）；新增 `src/utils/admin-guard.ts` 与纯函数测试，新增「无 token 401」守卫用例，既有集成/掩码测试同步带凭据。
 
-### 安全
+  **升级注意（脚本调用方）**：直接用 curl / 脚本打 `/api/*` 写接口的调用方现在必须带 `x-admin-token`，否则收到 401。取 token 的两种方式：读仪表盘页面 `<head>` 里的 meta，或设 `ADMIN_API_TOKEN` 固定值。`/v1/*` 数据面不受影响，仍只认 `PROXY_API_KEY`。
 
 - **非回环绑定且未设 PROXY_API_KEY 时拒绝启动**（原为仅告警），与同源仓 multi-upstream-gateway 安全默认对齐；`ALLOW_INSECURE_BIND=1` 显式豁免。同批：补 `pretest:coverage` 钩子（test:coverage 先 build，防集成用例 spawn 过期 dist）；新增 gitleaks 扫描 workflow；修复 `tests/proxy-agent.test.ts` 未使用的 dns import（此前连续挂 CI）。
 
@@ -156,7 +158,7 @@
 - **日志密钥脱敏（Wave 2）**：`LOG_REDACTION=on`（默认）对进入环形缓冲 / proxy.log / 仪表盘
   日志页的每条日志按密钥形态打码——`Authorization: Bearer/Basic`、`api-key` / `x-api-key`
   键值（含 JSON 引号形态）、裸 `sk-` 令牌、query 中的 `token`/`key` 参数统一替换为
-  `[REDACTED]`；`off` 显式回退。脱敏在控制字符清洗**之后**执行，用 ` ` 拆分关键字的
+  `[REDACTED]`；`off` 显式回退。脱敏在控制字符清洗**之后**执行，用 `\x00` 拆分关键字的
   日志注入无法绕过。新增 `tests/log-redaction.test.ts`（10 项）。
 - **SSRF 重定向阻断（Wave 3）**：修复真实绕过点——此前唯一的数据面 fetch 未设
   `redirect`，Node 默认 follow，被攻击者控制的上游可用 302 把带凭据的请求引向

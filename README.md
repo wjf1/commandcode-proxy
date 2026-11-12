@@ -201,6 +201,9 @@ Anthropic 出口（`/v1/messages`）：
 | `PORT` | `9090` | 监听端口 |
 | `HOST` | `127.0.0.1` | 绑定地址（`0.0.0.0` 暴露到局域网） |
 | `PROXY_API_KEY` | 未设置 | 要求 `/v1/*` **与管理面 `/api/*`** 携带该密钥（Bearer 或 `x-api-key`）；仪表盘首次访问会弹出密钥输入，本标签页内记住 |
+| `ADMIN_API_TOKEN` | 未设置（每次启动随机） | 固定管理面写操作的 `x-admin-token`，供脚本 / curl 直接调 `/api/*` 写接口使用。未设置时 token 每次启动随机生成，只能从仪表盘页 `<head>` 的 meta 里取 |
+| `ADMIN_ALLOWED_HOSTS` | 未设置 | 向管理面 Host 白名单追加可接受的 host（逗号分隔，默认只认回环 host），用于反代场景；白名单用于阻断 DNS rebinding 页面读到 admin token |
+| `ALLOW_INSECURE_BIND` | 未设置 | 设为 `1` 才允许「绑定非回环地址且未设 `PROXY_API_KEY`」启动——默认直接拒绝启动 |
 | `COMMANDCODE_API_KEY` | 取自 auth.json | 上游密钥兜底；无命名账号时账号名显示为 `CLI Key (尾4位 xxxx)` / `Env Key (尾4位 xxxx)`，启动后由 whoami 异步补全真实用户名 |
 | `COMMANDCODE_API_BASE` | `https://api.commandcode.ai` | 上游服务地址 |
 | `COMMANDCODE_UPSTREAM_ALLOWED_HOSTS` | 未设置 | 追加允许的上游 host（逗号分隔，供自建网关/镜像）；环回/私有/保留地址默认拒绝，仅在此显式加入才放行 |
@@ -314,6 +317,8 @@ public/
 - **默认只允许** `commandcode.ai` 及其子域；环回（localhost、127.x、::1）、私有（10.x、172.16-31.x、192.168.x、100.64/10 CGNAT）、保留/链路本地（169.254.x、IPv6 ULA/链路本地、198.18/15）及任意公网地址默认一律拒绝，除非运维显式加入允许清单。
 - **环回/私有受控例外**：本地 mock 上游、自建网关/镜像需通过 `COMMANDCODE_UPSTREAM_ALLOWED_HOSTS` **显式**加入才放行。这是**运维显式配置**的受控例外——上游地址只由 `COMMANDCODE_API_BASE` 等运维环境变量决定，不随客户端请求参数变化，因此不存在把客户端输入导向内网的 SSRF 路径。
 - **配套校验**：拒绝非 `http(s)` 协议（防 `file:`、`gopher:` 协议混淆）、拒绝内嵌凭据（`user:pass@host`）、非回环 host 强制 `https`（防降级明文；回环且显式放行时允许 http，供本地 mock）。
+- **管理面独立凭据（v4.23.0）**：`/api/*` 的**写**请求需带 `x-admin-token`（401 拦截），与数据面 `PROXY_API_KEY` 权限分离——`/v1/*` 的密钥泄露不再等于管理面失守。token 由服务端注入仪表盘页 `<head>` 的 meta（前端 `apiJson` 自动携带），脚本可设 `ADMIN_API_TOKEN` 固定值。配套 **Host 回环白名单**：管理面只接受回环 host（`ADMIN_ALLOWED_HOSTS` 可追加），阻断 DNS rebinding 页面把 token 一起读走。
+- **不安全的绑定组合拒绝启动（v4.23.0）**：绑定非回环地址且未设 `PROXY_API_KEY` 时直接退出（原为仅告警），需 `ALLOW_INSECURE_BIND=1` 显式豁免。
 - **运营可视化（v4.22.0）**：概览页「通道健康」「运行开关」两张只读卡片（`GET /api/features` 驱动），探活结果/可用率与六类能力开关一目了然。
 - **Origin scheme 收紧（v4.22.1）**：管理面写操作在 host 比对之上追加 scheme 比对（默认 on，`ORIGIN_SCHEME_CHECK=off` 回退）——混合内容场景的同 host 跨 scheme 驱动被拒绝。
 - **重定向阻断（v4.20.0）**：所有上游请求一律 `redirect: 'manual'`。默认 `conservative`：上游返回 3xx 即按错误终止，永不跟随；`UPSTREAM_REDIRECT=follow` 显式放行后逐跳复检目标——私网/回环/保留地址（含 169.254.169.254 等云元数据）**永不跟随且不受 allowlist 影响**，同 host 跳转保留 POST 与请求体，跨 host 跳转剥离 `Authorization` 凭据头，链条最多 5 跳。
@@ -357,6 +362,8 @@ Point any OpenAI-style client (Cursor, Continue, Aider, OpenWebUI, Hermes, your 
 
 - Exponential-backoff retries on 429/5xx/network errors; **retries also cover failures the upstream reports inside an HTTP 200 stream** (gateway failure / overload / no available provider) by probing events before the stream is handed to the route, so an error is no longer returned as if it were the model's answer — deterministic unavailability (region, unknown model) is deliberately not retried; idle-stream watchdog (no infinite hangs); client-disconnect cancellation; clean stream termination with SSE keepalive comments
 - Secure defaults: loopback-only binding; optional `PROXY_API_KEY` covering **both `/v1/*` and the admin surface `/api/*`** (dashboard prompts on first visit); Origin check on `/api/*` mutations; XSS-hardened dashboard; CORS limited to the public API surface; prominent warnings when bound non-loopback without auth
+- **Admin writes need their own credential (v4.23.0)** — `/api/*` mutations require an `x-admin-token` header (401 otherwise), separated from the `PROXY_API_KEY` data-plane key, so leaking the `/v1/*` key no longer means losing the admin surface. The token is injected into the dashboard page's `<head>` meta (the frontend's `apiJson` sends it automatically); scripts can pin it via `ADMIN_API_TOKEN`. A companion **loopback Host allowlist** for the admin surface (`ADMIN_ALLOWED_HOSTS` extends it) blocks DNS-rebinding pages from reading the token along the way
+- **Insecure bind combinations refuse to start (v4.23.0)** — binding a non-loopback address without `PROXY_API_KEY` now aborts startup (previously a warning only); `ALLOW_INSECURE_BIND=1` opts out explicitly
 - **Ops dashboard (v4.22.0)** — read-only "channel health" & "feature switches" cards on the overview page, driven by `GET /api/features`
 - **Monitoring & ops (v4.21.0)** — channel health probe (bypass-only, warns on consecutive failures), threshold **webhook alerts** (daily cost / error-rate → any bot endpoint), **prompt version management** (`/api/prompts/*` snapshot & rollback, off by default), per-minute **rate limiting** (RPM/TPM, off by default), **model access control** (allow/block list, off by default), **minimal audit log** (metadata only, never message bodies)
 - **SSRF guard, fail-closed** — strict upstream URL allowlist, **redirect blocking** (`redirect: 'manual'` everywhere; opt-in `UPSTREAM_REDIRECT=follow` re-validates every hop, never follows into private/metadata addresses, strips credentials across hosts), **DNS-rebinding guard** (`DNS_REBINDING_GUARD=on` resolves & validates every upstream hostname per request), **log secret redaction** (`LOG_REDACTION=on` masks Bearer/api-key/sk- tokens in logs) — see the bilingual [Upstream URL safety](#security) section
