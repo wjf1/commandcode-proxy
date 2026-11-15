@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **Release 三平台单文件产物化**：`release.yml` 新增 `build-binaries` 与 `checksums` job——tag
+  push 时用 `@yao-pkg/pkg`（与本地 `build:win` 同链路：tsc → esbuild bundle → pkg）随
+  Release 发布 win-x64 / linux-x64 / macos-arm64 / macos-x64 单文件可执行（免 Node 环境
+  直接运行）与 `SHA256SUMS.txt`；仅在 tag push 事件执行（workflow_dispatch 补建历史版本
+  时跳过，避免把当前 main 代码错附到旧 Release），checkout 锚定 tag 源码。
+  （`.github/workflows/release.yml`）
+
 ### 安全
 
 - **补齐社区健康文件**：新增 `SECURITY.md`（私密漏洞上报通道 + 「本机服务定位 / 上游凭证保管 / 仪表盘管理面」安全边界说明）、`.github/ISSUE_TEMPLATE/`（bug / feature 模板与 config.yml）与 `PULL_REQUEST_TEMPLATE.md`（含测试、CHANGELOG、敏感信息自检清单）——GitHub 社区健康度从 42% 补齐至四件套完整。
