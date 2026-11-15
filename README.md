@@ -226,7 +226,8 @@ Anthropic 出口（`/v1/messages`）：
 | `ORIGIN_SCHEME_CHECK` | `on` | 管理面写操作的 Origin scheme 收紧：Origin 协议须与请求协议一致（`https` 页面驱动 `http` 管理接口将被 403）；反代 TLS 终止部署可设 `off` 回退 |
 | `DNS_REBINDING_GUARD` | `on` | 上游域名请求前解析校验：解析结果含私网/保留地址即拒绝（防 DNS rebinding）；设 `off` 回退；IP 字面量 / localhost / allowlist 命中主机跳过解析校验 |
 | `HEALTH_CHECK_INTERVAL_MS` | `300000` | 通道健康检查探活周期（纯旁路，连续失败仅日志告警）；设 `0` 关闭 |
-| `WEBHOOK_URL` | 未设置=关闭 | 告警 Webhook：当日成本/错误率超阈值时 POST JSON（飞书/钉钉/Slack 机器人通用）；配套 `WEBHOOK_COST_USD`、`WEBHOOK_ERROR_RATE`、`WEBHOOK_TIMEOUT_MS`、`WEBHOOK_CHECK_INTERVAL_MS` |
+| `PROTOCOL_CHECK_INTERVAL_MS` | `600000` | 协议形态探针周期（带活动凭据 GET `/alpha/whoami`，判别凭据失效/协议变更/不可达，纯旁路失败不重试）；设 `0` 关闭；配套 `PROTOCOL_CHECK_TIMEOUT_MS` |
+| `WEBHOOK_URL` | 未设置=关闭 | 告警 Webhook：当日成本/错误率超阈值、或上游故障（探活连续失败 ≥2 / 协议探针异常，`upstream-down`）时 POST JSON（飞书/钉钉/Slack 机器人通用）；配套 `WEBHOOK_COST_USD`、`WEBHOOK_ERROR_RATE`、`WEBHOOK_TIMEOUT_MS`、`WEBHOOK_CHECK_INTERVAL_MS` |
 | `PROMPT_VERSIONS` | 未设置=关闭 | 设 `on` 启用 Prompt 版本管理（`/api/prompts/*`：保存自动快照、按时间戳回滚；`PROMPTS_DIR` 改存储目录） |
 | `RATE_LIMIT_RPM` / `RATE_LIMIT_TPM` | 未设置=关闭 | 每分钟请求数 / token 数上限（60s 滑动窗口，超限 429 + `Retry-After`） |
 | `MODEL_ALLOWLIST` / `MODEL_BLOCKLIST` | 未设置=关闭 | 模型访问控制（精确 id、大小写不敏感；allowlist 优先，命中拦截 403） |

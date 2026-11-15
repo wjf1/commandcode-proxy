@@ -24,7 +24,7 @@ import { recordQuotaSample, getQuotaProjection } from './utils/quota-tracker.js'
 import { flushPendingWrites } from './utils/usage-store.js';
 import { scheduleUpdateChecks } from './utils/update-check.js';
 import { notify, ensureAumidRegistered, isGlobalToastEnabled } from './utils/notifier.js';
-import { startHealthChecks } from './utils/health-check.js';
+import { startHealthChecks, startProtocolChecks } from './utils/health-check.js';
 import { startWebhookAlerts } from './utils/webhook-alerts.js';
 import { initOutboundProxy } from './utils/proxy-agent.js';
 
@@ -182,6 +182,10 @@ const start = async () => {
     // 健康检查默认 5 分钟一次仅告警；WEBHOOK_URL 未设置时 webhook 完全不启动。
     const healthTimer = startHealthChecks();
     if (healthTimer) logger.info('[HEALTH] Channel health probe armed.');
+    // 协议形态探针（/alpha/whoami 带凭据）：与 HTTP 探活相互独立的 10 分钟周期，
+    // 同为纯旁路仅告警；PROTOCOL_CHECK_INTERVAL_MS=0 或默认未变时不额外说明。
+    const protocolTimer = startProtocolChecks();
+    if (protocolTimer) logger.info('[HEALTH][PROTOCOL] Protocol shape probe armed.');
     const webhookTimer = startWebhookAlerts();
     if (webhookTimer) logger.info('[WEBHOOK] Alert scheduler armed.');
 

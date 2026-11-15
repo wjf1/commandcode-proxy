@@ -6,6 +6,28 @@
 
 ### 新增
 
+- **上游健康探测补全：协议形态探针**：`src/utils/health-check.ts` 在既有无凭据
+  HTTP 探活之外新增 `probeProtocol()`——存在活动凭据时带 `Authorization: Bearer`
+  GET `{ccApiBase}/alpha/whoami`（请求头照 `fetchLiveUsageStats` 既有惯例拼装），
+  按响应形态分四类判定：200 且 `user` 结构符合预期（读码依据 `config.ts` 对
+  whoami 的实际消费：`user` 顶层或 `data` 包装，id/name/userName/email 任一非空）
+  → `ok`；401 → `credential-invalid`（凭据失效单列，不与上游故障混谈）；200 但
+  结构不符（含非 JSON）→ `protocol-changed`；5xx / 其他 4xx / 网络层失败 →
+  `unreachable`。结果并入 `ChannelHealth.protocolCheck`（含 `checkedAt` 与
+  `keySuffix` 尾 4 位，绝不存全量密钥），无活动凭据或未到首次探测时为
+  `{skipped:true}` 供前端判别。独立 10 分钟周期（`PROTOCOL_CHECK_INTERVAL_MS`，
+  默认 600000，设 `0` 关闭；单次超时 `PROTOCOL_CHECK_TIMEOUT_MS`），失败不重试，
+  依旧纯旁路——仅告警，绝不影响请求路径。
+- **Webhook 新增 `upstream-down` 告警**：`checkThresholds` 在探活连续失败 ≥2 或
+  协议探针 `ok===false` 时向 `WEBHOOK_URL` 发送 `upstream-down`（不依赖成本/错误
+  率阈值 env，配置了 WEBHOOK_URL 即生效）；summary 按异常形态区分「上游故障 /
+  协议可能变更 / 凭据失效」，沿用每自然日一次的去重机制（发送失败当天也不重试）。
+- **仪表盘上游故障持久横幅**：概览页顶部新增常驻横幅（探活连续失败 ≥2 或协议
+  探针异常时显示，随 30s 轮询刷新，文案区分「上游故障 / 协议可能变更 / 凭据失效
+  ——Key 尾号」；故意不用 toast——轮询周期内反复弹出只会刷屏）；「通道健康」
+  卡片同步新增「协议探针」状态行（正常/凭据失效/协议可能变更/不可达/未启用），
+  `/api/features` 的 `healthCheck.channel` 自动携带 `protocolCheck` 字段。
+
 - **Release 三平台单文件产物化**：`release.yml` 新增 `build-binaries` 与 `checksums` job——tag
   push 时用 `@yao-pkg/pkg`（与本地 `build:win` 同链路：tsc → esbuild bundle → pkg）随
   Release 发布 win-x64 / linux-x64 / macos-arm64 / macos-x64 单文件可执行（免 Node 环境

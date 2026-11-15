@@ -7,11 +7,16 @@
 //   3. 每个阈值每自然日最多告警一次（发送失败当天也不重试）；
 //   4. 发送失败（超时/5xx）只 warn 不抛错；
 //   5. WEBHOOK_CHECK_INTERVAL_MS=0 时不启动定时器。
-// usage-store 统计整体 vi.mock，fetch 全部 spyOn mock，不发真实网络请求。
+//   6. upstream-down：探活连续失败 ≥2 或协议探针失败时告警（不依赖阈值 env，
+//      同样受每自然日一次约束）；恢复后不告警。
+// usage-store 统计整体 vi.mock，getActiveApiKey 部分 mock（health 状态与测试机
+// 真实凭据解耦），fetch 全部 spyOn mock，不发真实网络请求。
 // =============================================================================
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { logger } from '../src/utils/logger.js';
 import { getUsageStats, getUsageHistory } from '../src/utils/usage-store.js';
+import { getActiveApiKey } from '../src/utils/config.js';
+import { probeOnce, probeProtocol, resetHealthState } from '../src/utils/health-check.js';
 import {
   startWebhookAlerts,
   checkThresholds,
@@ -25,10 +30,17 @@ vi.mock('../src/utils/usage-store.js', () => ({
   getUsageHistory: vi.fn(),
 }));
 
+vi.mock('../src/utils/config.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/utils/config.js')>()),
+  getActiveApiKey: vi.fn(),
+}));
+
 const mockedStats = vi.mocked(getUsageStats);
 const mockedHistory = vi.mocked(getUsageHistory);
+const mockedGetActiveApiKey = vi.mocked(getActiveApiKey);
 
 const WEBHOOK_URL = 'https://hooks.example.com/alert';
+const SAFE_BASE = 'https://api.commandcode.ai';
 
 let fetchMock: ReturnType<typeof vi.spyOn>;
 
@@ -38,15 +50,19 @@ const todayIso = () => new Date().toISOString();
 beforeEach(() => {
   vi.restoreAllMocks();
   resetWebhookState();
+  resetHealthState();
   delete process.env.WEBHOOK_URL;
   delete process.env.WEBHOOK_COST_USD;
   delete process.env.WEBHOOK_ERROR_RATE;
   delete process.env.WEBHOOK_CHECK_INTERVAL_MS;
   delete process.env.WEBHOOK_TIMEOUT_MS;
+  delete process.env.COMMANDCODE_API_BASE;
+  delete process.env.COMMANDCODE_API_KEY;
   mockedStats.mockReset();
   mockedHistory.mockReset();
   mockedStats.mockReturnValue({ today: { cost: 0 } } as any);
   mockedHistory.mockReturnValue([] as any);
+  mockedGetActiveApiKey.mockReturnValue(null); // 默认无凭据：协议探针 skipped
   vi.spyOn(logger, 'warn').mockImplementation(() => {});
   vi.spyOn(logger, 'info').mockImplementation(() => {});
   fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({ ok: true, status: 200 } as Response);
@@ -80,6 +96,12 @@ describe('默认关闭路径', () => {
   });
 
   it('WEBHOOK_URL 已设但两个阈值 env 均未设置时零 fetch', async () => {
+    process.env.WEBHOOK_URL = WEBHOOK_URL;
+    await checkThresholds();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('WEBHOOK_URL 已设且通道健康（无阈值 env）时 upstream-down 也不触发', async () => {
     process.env.WEBHOOK_URL = WEBHOOK_URL;
     await checkThresholds();
     expect(fetchMock).not.toHaveBeenCalled();
@@ -249,5 +271,85 @@ describe('startWebhookAlerts — 定时装配', () => {
     await vi.advanceTimersByTimeAsync(60_000);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     clearInterval(timer!);
+  });
+});
+
+describe('upstream-down 告警（探活/协议探针驱动，不依赖阈值 env）', () => {
+  beforeEach(() => {
+    process.env.WEBHOOK_URL = WEBHOOK_URL;
+    process.env.COMMANDCODE_API_BASE = SAFE_BASE;
+  });
+
+  it('探活连续失败 ≥2 时 POST upstream-down，且当日只发一次', async () => {
+    fetchMock.mockRejectedValue(new Error('connect ECONNREFUSED'));
+    await probeOnce();
+    await probeOnce(); // 连续失败达到告警阈值 2
+    fetchMock.mockClear();
+    fetchMock.mockResolvedValue({ ok: true, status: 200 } as Response);
+
+    await checkThresholds();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as unknown[];
+    expect(String(url)).toBe(WEBHOOK_URL);
+    const body = JSON.parse(String((init as RequestInit).body));
+    expect(body.event).toBe('upstream-down');
+    expect(body.kind).toBe('unreachable');
+    expect(body.consecutiveFailures).toBe(2);
+    expect(typeof body.timestamp).toBe('string');
+
+    await checkThresholds();
+    await checkThresholds();
+    expect(fetchMock).toHaveBeenCalledTimes(1); // 当日去重：先占坑再发送
+  });
+
+  it('单次探活失败（<2）不触发', async () => {
+    fetchMock.mockRejectedValue(new Error('connect ECONNREFUSED'));
+    await probeOnce();
+    fetchMock.mockClear(); // 清掉 probeOnce 自身的调用计数，只看 checkThresholds 是否发
+    await checkThresholds();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('恢复（探活重新成功）后不告警', async () => {
+    fetchMock.mockRejectedValue(new Error('connect ECONNREFUSED'));
+    await probeOnce();
+    await probeOnce();
+    // 恢复：探活成功把连续失败清零（health-check 的恢复语义）
+    fetchMock.mockResolvedValue({ ok: true, status: 200 } as Response);
+    await probeOnce();
+    fetchMock.mockClear();
+
+    await checkThresholds();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('协议探针 401 → credential-invalid 触发，payload 带 Key 尾号', async () => {
+    mockedGetActiveApiKey.mockReturnValue('cc-test-key-1234');
+    fetchMock.mockResolvedValue({ ok: false, status: 401 } as Response);
+    await probeProtocol();
+    fetchMock.mockClear();
+    fetchMock.mockResolvedValue({ ok: true, status: 200 } as Response);
+
+    await checkThresholds();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const body = lastBody();
+    expect(body.event).toBe('upstream-down');
+    expect(body.kind).toBe('credential-invalid');
+    expect(body.keySuffix).toBe('1234');
+  });
+
+  it('协议探针结构异常（200 但缺 user）→ protocol-changed 触发', async () => {
+    mockedGetActiveApiKey.mockReturnValue('cc-test-key-1234');
+    fetchMock.mockResolvedValue({
+      ok: true, status: 200, json: async () => ({ message: 'pong' }),
+    } as unknown as Response);
+    await probeProtocol();
+    fetchMock.mockClear();
+    fetchMock.mockResolvedValue({ ok: true, status: 200 } as Response);
+
+    await checkThresholds();
+    const body = lastBody();
+    expect(body.event).toBe('upstream-down');
+    expect(body.kind).toBe('protocol-changed');
   });
 });

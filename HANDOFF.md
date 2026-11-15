@@ -29,6 +29,11 @@
 - 运行期文件（仓库根，均被 `.gitignore` 忽略）：`.env`、`config.json`、`models.json` / `pricing.json`（启动自动同步）、`logs/`（`proxy.log` 程序日志、`audit.log` 审计、`proxy.out.log` / `proxy.err.log` 控制台链日志——OEM 代码页中文可能乱码，不影响功能）。
 
 ## 4. 最近一轮变更与交付成果
+- **2026-11-15：上游健康探测补全（协议形态探针 + upstream-down webhook + 前端持久横幅）**：
+  - `src/utils/health-check.ts` 新增 `probeProtocol()`（带活动凭据 GET `/alpha/whoami`，判定依据读码自 config.ts 对 whoami 的实际消费：`user` 顶层或 `data` 包装且 id/name/userName/email 任一非空）与独立 10 分钟定时器 `startProtocolChecks()`（`PROTOCOL_CHECK_INTERVAL_MS`，默认 600000，`0` 关闭）；结果并入 `ChannelHealth.protocolCheck`（`{skipped:false, ok, checkedAt, kind: ok|protocol-changed|credential-invalid|unreachable, keySuffix 尾4位}`，无凭据/未探测为 `{skipped:true, reason: no-key|pending}`）；失败不重试，仍纯旁路仅告警。
+  - `src/utils/webhook-alerts.ts` 新增 `upstream-down` 事件（探活连续失败 ≥2 或 protocolCheck.ok===false 触发，不依赖阈值 env，summary 按 kind 区分三类文案），`fireOncePerDay` 泛化为 (event, payload, summary) 且 summary 统一并入 body；当日去重沿用。
+  - `public/index.html`：通道健康卡片加「协议探针」行；概览页顶部新增持久横幅 `#outageBanner`（30s 轮询刷新，连续失败 ≥2 或协议探针异常时显示，文案区分上游故障/协议变更/凭据失效，故意不用 toast 防刷屏）。
+  - 测试：health-check.test.ts +9（探针判定全形态/定时器/状态并入）、webhook-alerts.test.ts +6（达阈值一次/去重/恢复不发/401/协议变更）、features-endpoint.test.ts +protocolCheck 断言；`npm test`（pretest build）全绿、typecheck 0 错误、lint 零输出。未 commit/push（任务约束）。
 - **2026-11-12：本机 9090 部署 v4.23.0 并验收通过**（详见 §5 第 2 条）：重建 dist → 停旧 node → `start_hidden.ps1` 独立拉起 → 401 守卫 / meta 注入 / 数据面三查全过。
 - **2026-11-12：发布 v4.23.0**（管理面独立凭据 + 不安全绑定拒启）。版本号 `package.json` / `package-lock.json` → 4.23.0（顺带把 lock 里长期停留在 4.19.1 的版本号纠正为一致），CHANGELOG `[Unreleased]` 转正为 `[4.23.0] - 2026-11-12` 并补「升级注意（脚本调用方）」段，README 中英双语安全段与环境变量表补齐 `ADMIN_API_TOKEN` / `ADMIN_ALLOWED_HOSTS` / `ALLOW_INSECURE_BIND`。发版前门禁：`npm test`（49 文件 / 633 用例全绿）、`typecheck` 0 错误、`lint` 零输出。
   - 顺带修掉 `CHANGELOG.md` 里一个历史遗留的 **NUL 字节**（4.20.0 段落「用 `\x00` 拆分关键字」被写成了真零字节），导致各类文本工具无法读取该文件；现改为字面转义文本。

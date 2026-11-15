@@ -65,6 +65,9 @@ describe('GET /api/features', () => {
       consecutiveFailures: 0,
       uptimePercent: 100,
     });
+    // 协议形态探针：/api/features 未触发探针 → 始终是初始 pending 态（进程内
+    // 无历史结果），前端据此显示"等待首次探测"。
+    expect(body.healthCheck.channel.protocolCheck).toEqual({ skipped: true, reason: 'pending' });
 
     // webhook：未配置 WEBHOOK_URL = 关闭，阈值均为 null。
     expect(body.webhook).toEqual({ enabled: false, costThreshold: null, errorRateThreshold: null });

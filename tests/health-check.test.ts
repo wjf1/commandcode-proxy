@@ -8,25 +8,41 @@
 //      —— 绝不影响请求路径；
 //   4. HEALTH_CHECK_INTERVAL_MS=0 时不启动定时器。
 // fetch 全部 spyOn mock，不发真实网络请求。
+//
+// getActiveApiKey 部分 mock（其余 config 导出保持真实实现）：probeProtocol 的
+// "有无凭据"分支必须与测试机上真实存在的 COMMANDCODE_API_KEY / auth.json 解耦。
 // =============================================================================
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { logger } from '../src/utils/logger.js';
+import { getActiveApiKey } from '../src/utils/config.js';
 import {
   probeOnce,
+  probeProtocol,
   getChannelHealth,
   startHealthChecks,
+  startProtocolChecks,
   resetHealthState,
 } from '../src/utils/health-check.js';
+
+vi.mock('../src/utils/config.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/utils/config.js')>()),
+  getActiveApiKey: vi.fn(),
+}));
+
+const mockedGetActiveApiKey = vi.mocked(getActiveApiKey);
 
 // 指向公网默认上游（与代码默认一致），assertSafeUpstreamUrl 才会放行；
 // fetch 已 mock，不会真的出网。
 const SAFE_BASE = 'https://api.commandcode.ai';
+const TEST_KEY = 'cc-test-key-1234';
 
 let fetchMock: ReturnType<typeof vi.spyOn>;
 let warnSpy: ReturnType<typeof vi.spyOn>;
 let infoSpy: ReturnType<typeof vi.spyOn>;
 
 const okResponse = (status: number) => ({ ok: status >= 200 && status < 300, status } as Response);
+const jsonResponse = (status: number, body: unknown) =>
+  ({ ok: status >= 200 && status < 300, status, json: async () => body } as unknown as Response);
 
 beforeEach(() => {
   vi.restoreAllMocks();
@@ -34,6 +50,10 @@ beforeEach(() => {
   process.env.COMMANDCODE_API_BASE = SAFE_BASE;
   delete process.env.HEALTH_CHECK_INTERVAL_MS;
   delete process.env.HEALTH_CHECK_TIMEOUT_MS;
+  delete process.env.PROTOCOL_CHECK_INTERVAL_MS;
+  delete process.env.PROTOCOL_CHECK_TIMEOUT_MS;
+  delete process.env.COMMANDCODE_API_KEY;
+  mockedGetActiveApiKey.mockReturnValue(null); // 默认无凭据：协议探针一律 skipped
   fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(okResponse(200));
   // 全局抑制日志：既便于断言，也避免告警落到真实 logs/proxy.log
   warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
@@ -46,6 +66,9 @@ afterEach(() => {
   delete process.env.COMMANDCODE_API_BASE;
   delete process.env.HEALTH_CHECK_INTERVAL_MS;
   delete process.env.HEALTH_CHECK_TIMEOUT_MS;
+  delete process.env.PROTOCOL_CHECK_INTERVAL_MS;
+  delete process.env.PROTOCOL_CHECK_TIMEOUT_MS;
+  delete process.env.COMMANDCODE_API_KEY;
 });
 
 describe('probeOnce — 探活与结果记录', () => {
@@ -162,5 +185,118 @@ describe('startHealthChecks — 定时装配', () => {
     await vi.advanceTimersByTimeAsync(60_000);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     clearInterval(timer!);
+  });
+});
+
+// ─── probeProtocol：协议形态探针（/alpha/whoami，带凭据，纯旁路）─────────────
+// 判定依据（与 src/utils/config.ts 对 whoami 的实际消费一致）：
+//   user 对象存在（顶层或 data 包装）且 id/name/userName/email 任一非空 → ok。
+describe('probeProtocol — 协议形态探针', () => {
+  it('无活动凭据时 skipped 且零 fetch（getActiveApiKey 返回 null）', async () => {
+    const r = await probeProtocol();
+    expect(r).toEqual({ skipped: true, reason: 'no-key' });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('200 且 user 结构符合预期 → ok，keySuffix 为尾 4 位，请求带既有惯例头', async () => {
+    mockedGetActiveApiKey.mockReturnValue(TEST_KEY);
+    fetchMock.mockResolvedValue(jsonResponse(200, {
+      user: { id: 'u_1', name: 'Tester', email: 't@example.com' },
+      org: { id: 'org_1' },
+    }));
+    const r = await probeProtocol();
+    expect(r).toMatchObject({
+      ok: true, kind: 'ok', keySuffix: '1234', status: 200,
+    });
+    expect(r.skipped !== true && r.checkedAt).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as unknown[];
+    expect(String(url)).toBe(`${SAFE_BASE}/alpha/whoami`);
+    const headers = (init as RequestInit).headers as Record<string, string>;
+    expect(headers.Authorization).toBe(`Bearer ${TEST_KEY}`);
+    expect(headers['User-Agent']).toBe('cli');
+    expect(headers['x-cli-environment']).toBe('cli');
+    expect(typeof headers['x-command-code-version']).toBe('string');
+  });
+
+  it('200 但 data 包装的 user 也算结构符合（与 fetchLiveUsageStats 的双层消费一致）', async () => {
+    mockedGetActiveApiKey.mockReturnValue(TEST_KEY);
+    fetchMock.mockResolvedValue(jsonResponse(200, { data: { user: { id: 'u_1' } } }));
+    const r = await probeProtocol();
+    expect(r).toMatchObject({ ok: true, kind: 'ok' });
+  });
+
+  it('200 但结构缺 user 字段 → protocol-changed（协议变更信号）', async () => {
+    mockedGetActiveApiKey.mockReturnValue(TEST_KEY);
+    fetchMock.mockResolvedValue(jsonResponse(200, { message: 'pong' }));
+    const r = await probeProtocol();
+    expect(r).toMatchObject({ ok: false, kind: 'protocol-changed', status: 200 });
+  });
+
+  it('200 但响应体不是 JSON → protocol-changed', async () => {
+    mockedGetActiveApiKey.mockReturnValue(TEST_KEY);
+    fetchMock.mockResolvedValue({
+      ok: true, status: 200, json: async () => { throw new Error('Unexpected token'); },
+    } as unknown as Response);
+    const r = await probeProtocol();
+    expect(r).toMatchObject({ ok: false, kind: 'protocol-changed', status: 200 });
+  });
+
+  it('401 → credential-invalid（凭据失效单列，不是上游故障）', async () => {
+    mockedGetActiveApiKey.mockReturnValue(TEST_KEY);
+    fetchMock.mockResolvedValue(okResponse(401));
+    const r = await probeProtocol();
+    expect(r).toMatchObject({ ok: false, kind: 'credential-invalid', status: 401, keySuffix: '1234' });
+  });
+
+  it('5xx / 网络层失败 → unreachable，且 warn 留痕、不重试', async () => {
+    mockedGetActiveApiKey.mockReturnValue(TEST_KEY);
+    fetchMock.mockResolvedValue(okResponse(503));
+    const r1 = await probeProtocol();
+    expect(r1).toMatchObject({ ok: false, kind: 'unreachable', status: 503 });
+    fetchMock.mockRejectedValue(new Error('connect ECONNREFUSED'));
+    const r2 = await probeProtocol();
+    expect(r2).toMatchObject({ ok: false, kind: 'unreachable' });
+    expect(r2.skipped !== true && r2.status).toBeUndefined();
+    expect(warnSpy).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(2); // 失败不重试：每轮恰好一次
+  });
+
+  it('URL 不安全时不发请求，记为 unreachable', async () => {
+    mockedGetActiveApiKey.mockReturnValue(TEST_KEY);
+    process.env.COMMANDCODE_API_BASE = 'http://192.168.1.5';
+    const r = await probeProtocol();
+    expect(r).toMatchObject({ ok: false, kind: 'unreachable', keySuffix: '1234' });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('结果并入 getChannelHealth().protocolCheck；resetHealthState 重置为 pending', async () => {
+    expect(getChannelHealth().protocolCheck).toEqual({ skipped: true, reason: 'pending' });
+    mockedGetActiveApiKey.mockReturnValue(TEST_KEY);
+    fetchMock.mockResolvedValue(jsonResponse(200, { user: { id: 'u_1' } }));
+    await probeProtocol();
+    expect(getChannelHealth().protocolCheck).toMatchObject({ kind: 'ok', ok: true });
+    resetHealthState();
+    expect(getChannelHealth().protocolCheck).toEqual({ skipped: true, reason: 'pending' });
+  });
+});
+
+describe('startProtocolChecks — 定时装配', () => {
+  it('PROTOCOL_CHECK_INTERVAL_MS=0 时不启动（返回 null，零 fetch）', () => {
+    process.env.PROTOCOL_CHECK_INTERVAL_MS = '0';
+    expect(startProtocolChecks()).toBeNull();
+  });
+
+  it('env 缺省时按 10 分钟周期，可被 opts.intervalMs 覆盖；与 HTTP 探活互不影响', async () => {
+    vi.useFakeTimers();
+    mockedGetActiveApiKey.mockReturnValue(TEST_KEY);
+    fetchMock.mockResolvedValue(jsonResponse(200, { user: { id: 'u_1' } }));
+    const timer = startProtocolChecks({ intervalMs: 1000 });
+    expect(timer).not.toBeNull();
+    await vi.advanceTimersByTimeAsync(2500);
+    expect(fetchMock).toHaveBeenCalledTimes(2); // 只有协议探针在跑（未启动 startHealthChecks）
+    expect(String((fetchMock.mock.calls[0] as unknown[])[0])).toContain('/alpha/whoami');
+    clearInterval(timer!);
+    expect(getChannelHealth().protocolCheck).toMatchObject({ kind: 'ok' });
   });
 });

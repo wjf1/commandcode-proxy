@@ -110,6 +110,12 @@ mark{background:var(--c-hl-bg);color:var(--c-hl-text);border-radius:3px;padding:
 <main class="flex-1 p-6 max-w-7xl w-full mx-auto space-y-6">
 
 <section id="content-overview" role="tabpanel" tabindex="0" aria-labelledby="tab-overview" class="space-y-6">
+  <!-- 上游故障持久横幅（4.24.0+）：探活连续失败 ≥2 或协议探针异常时显示，随 30s 轮询刷新；
+       故意不用 toast —— 轮询周期内反复弹出只会刷屏，横幅常驻直到恢复。 -->
+  <div id="outageBanner" class="hidden rounded-xl border px-4 py-3 flex items-start gap-3" role="alert" style="border-color:var(--c-danger);background:rgba(239,68,68,.10)">
+    <i aria-hidden="true" class="fa-solid fa-triangle-exclamation mt-0.5" style="color:var(--c-danger-2)"></i>
+    <div id="outageBannerText" class="text-xs font-semibold space-y-1" style="color:var(--c-danger-2)"></div>
+  </div>
   <div class="flex items-center justify-between flex-wrap gap-3">
     <div>
       <h2 class="text-lg font-bold text-white">面板概览</h2>
@@ -665,6 +671,24 @@ function renderChannelHealth(hc) {
     : '<span style="color:var(--c-danger-2)"><i aria-hidden="true" class="fa-solid fa-circle-xmark"></i> 失败' + (last.status != null ? ' · HTTP ' + esc(last.status) : '（网络层）') + '</span>';
   // 连续失败 ≥2 是后端开始告警的阈值，用 danger；单次抖动用 warn；健康用 success。
   const failColor = failures >= 2 ? 'var(--c-danger-2)' : failures > 0 ? 'var(--c-warn)' : 'var(--c-success)';
+  // 协议形态探针（/alpha/whoami 带凭据，独立 10 分钟周期）：无 key / 未到首次探测
+  // 时 protocolCheck 为 skipped；异常时按 kind 区分三类文案（后端仅告警，这里如实着色）。
+  const pc = ch.protocolCheck;
+  let probeHtml;
+  if (!pc || pc.skipped === true) {
+    probeHtml = '<span style="color:var(--c-text-mute)"><i aria-hidden="true" class="fa-solid fa-circle-minus"></i> ' +
+      (pc && pc.reason === 'no-key' ? '未启用（无活动凭据）' : '等待首次探测') + '</span>';
+  } else if (pc.kind === 'ok') {
+    probeHtml = '<span style="color:var(--c-success)"><i aria-hidden="true" class="fa-solid fa-circle-check"></i> 正常' +
+      (pc.keySuffix ? ' · Key 尾号 ' + esc(pc.keySuffix) : '') + '</span>';
+  } else if (pc.kind === 'credential-invalid') {
+    probeHtml = '<span style="color:var(--c-danger-2)"><i aria-hidden="true" class="fa-solid fa-circle-xmark"></i> 凭据失效（401）' +
+      (pc.keySuffix ? ' · Key 尾号 ' + esc(pc.keySuffix) : '') + '</span>';
+  } else if (pc.kind === 'protocol-changed') {
+    probeHtml = '<span style="color:var(--c-warn)"><i aria-hidden="true" class="fa-solid fa-circle-exclamation"></i> 协议可能变更</span>';
+  } else {
+    probeHtml = '<span style="color:var(--c-danger-2)"><i aria-hidden="true" class="fa-solid fa-circle-xmark"></i> 不可达</span>';
+  }
   el.innerHTML =
     '<div class="grid grid-cols-2 gap-2">' +
       cell('最近探活', stateHtml) +
@@ -672,8 +696,39 @@ function renderChannelHealth(hc) {
       cell('连续失败', '<span style="color:' + failColor + '">' + failures + ' 次</span>') +
       cell('可用率', '<span style="color:' + (up < 100 ? 'var(--c-warn)' : 'var(--c-success)') + '">' + esc(up) + '%</span>') +
     '</div>' +
+    '<div class="flex items-center justify-between gap-3 mt-2 pt-2 border-t border-slate-800/60">' +
+      '<p class="text-xs font-semibold text-slate-200">协议探针</p>' + probeHtml + '</div>' +
+    (pc && pc.skipped !== true && pc.checkedAt ? '<p class="text-[11px] text-slate-500 mt-1">探测时刻：' + esc(fmtTime(pc.checkedAt)) + '</p>' : '') +
     (!ok && last.error ? '<p class="text-[11px] mt-2 break-all" style="color:var(--c-warn)">失败原因：' + esc(last.error) + '</p>' : '') +
     (last.at ? '<p class="text-[11px] text-slate-500 mt-2">探活时刻：' + esc(fmtTime(last.at)) + '</p>' : '');
+}
+// 概览页顶部持久横幅：探活连续失败 ≥2 或协议探针异常时显示；两类问题同时存在
+// 时各占一行。动态值（keySuffix / error）必须 esc，文案区分三种异常形态。
+function updateOutageBanner(hc) {
+  const el = document.getElementById('outageBanner');
+  const txt = document.getElementById('outageBannerText');
+  if (!el || !txt) return;
+  const ch = hc && hc.channel;
+  const pc = ch && ch.protocolCheck;
+  const failures = ch ? (Number(ch.consecutiveFailures) || 0) : 0;
+  const parts = [];
+  if (failures >= 2) parts.push('上游故障：通道探活连续失败 ' + failures + ' 次（仅告警，请求路径不受影响）');
+  if (pc && pc.skipped !== true && pc.ok === false) {
+    if (pc.kind === 'credential-invalid') {
+      parts.push('上游凭据失效：/alpha/whoami 返回 401' + (pc.keySuffix ? '（Key 尾号 ' + esc(pc.keySuffix) + '）' : '') + '，请重新登录');
+    } else if (pc.kind === 'protocol-changed') {
+      parts.push('上游协议可能变更：/alpha/whoami 响应结构不符合预期，请检查上游版本');
+    } else {
+      parts.push('上游协议探针不可达' + (pc.error ? '：' + esc(pc.error) : ''));
+    }
+  }
+  if (parts.length === 0) {
+    el.classList.add('hidden');
+    txt.innerHTML = '';
+    return;
+  }
+  txt.innerHTML = parts.map(p => '<p>' + p + '</p>').join('');
+  el.classList.remove('hidden');
 }
 function renderFeatureFlags(d) {
   const el = document.getElementById('featuresCardBody');
@@ -718,6 +773,7 @@ async function loadFeatures() {
   }
   renderChannelHealth(data.healthCheck);
   renderFeatureFlags(data);
+  updateOutageBanner(data.healthCheck);
 }
 
 async function refreshOverview() {

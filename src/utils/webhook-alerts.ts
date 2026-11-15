@@ -22,6 +22,7 @@
 // WEBHOOK_URL 未设置时返回 null，功能整体关闭）。
 // =============================================================================
 import { getUsageStats, getUsageHistory } from './usage-store.js';
+import { getChannelHealth } from './health-check.js';
 import { logger } from './logger.js';
 
 /** 当日已发标记：event -> 'YYYY-MM-DD'。 */
@@ -119,32 +120,70 @@ export async function notifyWebhook(event: string, payload: object): Promise<boo
 }
 
 /** 每个事件每自然日最多发送一次：先占坑再发送，发送失败当天也不重试。 */
-async function fireOncePerDay(event: string, value: number, threshold: number, summary: string): Promise<void> {
+async function fireOncePerDay(event: string, payload: object, summary: string): Promise<void> {
   const today = localDateKey(new Date());
   if (sentOn.get(event) === today) return;
   sentOn.set(event, today);
   logger.warn(`[WEBHOOK] ${summary} —— 已发送 ${event} 通知`);
-  await notifyWebhook(event, { value, threshold, summary });
+  // summary 统一并入 body：机器人端只看 body.summary，不感知事件差异。
+  await notifyWebhook(event, { ...payload, summary });
+}
+
+/**
+ * 上游故障判定（纯读 getChannelHealth，零网络请求）：
+ *   - 无凭据 HTTP 探活连续失败 ≥2 次（与 health-check.ts 的告警阈值一致）；或
+ *   - 协议形态探针最近一次结果 ok === false（credential-invalid / 
+ *     protocol-changed / unreachable 均算）。
+ */
+function upstreamDownState(): { down: boolean; summary: string; payload: object } {
+  const ch = getChannelHealth();
+  const failures = ch.consecutiveFailures;
+  const pc = ch.protocolCheck;
+  // 窄化为已执行且失败的结果，后续才能安全访问 kind/keySuffix。
+  const proto = pc && pc.skipped !== true && pc.ok === false ? pc : null;
+  if (!proto && failures < 2) return { down: false, summary: '', payload: {} };
+
+  let summary: string;
+  let payload: object;
+  if (proto?.kind === 'credential-invalid') {
+    summary = `上游凭据失效（/alpha/whoami 返回 401${proto.keySuffix ? `，Key 尾号 ${proto.keySuffix}` : ''}）—— 仅告警`;
+    payload = { kind: proto.kind, keySuffix: proto.keySuffix ?? null, consecutiveFailures: failures };
+  } else if (proto?.kind === 'protocol-changed') {
+    summary = '上游协议可能变更（/alpha/whoami 响应结构不符合预期）—— 仅告警';
+    payload = { kind: proto.kind, keySuffix: proto.keySuffix ?? null, consecutiveFailures: failures };
+  } else if (proto) {
+    summary = `上游协议探针不可达（${proto.error ?? `HTTP ${proto.status ?? '-'}`}）—— 仅告警`;
+    payload = { kind: proto.kind, keySuffix: proto.keySuffix ?? null, consecutiveFailures: failures };
+  } else {
+    summary = `上游探活连续失败 ${failures} 次 —— 仅告警，不影响请求路径`;
+    payload = { kind: 'unreachable', keySuffix: null, consecutiveFailures: failures };
+  }
+  return { down: true, summary, payload };
 }
 
 /**
  * 执行一轮阈值检查（定时器 tick 与手动调用共用）。
- * WEBHOOK_URL 未设置时直接返回（零网络请求）；两个阈值 env 均未设置时同样无事可做。
+ * WEBHOOK_URL 未设置时直接返回（零网络请求）。upstream-down 不依赖阈值 env
+ * （配置了 WEBHOOK_URL 即生效）；两个成本/错误率阈值 env 均未设置时跳过对应检查。
  */
 export async function checkThresholds(now: Date = new Date()): Promise<void> {
   if (!webhookEnabled()) return;
   const costThreshold = readEnvFloat('WEBHOOK_COST_USD');
   const rateThreshold = readEnvFloat('WEBHOOK_ERROR_RATE');
-  if (!Number.isFinite(costThreshold) && !Number.isFinite(rateThreshold)) return;
 
   try {
+    const down = upstreamDownState();
+    if (down.down) {
+      await fireOncePerDay('upstream-down', down.payload, down.summary);
+    }
+
+    if (!Number.isFinite(costThreshold) && !Number.isFinite(rateThreshold)) return;
     if (Number.isFinite(costThreshold)) {
       const cost = Number(getUsageStats().today?.cost ?? 0);
       if (cost >= costThreshold) {
         await fireOncePerDay(
           'daily-cost',
-          cost,
-          costThreshold,
+          { value: cost, threshold: costThreshold },
           `今日累计成本 $${cost.toFixed(2)} ≥ 阈值 $${costThreshold.toFixed(2)}`,
         );
       }
@@ -154,8 +193,7 @@ export async function checkThresholds(now: Date = new Date()): Promise<void> {
       if (total > 0 && rate >= rateThreshold) {
         await fireOncePerDay(
           'daily-error-rate',
-          rate,
-          rateThreshold,
+          { value: rate, threshold: rateThreshold },
           `当日错误率 ${(rate * 100).toFixed(1)}%（${failed}/${total}）≥ 阈值 ${(rateThreshold * 100).toFixed(0)}%`,
         );
       }
