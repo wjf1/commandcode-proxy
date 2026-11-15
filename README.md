@@ -111,10 +111,10 @@ npm run dev          # http://127.0.0.1:9090
 npm run build && npm start
 ```
 
-或独立二进制：
+或独立二进制（推荐直接从 [Releases](../../releases/latest) 下载——发版 Release 附带 win-x64 / linux-x64 / macos-x64 / macos-arm64 单文件可执行与 `SHA256SUMS.txt`，免 Node 环境直接运行）：
 
 ```bash
-npm run build:win    # dist/commandcode-proxy-v4.exe —— 零依赖运行（打包需 Node ≥22）
+npm run build:win    # dist/commandcode-proxy-v4.exe —— 本地打包（需 Node ≥22）
 ```
 
 > [!TIP]
@@ -401,8 +401,10 @@ npm run dev          # http://127.0.0.1:9090
 
 ```bash
 npm run build && npm start     # production
-npm run build:win              # standalone Windows exe
+npm run build:win              # standalone Windows exe (local build)
 ```
+
+Prefer a prebuilt binary: each tagged [Release](../../releases/latest) ships win-x64 / linux-x64 / macos-x64 / macos-arm64 single-file executables plus `SHA256SUMS.txt`, runnable without Node.
 
 On first launch the dashboard opens automatically. Log in via **Browser (OAuth)** or paste an API key; keys are also auto-loaded from `~/.commandcode/auth.json` or `COMMANDCODE_API_KEY`. Full config table: see the [中文配置](#config) section (env var names are identical).
 
