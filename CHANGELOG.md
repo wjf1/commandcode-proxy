@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### 安全
+
+- **补齐社区健康文件**：新增 `SECURITY.md`（私密漏洞上报通道 + 「本机服务定位 / 上游凭证保管 / 仪表盘管理面」安全边界说明）、`.github/ISSUE_TEMPLATE/`（bug / feature 模板与 config.yml）与 `PULL_REQUEST_TEMPLATE.md`（含测试、CHANGELOG、敏感信息自检清单）——GitHub 社区健康度从 42% 补齐至四件套完整。
+
 ## [4.23.0] - 2026-11-12
 
 ### 安全
