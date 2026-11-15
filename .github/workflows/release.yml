@@ -25,6 +25,8 @@ permissions:
 jobs:
   github-release:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -79,3 +81,78 @@ jobs:
             exit 0
           fi
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TITLE" --notes-file "$NOTES"
+
+  # ------------------------------------------------------------------
+  # 产物化：tag push 时随 Release 附带三平台单文件可执行（免 Node 环境即可运行）。
+  # @yao-pkg/pkg 打包，与本地 build:win 同一条链路（tsc → esbuild bundle → pkg）。
+  # 只在 tag push 事件执行：workflow_dispatch 补建历史版本时跳过，避免把当前
+  # main 的代码错附到旧 Release 上。
+  # ------------------------------------------------------------------
+  build-binaries:
+    needs: github-release
+    if: github.event_name == 'push'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            targets: node22-linux-x64
+          - os: macos-latest
+            targets: node22-macos-arm64 node22-macos-x64
+          - os: windows-latest
+            targets: node22-win-x64
+    runs-on: ${{ matrix.os }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.github-release.outputs.tag }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci || npm install
+
+      - name: 打包单文件可执行并上传到 Release
+        shell: bash
+        env:
+          TAG: ${{ needs.github-release.outputs.tag }}
+          TARGETS: ${{ matrix.targets }}
+        run: |
+          set -euo pipefail
+          npm run build:exe
+          VER="${TAG#v}"
+          FILES=""
+          for target in $TARGETS; do
+            plat="${target#node22-}"          # linux-x64 / macos-arm64 / win-x64
+            ext=""; case "$plat" in win-*) ext=".exe" ;; esac
+            out="$RUNNER_TEMP/commandcode-proxy-$VER-$plat$ext"
+            npx pkg dist/bundle.cjs --target "$target" --output "$out" --compress GZip
+            FILES="$FILES $out"
+          done
+          gh release upload "$TAG" $FILES --repo "$GITHUB_REPOSITORY" --clobber
+          echo "已上传:$FILES"
+
+  # ------------------------------------------------------------------
+  # 汇总全部平台产物生成 SHA256SUMS.txt（供下载方校验完整性）
+  # ------------------------------------------------------------------
+  checksums:
+    needs: [github-release, build-binaries]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: 生成并上传 SHA256SUMS
+        env:
+          TAG: ${{ needs.github-release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/assets" && cd "$RUNNER_TEMP/assets"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --clobber
+          sha256sum $(ls | grep -v '^SHA256SUMS') > SHA256SUMS.txt
+          gh release upload "$TAG" SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --clobber
+          cat SHA256SUMS.txt
