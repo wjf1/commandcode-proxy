@@ -55,7 +55,7 @@ jobs:
       # （vitest@5 在 20 上根本装不干净）。
       - name: Upload dist
         if: matrix.os == 'ubuntu-latest'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
