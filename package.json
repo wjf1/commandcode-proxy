@@ -60,6 +60,6 @@
   },
   "dependencies": {
     "fastify": "^5.12.8",
-    "undici": "^7.29.1"
+    "undici": "^8.12.4"
   }
 }
